@@ -1,0 +1,336 @@
+using SharpInference.Core.Backends;
+
+namespace Hartsy.Extensions.SharpInferenceBackend.Generation;
+
+/// <summary>
+/// Per-backend cache of loaded pipelines, with global LRU eviction across all
+/// architecture maps. One entry per (architecture, model name).
+///
+/// See docs/01-Architecture.md §Model + weight cache.
+/// </summary>
+public sealed class PipelineCache
+{
+    private readonly IBackend _backend;
+    private readonly int _maxEntries;
+    private readonly Dictionary<string, FluxCacheEntry> _flux = new();
+    private readonly Dictionary<string, Flux2CacheEntry> _flux2 = new();
+    private readonly Dictionary<string, ChromaCacheEntry> _chroma = new();
+    private readonly Dictionary<string, AuraFlowCacheEntry> _auraFlow = new();
+    private readonly Dictionary<string, FLiteCacheEntry> _fLite = new();
+    private readonly Dictionary<string, Ideogram4CacheEntry> _ideogram4 = new();
+    private readonly Dictionary<string, ZImageCacheEntry> _zImage = new();
+    private readonly Dictionary<string, AnimaCacheEntry> _anima = new();
+    private readonly Dictionary<string, HiDreamCacheEntry> _hiDream = new();
+    private readonly Dictionary<string, QwenImageCacheEntry> _qwenImage = new();
+    private readonly Dictionary<string, Sd15CacheEntry> _sd15 = new();
+    private readonly Dictionary<string, SdxlCacheEntry> _sdxl = new();
+    private readonly Dictionary<string, Sd3CacheEntry> _sd3 = new();
+    private readonly Dictionary<string, WanVideoCacheEntry> _wanVideo = new();
+    private readonly Dictionary<string, LtxVideoCacheEntry> _ltxVideo = new();
+    private readonly Dictionary<string, AceStepCacheEntry> _aceStep = new();
+    private readonly Dictionary<string, RefinerCacheEntry> _refiner = new();
+    private readonly Dictionary<string, IpAdapterCacheEntry> _ipAdapter = new();
+    private readonly object _lock = new();
+
+    public PipelineCache(IBackend backend, int maxEntries)
+    {
+        _backend = backend;
+        _maxEntries = Math.Max(1, maxEntries);
+    }
+
+    public FluxCacheEntry TryGetFlux(string modelName) => Touch(_flux, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
+    public Flux2CacheEntry TryGetFlux2(string modelName) => Touch(_flux2, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
+    public ChromaCacheEntry TryGetChroma(string modelName) => Touch(_chroma, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
+    public AuraFlowCacheEntry TryGetAuraFlow(string modelName) => Touch(_auraFlow, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
+    public FLiteCacheEntry TryGetFLite(string modelName) => Touch(_fLite, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
+    public Ideogram4CacheEntry TryGetIdeogram4(string modelName) => Touch(_ideogram4, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
+    public ZImageCacheEntry TryGetZImage(string modelName) => Touch(_zImage, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
+    public AnimaCacheEntry TryGetAnima(string modelName) => Touch(_anima, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
+    public HiDreamCacheEntry TryGetHiDream(string modelName) => Touch(_hiDream, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
+    public QwenImageCacheEntry TryGetQwenImage(string modelName) => Touch(_qwenImage, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
+    public Sd15CacheEntry TryGetSd15(string modelName) => Touch(_sd15, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
+    public SdxlCacheEntry TryGetSdxl(string modelName) => Touch(_sdxl, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
+    public Sd3CacheEntry TryGetSd3(string modelName) => Touch(_sd3, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
+    public WanVideoCacheEntry TryGetWanVideo(string modelName) => Touch(_wanVideo, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
+    public LtxVideoCacheEntry TryGetLtxVideo(string modelName) => Touch(_ltxVideo, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
+    public AceStepCacheEntry TryGetAceStep(string modelName) => Touch(_aceStep, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
+    public RefinerCacheEntry TryGetRefiner(string modelName) => Touch(_refiner, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
+    public IpAdapterCacheEntry TryGetIpAdapter(string filePath) => Touch(_ipAdapter, filePath, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
+
+    public void PutFlux(FluxCacheEntry entry) => Put(_flux, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
+    public void PutFlux2(Flux2CacheEntry entry) => Put(_flux2, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
+    public void PutChroma(ChromaCacheEntry entry) => Put(_chroma, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
+    public void PutAuraFlow(AuraFlowCacheEntry entry) => Put(_auraFlow, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
+    public void PutFLite(FLiteCacheEntry entry) => Put(_fLite, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
+    public void PutIdeogram4(Ideogram4CacheEntry entry) => Put(_ideogram4, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
+    public void PutZImage(ZImageCacheEntry entry) => Put(_zImage, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
+    public void PutAnima(AnimaCacheEntry entry) => Put(_anima, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
+    public void PutHiDream(HiDreamCacheEntry entry) => Put(_hiDream, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
+    public void PutQwenImage(QwenImageCacheEntry entry) => Put(_qwenImage, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
+    public void PutSd15(Sd15CacheEntry entry) => Put(_sd15, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
+    public void PutSdxl(SdxlCacheEntry entry) => Put(_sdxl, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
+    public void PutSd3(Sd3CacheEntry entry) => Put(_sd3, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
+    public void PutWanVideo(WanVideoCacheEntry entry) => Put(_wanVideo, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
+    public void PutLtxVideo(LtxVideoCacheEntry entry) => Put(_ltxVideo, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
+    public void PutAceStep(AceStepCacheEntry entry) => Put(_aceStep, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
+    public void PutRefiner(RefinerCacheEntry entry) => Put(_refiner, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
+    public void PutIpAdapter(IpAdapterCacheEntry entry) => Put(_ipAdapter, entry.FilePath, entry, e => e.LastUsedUtc = DateTime.UtcNow);
+
+    private TEntry Touch<TEntry>(Dictionary<string, TEntry> map, string key, Func<TEntry, DateTime> getTime, Action<TEntry, DateTime> setTime)
+        where TEntry : class
+    {
+        lock (_lock)
+        {
+            if (map.TryGetValue(key, out var entry))
+            {
+                setTime(entry, DateTime.UtcNow);
+                return entry;
+            }
+            return null;
+        }
+    }
+
+    private void Put<TEntry>(Dictionary<string, TEntry> map, string key, TEntry entry, Action<TEntry> stamp)
+        where TEntry : class
+    {
+        lock (_lock)
+        {
+            // If an old entry with the same name lives in this map, dispose it first
+            // (replacement). Cross-map collisions (same name in two arch maps) are
+            // unlikely; we leave them.
+            if (map.TryGetValue(key, out var old) && old is IDisposable oldDisp)
+            {
+                oldDisp.Dispose();
+            }
+            map[key] = entry;
+            stamp(entry);
+            EvictIfOverCapacity();
+        }
+    }
+
+    private int TotalCount => _flux.Count + _flux2.Count + _chroma.Count + _auraFlow.Count + _fLite.Count + _ideogram4.Count + _zImage.Count + _anima.Count + _hiDream.Count + _qwenImage.Count + _sd15.Count + _sdxl.Count + _sd3.Count + _wanVideo.Count + _ltxVideo.Count + _aceStep.Count + _refiner.Count + _ipAdapter.Count;
+
+    /// <summary>Evict the globally-oldest entry across all architecture maps until we're
+    /// at or under <see cref="_maxEntries"/>.</summary>
+    private void EvictIfOverCapacity()
+    {
+        while (TotalCount > _maxEntries)
+        {
+            DateTime oldestTime = DateTime.MaxValue;
+            Action evictAction = null;
+
+            foreach (var kv in _flux)
+            {
+                if (kv.Value.LastUsedUtc < oldestTime)
+                {
+                    oldestTime = kv.Value.LastUsedUtc;
+                    string key = kv.Key;
+                    evictAction = () => { _flux[key].Dispose(); _flux.Remove(key); };
+                }
+            }
+            foreach (var kv in _flux2)
+            {
+                if (kv.Value.LastUsedUtc < oldestTime)
+                {
+                    oldestTime = kv.Value.LastUsedUtc;
+                    string key = kv.Key;
+                    evictAction = () => { _flux2[key].Dispose(); _flux2.Remove(key); };
+                }
+            }
+            foreach (var kv in _chroma)
+            {
+                if (kv.Value.LastUsedUtc < oldestTime)
+                {
+                    oldestTime = kv.Value.LastUsedUtc;
+                    string key = kv.Key;
+                    evictAction = () => { _chroma[key].Dispose(); _chroma.Remove(key); };
+                }
+            }
+            foreach (var kv in _auraFlow)
+            {
+                if (kv.Value.LastUsedUtc < oldestTime)
+                {
+                    oldestTime = kv.Value.LastUsedUtc;
+                    string key = kv.Key;
+                    evictAction = () => { _auraFlow[key].Dispose(); _auraFlow.Remove(key); };
+                }
+            }
+            foreach (var kv in _fLite)
+            {
+                if (kv.Value.LastUsedUtc < oldestTime)
+                {
+                    oldestTime = kv.Value.LastUsedUtc;
+                    string key = kv.Key;
+                    evictAction = () => { _fLite[key].Dispose(); _fLite.Remove(key); };
+                }
+            }
+            foreach (var kv in _ideogram4)
+            {
+                if (kv.Value.LastUsedUtc < oldestTime)
+                {
+                    oldestTime = kv.Value.LastUsedUtc;
+                    string key = kv.Key;
+                    evictAction = () => { _ideogram4[key].Dispose(); _ideogram4.Remove(key); };
+                }
+            }
+            foreach (var kv in _zImage)
+            {
+                if (kv.Value.LastUsedUtc < oldestTime)
+                {
+                    oldestTime = kv.Value.LastUsedUtc;
+                    string key = kv.Key;
+                    evictAction = () => { _zImage[key].Dispose(); _zImage.Remove(key); };
+                }
+            }
+            foreach (var kv in _anima)
+            {
+                if (kv.Value.LastUsedUtc < oldestTime)
+                {
+                    oldestTime = kv.Value.LastUsedUtc;
+                    string key = kv.Key;
+                    evictAction = () => { _anima[key].Dispose(); _anima.Remove(key); };
+                }
+            }
+            foreach (var kv in _hiDream)
+            {
+                if (kv.Value.LastUsedUtc < oldestTime)
+                {
+                    oldestTime = kv.Value.LastUsedUtc;
+                    string key = kv.Key;
+                    evictAction = () => { _hiDream[key].Dispose(); _hiDream.Remove(key); };
+                }
+            }
+            foreach (var kv in _qwenImage)
+            {
+                if (kv.Value.LastUsedUtc < oldestTime)
+                {
+                    oldestTime = kv.Value.LastUsedUtc;
+                    string key = kv.Key;
+                    evictAction = () => { _qwenImage[key].Dispose(); _qwenImage.Remove(key); };
+                }
+            }
+            foreach (var kv in _sd15)
+            {
+                if (kv.Value.LastUsedUtc < oldestTime)
+                {
+                    oldestTime = kv.Value.LastUsedUtc;
+                    string key = kv.Key;
+                    evictAction = () => { _sd15[key].Dispose(); _sd15.Remove(key); };
+                }
+            }
+            foreach (var kv in _sdxl)
+            {
+                if (kv.Value.LastUsedUtc < oldestTime)
+                {
+                    oldestTime = kv.Value.LastUsedUtc;
+                    string key = kv.Key;
+                    evictAction = () => { _sdxl[key].Dispose(); _sdxl.Remove(key); };
+                }
+            }
+            foreach (var kv in _sd3)
+            {
+                if (kv.Value.LastUsedUtc < oldestTime)
+                {
+                    oldestTime = kv.Value.LastUsedUtc;
+                    string key = kv.Key;
+                    evictAction = () => { _sd3[key].Dispose(); _sd3.Remove(key); };
+                }
+            }
+            foreach (var kv in _wanVideo)
+            {
+                if (kv.Value.LastUsedUtc < oldestTime)
+                {
+                    oldestTime = kv.Value.LastUsedUtc;
+                    string key = kv.Key;
+                    evictAction = () => { _wanVideo[key].Dispose(); _wanVideo.Remove(key); };
+                }
+            }
+            foreach (var kv in _ltxVideo)
+            {
+                if (kv.Value.LastUsedUtc < oldestTime)
+                {
+                    oldestTime = kv.Value.LastUsedUtc;
+                    string key = kv.Key;
+                    evictAction = () => { _ltxVideo[key].Dispose(); _ltxVideo.Remove(key); };
+                }
+            }
+            foreach (var kv in _aceStep)
+            {
+                if (kv.Value.LastUsedUtc < oldestTime)
+                {
+                    oldestTime = kv.Value.LastUsedUtc;
+                    string key = kv.Key;
+                    evictAction = () => { _aceStep[key].Dispose(); _aceStep.Remove(key); };
+                }
+            }
+            foreach (var kv in _refiner)
+            {
+                if (kv.Value.LastUsedUtc < oldestTime)
+                {
+                    oldestTime = kv.Value.LastUsedUtc;
+                    string key = kv.Key;
+                    evictAction = () => { _refiner[key].Dispose(); _refiner.Remove(key); };
+                }
+            }
+            foreach (var kv in _ipAdapter)
+            {
+                if (kv.Value.LastUsedUtc < oldestTime)
+                {
+                    oldestTime = kv.Value.LastUsedUtc;
+                    string key = kv.Key;
+                    evictAction = () => { _ipAdapter[key].Dispose(); _ipAdapter.Remove(key); };
+                }
+            }
+
+            if (evictAction is null) break;
+            evictAction();
+        }
+    }
+
+    public bool EvictAll()
+    {
+        lock (_lock)
+        {
+            if (TotalCount == 0) return false;
+            foreach (var entry in _flux.Values) entry.Dispose();
+            foreach (var entry in _flux2.Values) entry.Dispose();
+            foreach (var entry in _chroma.Values) entry.Dispose();
+            foreach (var entry in _auraFlow.Values) entry.Dispose();
+            foreach (var entry in _fLite.Values) entry.Dispose();
+            foreach (var entry in _ideogram4.Values) entry.Dispose();
+            foreach (var entry in _zImage.Values) entry.Dispose();
+            foreach (var entry in _anima.Values) entry.Dispose();
+            foreach (var entry in _hiDream.Values) entry.Dispose();
+            foreach (var entry in _qwenImage.Values) entry.Dispose();
+            foreach (var entry in _sd15.Values) entry.Dispose();
+            foreach (var entry in _sdxl.Values) entry.Dispose();
+            foreach (var entry in _sd3.Values) entry.Dispose();
+            foreach (var entry in _wanVideo.Values) entry.Dispose();
+            foreach (var entry in _ltxVideo.Values) entry.Dispose();
+            foreach (var entry in _aceStep.Values) entry.Dispose();
+            foreach (var entry in _refiner.Values) entry.Dispose();
+            foreach (var entry in _ipAdapter.Values) entry.Dispose();
+            _flux.Clear();
+            _flux2.Clear();
+            _chroma.Clear();
+            _auraFlow.Clear();
+            _fLite.Clear();
+            _ideogram4.Clear();
+            _zImage.Clear();
+            _anima.Clear();
+            _hiDream.Clear();
+            _qwenImage.Clear();
+            _sd15.Clear();
+            _sdxl.Clear();
+            _sd3.Clear();
+            _wanVideo.Clear();
+            _ltxVideo.Clear();
+            _aceStep.Clear();
+            _refiner.Clear();
+            _ipAdapter.Clear();
+            return true;
+        }
+    }
+
+    public void DisposeAll() => EvictAll();
+}

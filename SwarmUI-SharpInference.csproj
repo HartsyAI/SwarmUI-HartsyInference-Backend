@@ -1,0 +1,121 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+    <PropertyGroup>
+        <AssemblyName>SwarmExtensionSharpInference</AssemblyName>
+        <!-- Required for the tensor-slice helper in Generation/ZImageLoader.cs which uses
+             pointer math (Buffer.MemoryCopy + byte*). The slice mirrors what
+             SharpInference's own tests do; it's the most efficient way to extract the
+             "first realLen positions" from an embedding tensor without going through a
+             managed copy. -->
+        <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+        <!-- Path to the sibling SharpInference repo. Override on command line if it lives elsewhere. -->
+        <SharpInferenceRoot Condition=" '$(SharpInferenceRoot)' == '' ">$(MSBuildThisFileDirectory)..\..\..\..\SharpInference</SharpInferenceRoot>
+        <SharpInferenceBin>$(SharpInferenceRoot)\src\$(_Pkg)\bin\$(Configuration)\net8.0</SharpInferenceBin>
+    </PropertyGroup>
+    <Import Project="../../SwarmUI.extension.props" />
+
+    <!-- Reference Microsoft.ML.Tokenizers so MSBuild restores the package and the
+         compiler sees the types. Then explicitly copy ONLY the two runtime DLLs we
+         actually need (the package + its sole net8.0 transitive: Google.Protobuf, used
+         by SentencePieceTokenizer's protobuf parser).
+
+         We deliberately do NOT enable <CopyLocalLockFileAssemblies>true</> — that
+         would also drag in every Microsoft.* and SixLabors.* DLL that SwarmUI itself
+         already loads in-process, which risks duplicate-assembly / version-skew at
+         runtime. The Reference HintPath pattern that the rest of the file uses is
+         explicit for the same reason; we mirror it here.
+
+         Neither Microsoft.ML.Tokenizers nor Google.Protobuf is in SwarmUI's
+         live_release/ directory, so there's no in-process collision. -->
+    <ItemGroup>
+        <PackageReference Include="Microsoft.ML.Tokenizers" Version="2.0.0" PrivateAssets="all" />
+    </ItemGroup>
+    <ItemGroup>
+        <Content Include="$(NuGetPackageRoot)\microsoft.ml.tokenizers\2.0.0\lib\net8.0\Microsoft.ML.Tokenizers.dll">
+            <Link>Microsoft.ML.Tokenizers.dll</Link>
+            <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+        </Content>
+        <!-- Google.Protobuf 3.30.2 ships net45/net5.0/netstandardX.X but no net8.0 — net8.0
+             resolves down to net5.0 via the standard TFM fallback. -->
+        <Content Include="$(NuGetPackageRoot)\google.protobuf\3.30.2\lib\net5.0\Google.Protobuf.dll">
+            <Link>Google.Protobuf.dll</Link>
+            <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+        </Content>
+    </ItemGroup>
+
+    <!--
+        Reference SharpInference via pre-built HintPath DLLs (the same pattern Swarm
+        itself uses to reference SwarmUI.dll in SwarmUI.extension.props, and the same
+        pattern every working Swarm extension uses for external assemblies).
+
+        Using <ProjectReference> instead breaks package resolution when Swarm's launcher
+        passes -p:BaseIntermediateOutputPath (see ExtensionsManager.cs:187): the custom
+        obj path confuses NuGet asset resolution for transitively-referenced projects.
+
+        SharpInference.sln must be built at least once for net8.0 before the extension
+        will compile. The PreBuild target below does that automatically.
+    -->
+    <ItemGroup>
+        <Reference Include="SharpInference.Core">
+            <HintPath>$(SharpInferenceRoot)\src\SharpInference.Core\bin\$(Configuration)\net8.0\SharpInference.Core.dll</HintPath>
+            <Private>true</Private>
+        </Reference>
+        <Reference Include="SharpInference.ModelHandler">
+            <HintPath>$(SharpInferenceRoot)\src\SharpInference.ModelHandler\bin\$(Configuration)\net8.0\SharpInference.ModelHandler.dll</HintPath>
+            <Private>true</Private>
+        </Reference>
+        <Reference Include="SharpInference.Tokenizers">
+            <HintPath>$(SharpInferenceRoot)\src\SharpInference.Tokenizers\bin\$(Configuration)\net8.0\SharpInference.Tokenizers.dll</HintPath>
+            <Private>true</Private>
+        </Reference>
+        <Reference Include="SharpInference.Diffusion">
+            <HintPath>$(SharpInferenceRoot)\src\SharpInference.Diffusion\bin\$(Configuration)\net8.0\SharpInference.Diffusion.dll</HintPath>
+            <Private>true</Private>
+        </Reference>
+        <Reference Include="SharpInference.Cpu">
+            <HintPath>$(SharpInferenceRoot)\src\SharpInference.Cpu\bin\$(Configuration)\net8.0\SharpInference.Cpu.dll</HintPath>
+            <Private>true</Private>
+        </Reference>
+        <Reference Include="SharpInference.Cuda">
+            <HintPath>$(SharpInferenceRoot)\src\SharpInference.Cuda\bin\$(Configuration)\net8.0\SharpInference.Cuda.dll</HintPath>
+            <Private>true</Private>
+        </Reference>
+        <Reference Include="SharpInference.Vulkan">
+            <HintPath>$(SharpInferenceRoot)\src\SharpInference.Vulkan\bin\$(Configuration)\net8.0\SharpInference.Vulkan.dll</HintPath>
+            <Private>true</Private>
+        </Reference>
+        <Reference Include="SharpInference.Video">
+            <HintPath>$(SharpInferenceRoot)\src\SharpInference.Video\bin\$(Configuration)\net8.0\SharpInference.Video.dll</HintPath>
+            <Private>true</Private>
+        </Reference>
+    </ItemGroup>
+
+    <!--
+        Ship CUDA PTX kernels and Vulkan SPIR-V shaders alongside the extension's DLLs.
+        SharpInference's own csprojs use <Content> items to copy these to their bin/
+        output, but those don't propagate through <Reference HintPath>. We mirror the
+        SharpInference rules here so the kernels land in our output dir, where the
+        backend points CudaBackend(..., ptxDir) and VulkanBackend(..., spvDir).
+    -->
+    <ItemGroup>
+        <Content Include="$(SharpInferenceRoot)\src\SharpInference.Cuda\Ptx\*.ptx"
+                 Link="Ptx\%(Filename)%(Extension)">
+            <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+        </Content>
+        <Content Include="$(SharpInferenceRoot)\native\vulkan\build\*.spv"
+                 Link="Spirv\%(Filename)%(Extension)">
+            <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+        </Content>
+    </ItemGroup>
+
+    <!--
+        Pre-build target: ensure SharpInference is built for net8.0 before our compile.
+        Runs in an isolated subprocess so it doesn't inherit any of Swarm's global
+        MSBuild properties (BaseIntermediateOutputPath etc.).
+    -->
+    <Target Name="EnsureSharpInferenceBuilt" BeforeTargets="ResolveAssemblyReferences"
+            Condition=" !Exists('$(SharpInferenceRoot)\src\SharpInference.Core\bin\$(Configuration)\net8.0\SharpInference.Core.dll') ">
+        <Message Importance="high" Text="SharpInference DLLs not found for $(Configuration)/net8.0 — building $(SharpInferenceRoot)\SharpInference.sln..." />
+        <Exec Command="dotnet build &quot;$(SharpInferenceRoot)\SharpInference.sln&quot; -c $(Configuration) -f net8.0 --nologo -v minimal"
+              WorkingDirectory="$(SharpInferenceRoot)" />
+    </Target>
+</Project>
