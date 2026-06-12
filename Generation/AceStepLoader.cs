@@ -206,30 +206,11 @@ public static class AceStepLoader
     }
 
     /// <summary>Downloads the official lyric tokenizer JSON once and exports the <c>vocab.json</c> +
-    /// <c>merges.txt</c> pair <c>AceStepLyricTokenizer</c> consumes, under <c>Clip/AceStep/</c> (non-safetensors
-    /// files there don't appear in Swarm's model lists).</summary>
+    /// <c>merges.txt</c> pair <c>AceStepLyricTokenizer</c> consumes, under <c>Clip/AceStep/</c>.</summary>
     private static (string VocabPath, string MergesPath) EnsureLyricTokenizerFiles(Action<string> log)
     {
         string dir = Path.Combine(Program.T2IModelSets["Clip"].DownloadFolderPath, "AceStep");
-        string vocabPath = Path.Combine(dir, "lyric_vocab.json");
-        string mergesPath = Path.Combine(dir, "lyric_merges.txt");
-        if (File.Exists(vocabPath) && File.Exists(mergesPath))
-        {
-            return (vocabPath, mergesPath);
-        }
-        Directory.CreateDirectory(dir);
-        string rawPath = Path.Combine(dir, "lyric_tokenizer_raw.json");
-        log("Downloading ACE-Step lyric tokenizer vocab (one-time)...");
-        Utilities.DownloadFile(LyricVocabUrl, rawPath, null).Wait();
-        JObject tokenizer = JObject.Parse(File.ReadAllText(rawPath));
-        JObject vocab = (JObject)tokenizer["model"]!["vocab"]!;
-        File.WriteAllText(vocabPath, vocab.ToString());
-        IEnumerable<string> merges = ((JArray)tokenizer["model"]!["merges"]!)
-            .Select(m => m is JArray pair ? $"{pair[0]} {pair[1]}" : m.ToString());
-        File.WriteAllLines(mergesPath, merges);
-        File.Delete(rawPath);
-        log("  Lyric tokenizer vocab + merges exported.");
-        return (vocabPath, mergesPath);
+        return TokenizerExport.EnsureVocabMerges(LyricVocabUrl, dir, "lyric", log);
     }
 }
 

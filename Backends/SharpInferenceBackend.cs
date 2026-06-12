@@ -385,8 +385,48 @@ public class SharpInferenceBackend : AbstractT2IBackend
             {
                 await Task.Run(() =>
                 {
-                    AceStepCacheEntry entry = AceStepLoader.Load(_backend, model, input, msg => AddLoadStatus(msg));
-                    _cache.PutAceStep(entry);
+                    if (model.ModelClass?.ID == AceStepLoader.AceStepV1ClassId)
+                    {
+                        AceStepCacheEntry entry = AceStepLoader.Load(_backend, model, input, msg => AddLoadStatus(msg));
+                        _cache.PutAceStep(entry);
+                    }
+                    else
+                    {
+                        AceStep15CacheEntry entry = AceStep15Loader.Load(_backend, model, input, msg => AddLoadStatus(msg));
+                        _cache.PutAceStep15(entry);
+                    }
+                });
+            }
+            else if (compat == MusicGenLoader.MusicGenCompatClassId)
+            {
+                await Task.Run(() =>
+                {
+                    MusicGenCacheEntry entry = MusicGenLoader.Load(_backend, model, input, msg => AddLoadStatus(msg));
+                    _cache.PutMusicGen(entry);
+                });
+            }
+            else if (compat == YueLoader.YueCompatClassId)
+            {
+                await Task.Run(() =>
+                {
+                    YueCacheEntry entry = YueLoader.Load(_backend, model, input, msg => AddLoadStatus(msg));
+                    _cache.PutYue(entry);
+                });
+            }
+            else if (compat == LanceLoader.LanceCompatClassId || compat == LanceLoader.LanceVideoCompatClassId)
+            {
+                await Task.Run(() =>
+                {
+                    LanceCacheEntry entry = LanceLoader.Load(_backend, model, input, msg => AddLoadStatus(msg));
+                    _cache.PutLance(entry);
+                });
+            }
+            else if (compat == LensLoader.LensCompatClassId)
+            {
+                await Task.Run(() =>
+                {
+                    LensCacheEntry entry = LensLoader.Load(_backend, model, input, msg => AddLoadStatus(msg));
+                    _cache.PutLens(entry);
                 });
             }
             else
@@ -674,10 +714,43 @@ public class SharpInferenceBackend : AbstractT2IBackend
                 }
                 if (compat == AceStepLoader.AceStepCompatClassId)
                 {
-                    AceStepCacheEntry entry = _cache.TryGetAceStep(model.Name)
-                        ?? throw new InvalidOperationException("ACE-Step model loaded but not in cache.");
-                    // v1.5 checkpoints / LoRA / reference-audio refused upfront in IsValidForThisBackend.
-                    return AceStepLoader.Generate(entry, _backend, input, progressBridge, cancel);
+                    if (model.ModelClass?.ID == AceStepLoader.AceStepV1ClassId)
+                    {
+                        AceStepCacheEntry entry = _cache.TryGetAceStep(model.Name)
+                            ?? throw new InvalidOperationException("ACE-Step model loaded but not in cache.");
+                        // LoRA / reference-audio refused upfront in IsValidForThisBackend.
+                        return AceStepLoader.Generate(entry, _backend, input, progressBridge, cancel);
+                    }
+                    AceStep15CacheEntry entry15 = _cache.TryGetAceStep15(model.Name)
+                        ?? throw new InvalidOperationException("ACE-Step 1.5 model loaded but not in cache.");
+                    // Turbo: fixed 8-step no-CFG; timbre/cover hooks are engine Phase-2 TODOs.
+                    return AceStep15Loader.Generate(entry15, _backend, input, progressBridge, cancel);
+                }
+                if (compat == MusicGenLoader.MusicGenCompatClassId)
+                {
+                    MusicGenCacheEntry entry = _cache.TryGetMusicGen(model.Name)
+                        ?? throw new InvalidOperationException("MusicGen model loaded but not in cache.");
+                    return MusicGenLoader.Generate(entry, _backend, input, progressBridge, cancel);
+                }
+                if (compat == YueLoader.YueCompatClassId)
+                {
+                    YueCacheEntry entry = _cache.TryGetYue(model.Name)
+                        ?? throw new InvalidOperationException("YuE model loaded but not in cache.");
+                    return YueLoader.Generate(entry, _backend, input, progressBridge, cancel);
+                }
+                if (compat == LanceLoader.LanceCompatClassId || compat == LanceLoader.LanceVideoCompatClassId)
+                {
+                    LanceCacheEntry entry = _cache.TryGetLance(model.Name)
+                        ?? throw new InvalidOperationException("Lance model loaded but not in cache.");
+                    // LoRA / editing / I2V refused upfront in IsValidForThisBackend (T2I + T2V only).
+                    return LanceLoader.Generate(entry, _backend, input, progressBridge, cancel);
+                }
+                if (compat == LensLoader.LensCompatClassId)
+                {
+                    LensCacheEntry entry = _cache.TryGetLens(model.Name)
+                        ?? throw new InvalidOperationException("Lens model loaded but not in cache.");
+                    // LoRA / img2img / inpaint not implemented for Lens — refused upfront in IsValidForThisBackend.
+                    return LensLoader.Generate(entry, input, progressBridge, cancel);
                 }
                 throw new InvalidOperationException($"No generator wired for compat '{compat}'.");
             }, cancel);
@@ -835,21 +908,17 @@ public class SharpInferenceBackend : AbstractT2IBackend
             return false;
         }
 
-        // Audio architecture (ACE-Step): the engine implements v1 (3.5B DiT); the extension registers
-        // the v1 model class under Swarm's ace-step-1_5 compat (so the Text2Audio params light up).
-        // Refuse actual v1.5 checkpoints, plus image-only features that make no sense for audio.
-        if (compat == AceStepLoader.AceStepCompatClassId)
+        // Audio architectures (ACE-Step v1 + v1.5, MusicGen, YuE): both ACE generations now have
+        // engine pipelines — v1 checkpoints route to AceStepLoader, anything else under the
+        // ace-step-1_5 compat routes to AceStep15Loader. Refuse image-only features that make no
+        // sense for audio.
+        if (compat == AceStepLoader.AceStepCompatClassId
+            || compat == MusicGenLoader.MusicGenCompatClassId
+            || compat == YueLoader.YueCompatClassId)
         {
-            if (model.ModelClass?.ID != AceStepLoader.AceStepV1ClassId)
-            {
-                input.RefusalReasons.Add(
-                    "SharpInference: this is an ACE-Step 1.5 checkpoint; the SharpInference engine currently implements "
-                    + "ACE-Step v1 (3.5B). Use a v1 checkpoint (ACE-Step/ACE-Step-v1-3.5B transformer) or the ComfyUI backend for v1.5.");
-                return false;
-            }
             if (input.Get(T2IParamTypes.InitImage) is not null)
             {
-                input.RefusalReasons.Add("SharpInference: ACE-Step is a music model — remove the Init Image.");
+                input.RefusalReasons.Add("SharpInference: this is a music model — remove the Init Image.");
                 return false;
             }
             if (input.Get(T2IParamTypes.RefinerModel) is not null)
@@ -857,9 +926,9 @@ public class SharpInferenceBackend : AbstractT2IBackend
                 input.RefusalReasons.Add("SharpInference: refiners can't run over audio outputs. Remove the Refiner Model selection.");
                 return false;
             }
-            if (input.TryGet(T2IParamTypes.Loras, out List<string> aceLoras) && aceLoras is not null && aceLoras.Count > 0)
+            if (input.TryGet(T2IParamTypes.Loras, out List<string> audioLoras) && audioLoras is not null && audioLoras.Count > 0)
             {
-                input.RefusalReasons.Add("SharpInference: LoRAs aren't supported for ACE-Step yet. Remove the LoRA selection.");
+                input.RefusalReasons.Add("SharpInference: LoRAs aren't supported for music models yet. Remove the LoRA selection.");
                 return false;
             }
             return true;
@@ -870,13 +939,22 @@ public class SharpInferenceBackend : AbstractT2IBackend
         //   - End frame / video-extend / audio params: Comfy-only flows we don't implement.
         //   - Refiner over a video output would feed mp4 bytes into the SDXL refiner — refuse.
         bool isVideoArch = compat == WanVideoLoader.Wan22_5BCompatClassId
-            || compat == LtxVideoLoader.LtxVideoCompatClassId;
+            || compat == LtxVideoLoader.LtxVideoCompatClassId
+            || compat == LanceLoader.LanceVideoCompatClassId;
         if (isVideoArch)
         {
             if (input.Get(T2IParamTypes.InitImage) is not null && compat == LtxVideoLoader.LtxVideoCompatClassId)
             {
                 input.RefusalReasons.Add(
                     "SharpInference: image-to-video isn't supported for LTX-Video (text-to-video only). "
+                    + "Remove the Init Image, or use a Wan 2.2 TI2V model for image-to-video.");
+                return false;
+            }
+            if (input.Get(T2IParamTypes.InitImage) is not null && compat == LanceLoader.LanceVideoCompatClassId)
+            {
+                input.RefusalReasons.Add(
+                    "SharpInference: image-to-video isn't supported for Lance yet (text-to-video only — the "
+                    + "image-editing/I2V path needs the frozen Qwen2.5-VL ViT, which the engine defers). "
                     + "Remove the Init Image, or use a Wan 2.2 TI2V model for image-to-video.");
                 return false;
             }
@@ -1122,7 +1200,12 @@ public class SharpInferenceBackend : AbstractT2IBackend
             QwenImageLoader.QwenImageCompatClassId => _cache.TryGetQwenImage(modelName) is not null,
             WanVideoLoader.Wan22_5BCompatClassId => _cache.TryGetWanVideo(modelName) is not null,
             LtxVideoLoader.LtxVideoCompatClassId => _cache.TryGetLtxVideo(modelName) is not null,
-            AceStepLoader.AceStepCompatClassId => _cache.TryGetAceStep(modelName) is not null,
+            AceStepLoader.AceStepCompatClassId => _cache.TryGetAceStep(modelName) is not null || _cache.TryGetAceStep15(modelName) is not null,
+            MusicGenLoader.MusicGenCompatClassId => _cache.TryGetMusicGen(modelName) is not null,
+            YueLoader.YueCompatClassId => _cache.TryGetYue(modelName) is not null,
+            LanceLoader.LanceCompatClassId => _cache.TryGetLance(modelName) is not null,
+            LanceLoader.LanceVideoCompatClassId => _cache.TryGetLance(modelName) is not null,
+            LensLoader.LensCompatClassId => _cache.TryGetLens(modelName) is not null,
             _ => false,
         };
     }

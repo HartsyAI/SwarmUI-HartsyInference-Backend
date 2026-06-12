@@ -31,8 +31,13 @@ public static class ModelSupport
         QwenImageLoader.QwenImageCompatClassId,   // "qwen-image" — 20B MMDiT + Qwen2.5-VL-7B encoder
         WanVideoLoader.Wan22_5BCompatClassId,     // "wan-22-5b" — Wan2.2 TI2V-5B text-to-video (I2V pending VAE encoder)
         LtxVideoLoader.LtxVideoCompatClassId,     // "lightricks-ltx-video" — LTX-Video 0.9 single-file text-to-video
-        AceStepLoader.AceStepCompatClassId,       // "ace-step-1_5" compat shared by our ACE-Step v1 class; validation
-                                                  // refuses actual v1.5 checkpoints (engine implements v1)
+        AceStepLoader.AceStepCompatClassId,       // "ace-step-1_5" — v1 checkpoints route to AceStepLoader, real v1.5
+                                                  // checkpoints to AceStep15Loader (2B turbo, validation-pending numerics)
+        MusicGenLoader.MusicGenCompatClassId,     // "musicgen" — Meta MusicGen small/medium/large (self-contained checkpoint)
+        YueLoader.YueCompatClassId,               // "yue" — YuE stage-1 lyrics-to-music (folder model; needs tokenizer.model + xcodec.safetensors)
+        LanceLoader.LanceCompatClassId,           // "lance" — ByteDance Lance 3B folder-checkpoint T2I (validation-pending numerics)
+        LanceLoader.LanceVideoCompatClassId,      // "lance-video" — Lance 3B Video T2V (validation-pending numerics)
+        LensLoader.LensCompatClassId,             // "lens" — Microsoft Lens 3.8B MMDiT + GPT-OSS-20B encoder (Comfy split files)
         // TODO: SdxlLoader.SdxlRefinerCompatClassId once we wire the refiner two-pass flow.
     };
 
@@ -43,8 +48,19 @@ public static class ModelSupport
     /// for these should suggest using ComfyUI in the meantime, not "this won't work."</summary>
     private static readonly Dictionary<string, string> _pendingArchs = new()
     {
+        // NOTE (2026-06-10 verification): these two have NO engine pipeline despite earlier notes —
+        // Chroma Radiance / Zeta-Chroma need SharpInference work first, not just a loader.
         ["chroma-radiance"] = "Chroma Radiance",
         ["zeta-chroma"] = "Zeta-Chroma",
+        // Kandinsky 5 / OmniGen 2 / Lumina 2: the SharpInference pipelines exist and pass structural
+        // tests, but their conditioning encoders are NOT faithfully implemented — the upstream E2E
+        // tests feed PRE-COMPUTED embeddings from .bin dumps (Kandinsky: dual Qwen2.5-VL + CLIP-L with
+        // an unverified prompt template; OmniGen 2: Qwen2.5-VL; Lumina 2: Gemma-2-2B, and SharpInference
+        // has no Gemma tokenizer at all). Wiring a loader with guessed templates would produce
+        // semantically-wrong conditioning — same reason HunyuanImage is refused below.
+        ["kandinsky5-imglite"] = "Kandinsky 5 Image Lite (engine pipeline needs pre-computed Qwen2.5-VL + CLIP-L embeddings — live encode path unverified)",
+        ["omnigen-2"] = "OmniGen 2 (engine pipeline needs pre-computed Qwen2.5-VL embeddings — live encode path unverified)",
+        ["lumina-2"] = "Lumina-Image-2.0 (no Gemma-2 tokenizer/encoder path in SharpInference yet)",
         // ErnieImage: pipeline + Ministral3B encoder preset both exist, but the SharpInference
         // upstream test uses HARDCODED token IDs ([1,2,3,...]) — there is no real Ernie tokenizer
         // implementation. Wiring a loader without a tokenizer means the user's prompt would

@@ -108,6 +108,16 @@ public static class SideModels
         Hash: "cb5636d852a0ea6a9075ab1bef496c0db7aef13c02350571e388aea959c5c0b4",
         DisplayName: "Qwen2.5-VL-7B (fp8 scaled)");
 
+    /// <summary>Qwen3-Embedding-0.6B — ACE-Step 1.5's style + lyric conditioner (1024-d states).
+    /// Official Qwen single-file release. TODO: pin the SHA-256 (entry ships hash-less; the
+    /// downloader logs a no-verification warning until it's added).</summary>
+    public static readonly Entry Qwen3Embedding06B = new(
+        CanonicalName: "qwen3_embedding_0.6b.safetensors",
+        FolderType: "Clip",
+        Url: "https://huggingface.co/Qwen/Qwen3-Embedding-0.6B/resolve/main/model.safetensors",
+        Hash: "",
+        DisplayName: "Qwen3-Embedding-0.6B (ACE-Step 1.5)");
+
     /// <summary>Qwen3-4B fp8-mixed — used by Z-Image and Flux.2 Klein 4B. Same file, both
     /// architectures share it once it's downloaded.</summary>
     public static readonly Entry Qwen3_4B = new(
@@ -146,6 +156,16 @@ public static class SideModels
         Url: "https://huggingface.co/Comfy-Org/ERNIE-Image/resolve/main/text_encoders/ministral-3-3b.safetensors",
         Hash: "49a750a128863854eac7d85e1a277a7b44bf6ec3646405b84686dfeeca3708ca",
         DisplayName: "Ministral 3.3B (Ernie)");
+
+    /// <summary>GPT-OSS-20B (NVFP4) — Microsoft Lens' text encoder (MoE feature extractor with
+    /// multi-layer tap). Canonical name/URL/hash match <c>Comfy-Org/Lens</c> so the 13 GB file is
+    /// shared with a Comfy install; the engine's NVFP4 codec dequants at load.</summary>
+    public static readonly Entry LensGptOss20b = new(
+        CanonicalName: "gpt_oss_20b_nvfp4.safetensors",
+        FolderType: "Clip",
+        Url: "https://huggingface.co/Comfy-Org/Lens/resolve/main/text_encoders/gpt_oss_20b_nvfp4.safetensors",
+        Hash: "103d7759c720627e5ffdcb0d885595695085dad4201fa6a522a84d4b86335ca0",
+        DisplayName: "GPT-OSS-20B (nvfp4) — Lens");
 
     /// <summary>UMT5-base — ACE-Step v1's style/genre text encoder (768-d hidden states). The official
     /// repo bundles it under <c>umt5-base/model.safetensors</c>; pairs with the embedded umT5 SentencePiece
@@ -234,6 +254,16 @@ public static class SideModels
         Url: "https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/vae/wan2.2_vae.safetensors",
         Hash: "e40321bd36b9709991dae2530eb4ac303dd168276980d3e9bc4b6e2b75fed156",
         DisplayName: "Wan 2.2 VAE");
+
+    /// <summary>ACE-Step 1.5 Oobleck audio VAE (48 kHz stereo ↔ 64-ch 25 Hz latents). Canonical
+    /// path, URL, and hash match SwarmUI core's <c>CommonModels.Known["ace-step-15-vae"]</c> so a
+    /// copy downloaded by the ComfyUI backend is reused (and vice versa).</summary>
+    public static readonly Entry AceStep15Vae = new(
+        CanonicalName: "AceStep/ace_1.5_vae.safetensors",
+        FolderType: "VAE",
+        Url: "https://huggingface.co/Comfy-Org/ace_step_1.5_ComfyUI_files/resolve/main/split_files/vae/ace_1.5_vae.safetensors",
+        Hash: "6de92e3a862acd287e08b024ac90f0783a8635451b728721a33ff03565bcb2bb",
+        DisplayName: "ACE-Step 1.5 VAE (Oobleck)");
 
     // ── TAESD preview decoders (folder = "VAE", subfolder "Taesd/") ──
     //

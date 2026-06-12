@@ -96,6 +96,13 @@ public class SwarmUISharpInference : Extension
         // ACE-Step v1 model class: Swarm core only knows the v1.5 class, so v1 checkpoints would
         // otherwise be unclassified. Must register before model folders are scanned.
         Generation.AceStepLoader.RegisterModelClass();
+        // Lance compat + model classes: core has no Lance classes at all; the checkpoints are
+        // folder-models (sharded safetensors + llm_config.json), surfaced by the core
+        // folder-model scanning support. Must register before model folders are scanned.
+        Generation.LanceLoader.RegisterModelClass();
+        // MusicGen + YuE: gen-tab music models (audio params light up via IsAudioModel).
+        Generation.MusicGenLoader.RegisterModelClass();
+        Generation.YueLoader.RegisterModelClass();
     }
 
     public override void OnInit()

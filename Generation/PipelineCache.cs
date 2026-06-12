@@ -28,6 +28,11 @@ public sealed class PipelineCache
     private readonly Dictionary<string, WanVideoCacheEntry> _wanVideo = new();
     private readonly Dictionary<string, LtxVideoCacheEntry> _ltxVideo = new();
     private readonly Dictionary<string, AceStepCacheEntry> _aceStep = new();
+    private readonly Dictionary<string, AceStep15CacheEntry> _aceStep15 = new();
+    private readonly Dictionary<string, MusicGenCacheEntry> _musicGen = new();
+    private readonly Dictionary<string, YueCacheEntry> _yue = new();
+    private readonly Dictionary<string, LanceCacheEntry> _lance = new();
+    private readonly Dictionary<string, LensCacheEntry> _lens = new();
     private readonly Dictionary<string, RefinerCacheEntry> _refiner = new();
     private readonly Dictionary<string, IpAdapterCacheEntry> _ipAdapter = new();
     private readonly object _lock = new();
@@ -54,6 +59,11 @@ public sealed class PipelineCache
     public WanVideoCacheEntry TryGetWanVideo(string modelName) => Touch(_wanVideo, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
     public LtxVideoCacheEntry TryGetLtxVideo(string modelName) => Touch(_ltxVideo, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
     public AceStepCacheEntry TryGetAceStep(string modelName) => Touch(_aceStep, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
+    public AceStep15CacheEntry TryGetAceStep15(string modelName) => Touch(_aceStep15, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
+    public MusicGenCacheEntry TryGetMusicGen(string modelName) => Touch(_musicGen, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
+    public YueCacheEntry TryGetYue(string modelName) => Touch(_yue, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
+    public LanceCacheEntry TryGetLance(string modelName) => Touch(_lance, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
+    public LensCacheEntry TryGetLens(string modelName) => Touch(_lens, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
     public RefinerCacheEntry TryGetRefiner(string modelName) => Touch(_refiner, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
     public IpAdapterCacheEntry TryGetIpAdapter(string filePath) => Touch(_ipAdapter, filePath, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
 
@@ -73,6 +83,11 @@ public sealed class PipelineCache
     public void PutWanVideo(WanVideoCacheEntry entry) => Put(_wanVideo, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
     public void PutLtxVideo(LtxVideoCacheEntry entry) => Put(_ltxVideo, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
     public void PutAceStep(AceStepCacheEntry entry) => Put(_aceStep, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
+    public void PutAceStep15(AceStep15CacheEntry entry) => Put(_aceStep15, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
+    public void PutMusicGen(MusicGenCacheEntry entry) => Put(_musicGen, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
+    public void PutYue(YueCacheEntry entry) => Put(_yue, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
+    public void PutLance(LanceCacheEntry entry) => Put(_lance, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
+    public void PutLens(LensCacheEntry entry) => Put(_lens, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
     public void PutRefiner(RefinerCacheEntry entry) => Put(_refiner, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
     public void PutIpAdapter(IpAdapterCacheEntry entry) => Put(_ipAdapter, entry.FilePath, entry, e => e.LastUsedUtc = DateTime.UtcNow);
 
@@ -108,7 +123,7 @@ public sealed class PipelineCache
         }
     }
 
-    private int TotalCount => _flux.Count + _flux2.Count + _chroma.Count + _auraFlow.Count + _fLite.Count + _ideogram4.Count + _zImage.Count + _anima.Count + _hiDream.Count + _qwenImage.Count + _sd15.Count + _sdxl.Count + _sd3.Count + _wanVideo.Count + _ltxVideo.Count + _aceStep.Count + _refiner.Count + _ipAdapter.Count;
+    private int TotalCount => _flux.Count + _flux2.Count + _chroma.Count + _auraFlow.Count + _fLite.Count + _ideogram4.Count + _zImage.Count + _anima.Count + _hiDream.Count + _qwenImage.Count + _sd15.Count + _sdxl.Count + _sd3.Count + _wanVideo.Count + _ltxVideo.Count + _aceStep.Count + _aceStep15.Count + _musicGen.Count + _yue.Count + _lance.Count + _lens.Count + _refiner.Count + _ipAdapter.Count;
 
     /// <summary>Evict the globally-oldest entry across all architecture maps until we're
     /// at or under <see cref="_maxEntries"/>.</summary>
@@ -263,6 +278,51 @@ public sealed class PipelineCache
                     evictAction = () => { _aceStep[key].Dispose(); _aceStep.Remove(key); };
                 }
             }
+            foreach (var kv in _aceStep15)
+            {
+                if (kv.Value.LastUsedUtc < oldestTime)
+                {
+                    oldestTime = kv.Value.LastUsedUtc;
+                    string key = kv.Key;
+                    evictAction = () => { _aceStep15[key].Dispose(); _aceStep15.Remove(key); };
+                }
+            }
+            foreach (var kv in _musicGen)
+            {
+                if (kv.Value.LastUsedUtc < oldestTime)
+                {
+                    oldestTime = kv.Value.LastUsedUtc;
+                    string key = kv.Key;
+                    evictAction = () => { _musicGen[key].Dispose(); _musicGen.Remove(key); };
+                }
+            }
+            foreach (var kv in _yue)
+            {
+                if (kv.Value.LastUsedUtc < oldestTime)
+                {
+                    oldestTime = kv.Value.LastUsedUtc;
+                    string key = kv.Key;
+                    evictAction = () => { _yue[key].Dispose(); _yue.Remove(key); };
+                }
+            }
+            foreach (var kv in _lance)
+            {
+                if (kv.Value.LastUsedUtc < oldestTime)
+                {
+                    oldestTime = kv.Value.LastUsedUtc;
+                    string key = kv.Key;
+                    evictAction = () => { _lance[key].Dispose(); _lance.Remove(key); };
+                }
+            }
+            foreach (var kv in _lens)
+            {
+                if (kv.Value.LastUsedUtc < oldestTime)
+                {
+                    oldestTime = kv.Value.LastUsedUtc;
+                    string key = kv.Key;
+                    evictAction = () => { _lens[key].Dispose(); _lens.Remove(key); };
+                }
+            }
             foreach (var kv in _refiner)
             {
                 if (kv.Value.LastUsedUtc < oldestTime)
@@ -308,6 +368,11 @@ public sealed class PipelineCache
             foreach (var entry in _wanVideo.Values) entry.Dispose();
             foreach (var entry in _ltxVideo.Values) entry.Dispose();
             foreach (var entry in _aceStep.Values) entry.Dispose();
+            foreach (var entry in _aceStep15.Values) entry.Dispose();
+            foreach (var entry in _musicGen.Values) entry.Dispose();
+            foreach (var entry in _yue.Values) entry.Dispose();
+            foreach (var entry in _lance.Values) entry.Dispose();
+            foreach (var entry in _lens.Values) entry.Dispose();
             foreach (var entry in _refiner.Values) entry.Dispose();
             foreach (var entry in _ipAdapter.Values) entry.Dispose();
             _flux.Clear();
@@ -326,6 +391,11 @@ public sealed class PipelineCache
             _wanVideo.Clear();
             _ltxVideo.Clear();
             _aceStep.Clear();
+            _aceStep15.Clear();
+            _musicGen.Clear();
+            _yue.Clear();
+            _lance.Clear();
+            _lens.Clear();
             _refiner.Clear();
             _ipAdapter.Clear();
             return true;
