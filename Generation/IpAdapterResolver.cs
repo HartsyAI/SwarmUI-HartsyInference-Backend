@@ -2,19 +2,19 @@ using System.IO;
 using SwarmUI.Core;
 using SwarmUI.Text2Image;
 using SwarmUI.Utils;
-using SharpInference.Core.Backends;
-using SharpInference.Core.Tensors;
-using SharpInference.Diffusion.Adapters;
-using SharpInference.Diffusion.Models.Denoisers;
-using SharpInference.Diffusion.Models.TextEncoders;
-using SharpInference.ModelHandler.SafeTensors;
+using HartsyInference.Core.Backends;
+using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Adapters;
+using HartsyInference.Diffusion.Models.Denoisers;
+using HartsyInference.Diffusion.Models.TextEncoders;
+using HartsyInference.ModelHandler.SafeTensors;
 
-namespace Hartsy.Extensions.SharpInferenceBackend.Generation;
+namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
 /// <summary>
 /// Resolves Swarm's IP-Adapter params (registered by the ComfyUI extension under the
 /// <c>ipadapter</c> feature flag) into a list of
-/// <see cref="IpAdapterConditioning"/>s ready to hand to a SharpInference SDXL
+/// <see cref="IpAdapterConditioning"/>s ready to hand to a HartsyInference SDXL
 /// pipeline. Loads each selected IPA checkpoint, runs CLIP-Vision on the user's
 /// prompt image, projects the result into image-prompt tokens, and returns the
 /// per-cross-attn-layer wiring.

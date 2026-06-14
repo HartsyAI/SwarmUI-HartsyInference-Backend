@@ -1,22 +1,22 @@
 using System.IO;
 using SwarmUI.Text2Image;
 using SwarmUI.Utils;
-using SharpInference.Core.Backends;
-using SharpInference.Core.Tensors;
-using SharpInference.Diffusion.Models.Denoisers;
-using SharpInference.Diffusion.Models.TextEncoders;
-using SharpInference.Diffusion.Models.Vae;
-using SharpInference.Diffusion.Requests;
-using SharpInference.Diffusion.Utilities;
-using SharpInference.ModelHandler.CheckpointConverters;
-using SharpInference.ModelHandler.CheckpointConverters.Utils;
-using SharpInference.ModelHandler.Lora;
-using SharpInference.ModelHandler.SafeTensors;
-using SharpInference.Tokenizers;
-using SharpInference.Video.Pipelines;
+using HartsyInference.Core.Backends;
+using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Models.Denoisers;
+using HartsyInference.Diffusion.Models.TextEncoders;
+using HartsyInference.Diffusion.Models.Vae;
+using HartsyInference.Diffusion.Requests;
+using HartsyInference.Diffusion.Utilities;
+using HartsyInference.ModelHandler.CheckpointConverters;
+using HartsyInference.ModelHandler.CheckpointConverters.Utils;
+using HartsyInference.ModelHandler.Lora;
+using HartsyInference.ModelHandler.SafeTensors;
+using HartsyInference.Tokenizers;
+using HartsyInference.Video.Pipelines;
 using Image = SwarmUI.Utils.Image;
 
-namespace Hartsy.Extensions.SharpInferenceBackend.Generation;
+namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
 /// <summary>
 /// Loads Wan2.2 TI2V-5B (Wan-AI's text/image-to-video DiT; SwarmUI compat class
@@ -139,7 +139,7 @@ public static class WanVideoLoader
     }
 
     /// <summary>LoRA path: shallow-clone the cached DiT weight dict, merge the LoRA stack into it
-    /// (SharpInference's LoraStack auto-detects kohya/musubi, Comfy diffusion_model., and
+    /// (HartsyInference's LoraStack auto-detects kohya/musubi, Comfy diffusion_model., and
     /// diffusers-PEFT key formats), and run a fresh transformer + pipeline for this generation.
     /// The cached no-LoRA pipeline stays untouched; merged tensors die with the stack. Wan LoRAs
     /// target the DiT only (the model class declares LorasTargetTextEnc=false), so umT5 and the
@@ -196,7 +196,7 @@ public static class WanVideoLoader
             var (imgW, imgH) = RgbToImage.GetDimensions(initImage);
             (width, height) = VideoParamResolver.ResolveI2VResolution(
                 input, input.Get(T2IParamTypes.Model), imgW, imgH, multiple: entry.Config.VaeSpatialCompression);
-            Logs.Verbose($"[SharpInference][Wan] I2V init image {imgW}x{imgH} → clip {width}x{height}.");
+            Logs.Verbose($"[HartsyInference][Wan] I2V init image {imgW}x{imgH} → clip {width}x{height}.");
         }
         else
         {
@@ -249,7 +249,7 @@ public static class WanVideoLoader
         {
             var (frames, outW, outH, _) = pipeline.GenerateFromEmbeddings(
                 promptEmbeds, negEmbeds, request, numFrames, bridge, firstFrameLatent);
-            Logs.Verbose($"[SharpInference][Wan] Pipeline returned {frames.Length} frames {outW}x{outH} " +
+            Logs.Verbose($"[HartsyInference][Wan] Pipeline returned {frames.Length} frames {outW}x{outH} " +
                 $"({(firstFrameLatent is null ? "T2V" : "I2V")}) in {Environment.TickCount64 - start}ms.");
             return new[] { VideoParamResolver.FinishVideo(frames, outW, outH, input, cancel) };
         }

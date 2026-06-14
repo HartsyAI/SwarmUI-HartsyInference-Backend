@@ -1,4 +1,4 @@
-# SwarmUI SharpInference Backend
+# SwarmUI HartsyInference Backend
 
 > **Status:** Working beta. 14 image architectures + 2 video architectures dispatch
 > end-to-end, with Flux and Z-Image verified at 1024×1024 on a 12 GB consumer GPU
@@ -11,7 +11,7 @@
 ## What this is
 
 A SwarmUI backend extension that runs Stable Diffusion / FLUX / SDXL / etc. inference
-**entirely in C#** through the [SharpInference](#sharpinference) library — no Python,
+**entirely in C#** through the [HartsyInference](#hartsyinference) library — no Python,
 no ComfyUI, no external process required.
 
 The long-term goal is to **replace ComfyUI as the default SwarmUI backend** while
@@ -42,6 +42,7 @@ and direct access to Swarm's image/parameter/cache types.
 | SD 3 / 3.5 (Medium, Large) | `stable-diffusion-v3*` | ⚠ Wired-untested | img2img, inpaint |
 | Flux.2 (base, Klein 4B) | `flux-2`, `flux-2-klein-4b` | ⚠ Wired-untested; Klein 9B/Dev refused (FP4 GEMM) | t2i |
 | Chroma V1 | `chroma` | ⚠ Wired-untested | t2i |
+| Chroma Radiance / Zeta-Chroma | `chroma-radiance`, `zeta-chroma` | ⚠ Wired-untested (pixel-space, no VAE; mid-pretraining upstream) | t2i |
 | AuraFlow v0.2/v0.3 | `auraflow-v1` | ⚠ Wired-untested | t2i |
 | F-Lite v1 | `f-lite` | ⚠ Wired-untested (diffusers-folder layout) | t2i |
 | Anima (Cosmos-Predict2 2B) | `anima` | ⚠ Wired-untested | t2i |
@@ -58,23 +59,27 @@ Zeta-Chroma (config presets), Flux.2 Klein 9B / Dev (FP4 GEMM).
 
 ### Cross-cutting features
 
-Working: prompt/negative/CFG/steps/seed, EndStepsEarly, img2img creativity,
-inpaint masks (+grow/blur), multi-LoRA with strengths, SDXL refiner (PostApply
+Working: prompt/negative/CFG/steps/seed, sampler selection (SD1.5/SDXL) + clip
+skip (SD1.5), EndStepsEarly, img2img creativity (incl. Flux.2), inpaint masks
+(+grow/blur), variation seed (SD1.5/SDXL/Flux), **`<segment:yolo->` auto-refinement
+(SDXL/Flux/SD3, pure-C# YOLO)**, multi-LoRA with strengths, SDXL refiner (PostApply
 any base, StepSwap SDXL), IP-Adapter standard/Plus/Plus-Face with weight types +
-step gating, ControlNet stacking (SDXL, Canny preprocessor), Wan/LTX video with
-FPS/format/boomerang/trim, TAESD or latent2rgb live previews, mid-gen cancel,
-FreeMemory, multi-GPU via one backend per GPU.
+step gating, ControlNet stacking (SDXL, Canny preprocessor), **GGUF Flux transformers**,
+Wan/LTX video with FPS/format/boomerang/trim, ACE-Step music, TAESD or latent2rgb
+live previews, mid-gen cancel, FreeMemory, multi-GPU via one backend per GPU,
+**admin WebAPI** (probe-model / list-pipelines / device-info / clear-cache).
 
-Not yet (planned, in priority order — see
-[punchlist P1–P7](./docs/11-Comfy-Parity-Punchlist.md)): sampler/scheduler
-selection + clip skip (P1), hires-fix 2-pass upscale + ESRGAN (P2), graceful
-refusal of `<segment:>`/`<region:>`-style prompt syntax (P3), variation seed
-(P4), `<segment:face>` YOLO auto-refinement (P5), Qwen Image Edit + Wan 14B
-(P6), **Ideogram 4** (P7 — 9.3B dual-DiT, Qwen3-VL-8B encoder; upstream
-pipeline/converter/tests already in SharpInference; non-commercial license).
+Not yet — needs upstream HartsyInference engine work first (Category B): hires-fix
+2-pass upscale + ESRGAN (tiled VaeEncoder + upscaler), guidance variants
+(FreeU/SAG/PAG/NAG/RescaleCFG/CFGZero★), LoRA on SD3/Z-Image/Flux.2, ControlNet
+Depth/OpenPose preprocessors + Flux/SD1.5 ControlNet, IP-Adapter FaceID, SAM2 /
+CLIP-Seg segment targets, seamless tiling, batch>1, variation seed on SD3,
+Qwen Image Edit, Wan 14B, FP4 (Flux.2 Klein 9B / Ideogram nf4).
 
-Not planned for v1: workflow editor, textual-inversion embeddings, FaceID/
-InstantID, Flux Redux, seamless tiling, rembg, face restore, TensorRT.
+Not planned for v1: workflow editor, textual-inversion embeddings, InstantID,
+Flux Redux, rembg, face restore, TensorRT. TTS/STT (engine has Whisper/Bark/
+Kokoro/F5/CosyVoice/etc) is deferred pending a Swarm UI surface for voice/
+reference inputs — the current audio params are music-only.
 
 ## How memory management works (current architecture)
 
@@ -122,7 +127,7 @@ that's normal under tight memory and the retry is recovering.
 > overflow in SwiGLU's `w2` Linear when an FP8 weight met an F32 activation — the F32→F16
 > cast of `gated = silu(w1(x)) * w3(x)` produced +Inf for some positions starting at step 1.
 > Fixed by routing FP8 + F32 GEMMs through BF16 instead of F16 (BF16 has F32's full dynamic
-> range). See [PHASE_3_DEVIATIONS.md #36](../../../../SharpInference/docs/Checklists/PHASE_3_DEVIATIONS.md)
+> range). See [PHASE_3_DEVIATIONS.md #36](../../../../HartsyInference/docs/Checklists/PHASE_3_DEVIATIONS.md)
 > for the full troubleshooting journey.
 
 ## TODO
@@ -148,7 +153,7 @@ Tracked as `// TODO: ...` comments in the code where applicable.
   Currently, switching models leaks the prior one until the GC runs.
 
 ### Architecture coverage
-Loaders done — wired into the extension and dispatched from `SharpInferenceBackend.cs`:
+Loaders done — wired into the extension and dispatched from `HartsyInferenceBackend.cs`:
 - [x] ~~**`Flux2Loader.cs`**~~ — Flux.2 Klein 4B (Qwen3-4B + flux2-vae). Klein 9B / Dev are
   refused at runtime until `LlamaStyleEncoderConfig.Qwen3_8B` / Mistral presets land.
 - [x] ~~**`ChromaLoader.cs`**~~ — Chroma V1 (T5-XXL via `T2IParamTypes.T5XXLModel` + Flux VAE
@@ -160,13 +165,12 @@ Loaders done — wired into the extension and dispatched from `SharpInferenceBac
 
 **Refused at the dispatch boundary (with clear messages) — upstream blockers exist:**
 - **Ernie Image** — pipeline + `Ministral3B` encoder preset exist, but there is no real
-  Ernie tokenizer in `SharpInference.Tokenizers`. Refused until upstream ships one.
+  Ernie tokenizer in `HartsyInference.Tokenizers`. Refused until upstream ships one.
 - **HunyuanImage 2.1** — upstream pipeline substitutes T5-XXL for the real Qwen2.5-VL
   MLLM encoder (and drops the byT5 glyph stream); output wouldn't be faithful. Refused
   until the real encoder path lands.
 - **Flux.2 Klein 9B / Dev** — refused at runtime: the released encoders are FP4-mixed
-  and SharpInference has no FP4 GEMM. Klein 4B works via the `Qwen3_4B` preset.
-- **Chroma Radiance / Zeta-Chroma** — refused: `ChromaConfig` only has `V1` preset.
+  and HartsyInference has no FP4 GEMM. Klein 4B works via the `Qwen3_4B` preset.
 - **Ideogram 4** — upstream pipeline/converter/tests are in place; the extension loader,
   model-class detection, and a dual-9.3B-DiT VRAM gate are punchlist P7. fp8 variant
   only until FP4 GEMM lands. Non-commercial license.
@@ -185,7 +189,7 @@ Existing wiring polish:
 ### Z-Image — fixed 2026-05-06
 - [x] ~~**Open bug** — Z-Image generates without errors but RGB output is uniformly black.~~
   Fixed via BF16 GEMM dtype for FP8 + F32 operand pairs. See
-  [PHASE_3_DEVIATIONS.md #36](../../../../SharpInference/docs/Checklists/PHASE_3_DEVIATIONS.md)
+  [PHASE_3_DEVIATIONS.md #36](../../../../HartsyInference/docs/Checklists/PHASE_3_DEVIATIONS.md)
   for the full troubleshooting journey (8+ trace iterations to localize, then a 30-line
   fix in `CudaBackend.ResolveGemmDtype`).
 
@@ -205,10 +209,10 @@ Existing wiring polish:
   weights; activations always stay on GPU. Real "lowvram" mode would page activation
   tensors out too.
 
-## SharpInference
+## HartsyInference
 
-[SharpInference](https://github.com/Hartsy/SharpInference) is a sister project
-(`/home/kalebbroo/Desktop/Projects/SharpInference` locally) — a pure C# / .NET 10
+[HartsyInference](https://github.com/Hartsy/HartsyInference) is a sister project
+(`/home/kalebbroo/Desktop/Projects/HartsyInference` locally) — a pure C# / .NET 10
 inference engine. What's implemented today:
 
 - **Backends:** `IBackend` (eager execution) implemented for **CPU** (AVX/SIMD), **CUDA** (PTX via Driver API P/Invoke), and **Vulkan** (FP16 compute shaders)
@@ -222,7 +226,7 @@ inference engine. What's implemented today:
 - **Memory mgmt:** `BlockStreamingController` (per-layer streaming), `CudaStreamingWeightCache` (async upload on side stream), tiled VAE decode
 - **Cancellation:** `CancellationToken` threaded through pipeline loops
 
-What's **planned but not yet implemented** in SharpInference:
+What's **planned but not yet implemented** in HartsyInference:
 
 - ❌ Tiled `VaeEncoder` (blocks high-res img2img / hires-fix — punchlist P2)
 - ❌ Upscaler model loaders (ESRGAN family)
@@ -230,10 +234,10 @@ What's **planned but not yet implemented** in SharpInference:
 - ❌ Configurable CLIP stop-layer (clip skip — punchlist P1)
 - ❌ Segmentation models (YOLO / SAM2)
 - ❌ `ModelRegistry.LoadAsync()` HuggingFace auto-loader / `PipelineFactory.Create()` façade
-- ❌ `SharpInference.Server` OpenAI-compatible REST endpoints
+- ❌ `HartsyInference.Server` OpenAI-compatible REST endpoints
 
-> **Compatibility note:** SharpInference targets `net10.0`; SwarmUI extensions target
-> `net8.0`. Currently resolved via SharpInference multi-targeting both.
+> **Compatibility note:** HartsyInference targets `net10.0`; SwarmUI extensions target
+> `net8.0`. Currently resolved via HartsyInference multi-targeting both.
 
 ## Documentation
 
@@ -243,10 +247,10 @@ The [`docs/`](./docs/) folder is the source of truth for the build plan:
 |---|----------|---------|
 | 00 | [Overview](./docs/00-Overview.md) | Vision, scope, non-goals |
 | 01 | [Architecture](./docs/01-Architecture.md) | Layers, components, data flow |
-| 02 | [Comfy Feature Parity Matrix](./docs/02-Comfy-Feature-Parity-Matrix.md) | Every Comfy feature, mapped to a SharpInference plan |
+| 02 | [Comfy Feature Parity Matrix](./docs/02-Comfy-Feature-Parity-Matrix.md) | Every Comfy feature, mapped to a HartsyInference plan |
 | 03 | [Implementation Roadmap](./docs/03-Implementation-Roadmap.md) | Phased delivery plan with milestones |
-| 04 | [SharpInference Integration](./docs/04-SharpInference-Integration.md) | The API surface SharpInference must expose |
-| 05 | [Pipeline Translation](./docs/05-Pipeline-Translation.md) | The `WorkflowGenerator` equivalent — params → SharpInference calls |
+| 04 | [HartsyInference Integration](./docs/04-HartsyInference-Integration.md) | The API surface HartsyInference must expose |
+| 05 | [Pipeline Translation](./docs/05-Pipeline-Translation.md) | The `WorkflowGenerator` equivalent — params → HartsyInference calls |
 | 06 | [Backend Lifecycle](./docs/06-Backend-Lifecycle.md) | Init / Generate / Shutdown contract |
 | 07 | [Parameters & Feature Flags](./docs/07-Parameters-And-Feature-Flags.md) | What params we own, what flags we advertise |
 | 08 | [Web API Routes](./docs/08-Web-API-Routes.md) | Extra HTTP routes the extension adds |
@@ -255,9 +259,9 @@ The [`docs/`](./docs/) folder is the source of truth for the build plan:
 
 ## Logging conventions
 
-The extension forwards SharpInference's internal log calls to SwarmUI's logger. Levels
+The extension forwards HartsyInference's internal log calls to SwarmUI's logger. Levels
 are mapped 1:1 (`Verbose → Verbose`, `Debug → Debug`, `Info → Info`, `Warning →
-Warning`, `Error → Error`) by `EnsureLoggerWired()` in `SharpInferenceBackend.cs`.
+Warning`, `Error → Error`) by `EnsureLoggerWired()` in `HartsyInferenceBackend.cs`.
 
 What goes where:
 

@@ -1,6 +1,6 @@
-using SharpInference.Core.Backends;
+using HartsyInference.Core.Backends;
 
-namespace Hartsy.Extensions.SharpInferenceBackend.Generation;
+namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
 /// <summary>
 /// Per-backend cache of loaded pipelines, with global LRU eviction across all
@@ -18,6 +18,8 @@ public sealed class PipelineCache
     private readonly Dictionary<string, AuraFlowCacheEntry> _auraFlow = new();
     private readonly Dictionary<string, FLiteCacheEntry> _fLite = new();
     private readonly Dictionary<string, Ideogram4CacheEntry> _ideogram4 = new();
+    private readonly Dictionary<string, ChromaRadianceCacheEntry> _chromaRadiance = new();
+    private readonly Dictionary<string, ZetaChromaCacheEntry> _zetaChroma = new();
     private readonly Dictionary<string, ZImageCacheEntry> _zImage = new();
     private readonly Dictionary<string, AnimaCacheEntry> _anima = new();
     private readonly Dictionary<string, HiDreamCacheEntry> _hiDream = new();
@@ -49,6 +51,8 @@ public sealed class PipelineCache
     public AuraFlowCacheEntry TryGetAuraFlow(string modelName) => Touch(_auraFlow, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
     public FLiteCacheEntry TryGetFLite(string modelName) => Touch(_fLite, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
     public Ideogram4CacheEntry TryGetIdeogram4(string modelName) => Touch(_ideogram4, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
+    public ChromaRadianceCacheEntry TryGetChromaRadiance(string modelName) => Touch(_chromaRadiance, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
+    public ZetaChromaCacheEntry TryGetZetaChroma(string modelName) => Touch(_zetaChroma, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
     public ZImageCacheEntry TryGetZImage(string modelName) => Touch(_zImage, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
     public AnimaCacheEntry TryGetAnima(string modelName) => Touch(_anima, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
     public HiDreamCacheEntry TryGetHiDream(string modelName) => Touch(_hiDream, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
@@ -73,6 +77,8 @@ public sealed class PipelineCache
     public void PutAuraFlow(AuraFlowCacheEntry entry) => Put(_auraFlow, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
     public void PutFLite(FLiteCacheEntry entry) => Put(_fLite, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
     public void PutIdeogram4(Ideogram4CacheEntry entry) => Put(_ideogram4, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
+    public void PutChromaRadiance(ChromaRadianceCacheEntry entry) => Put(_chromaRadiance, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
+    public void PutZetaChroma(ZetaChromaCacheEntry entry) => Put(_zetaChroma, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
     public void PutZImage(ZImageCacheEntry entry) => Put(_zImage, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
     public void PutAnima(AnimaCacheEntry entry) => Put(_anima, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
     public void PutHiDream(HiDreamCacheEntry entry) => Put(_hiDream, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
@@ -123,7 +129,7 @@ public sealed class PipelineCache
         }
     }
 
-    private int TotalCount => _flux.Count + _flux2.Count + _chroma.Count + _auraFlow.Count + _fLite.Count + _ideogram4.Count + _zImage.Count + _anima.Count + _hiDream.Count + _qwenImage.Count + _sd15.Count + _sdxl.Count + _sd3.Count + _wanVideo.Count + _ltxVideo.Count + _aceStep.Count + _aceStep15.Count + _musicGen.Count + _yue.Count + _lance.Count + _lens.Count + _refiner.Count + _ipAdapter.Count;
+    private int TotalCount => _flux.Count + _flux2.Count + _chroma.Count + _chromaRadiance.Count + _zetaChroma.Count + _auraFlow.Count + _fLite.Count + _ideogram4.Count + _zImage.Count + _anima.Count + _hiDream.Count + _qwenImage.Count + _sd15.Count + _sdxl.Count + _sd3.Count + _wanVideo.Count + _ltxVideo.Count + _aceStep.Count + _aceStep15.Count + _musicGen.Count + _yue.Count + _lance.Count + _lens.Count + _refiner.Count + _ipAdapter.Count;
 
     /// <summary>Evict the globally-oldest entry across all architecture maps until we're
     /// at or under <see cref="_maxEntries"/>.</summary>
@@ -186,6 +192,24 @@ public sealed class PipelineCache
                     oldestTime = kv.Value.LastUsedUtc;
                     string key = kv.Key;
                     evictAction = () => { _ideogram4[key].Dispose(); _ideogram4.Remove(key); };
+                }
+            }
+            foreach (var kv in _chromaRadiance)
+            {
+                if (kv.Value.LastUsedUtc < oldestTime)
+                {
+                    oldestTime = kv.Value.LastUsedUtc;
+                    string key = kv.Key;
+                    evictAction = () => { _chromaRadiance[key].Dispose(); _chromaRadiance.Remove(key); };
+                }
+            }
+            foreach (var kv in _zetaChroma)
+            {
+                if (kv.Value.LastUsedUtc < oldestTime)
+                {
+                    oldestTime = kv.Value.LastUsedUtc;
+                    string key = kv.Key;
+                    evictAction = () => { _zetaChroma[key].Dispose(); _zetaChroma.Remove(key); };
                 }
             }
             foreach (var kv in _zImage)
@@ -358,6 +382,8 @@ public sealed class PipelineCache
             foreach (var entry in _auraFlow.Values) entry.Dispose();
             foreach (var entry in _fLite.Values) entry.Dispose();
             foreach (var entry in _ideogram4.Values) entry.Dispose();
+            foreach (var entry in _chromaRadiance.Values) entry.Dispose();
+            foreach (var entry in _zetaChroma.Values) entry.Dispose();
             foreach (var entry in _zImage.Values) entry.Dispose();
             foreach (var entry in _anima.Values) entry.Dispose();
             foreach (var entry in _hiDream.Values) entry.Dispose();
@@ -381,6 +407,8 @@ public sealed class PipelineCache
             _auraFlow.Clear();
             _fLite.Clear();
             _ideogram4.Clear();
+            _chromaRadiance.Clear();
+            _zetaChroma.Clear();
             _zImage.Clear();
             _anima.Clear();
             _hiDream.Clear();

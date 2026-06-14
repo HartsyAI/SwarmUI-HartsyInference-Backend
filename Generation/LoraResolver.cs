@@ -3,19 +3,19 @@ using SwarmUI.Core;
 using SwarmUI.Text2Image;
 using SwarmUI.Utils;
 
-namespace Hartsy.Extensions.SharpInferenceBackend.Generation;
+namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
 /// <summary>
 /// Resolves Swarm's <see cref="T2IParamTypes.Loras"/> + companion params into a list of
 /// concrete <see cref="LoraSpec"/> entries (file path + per-component strengths) that
-/// the per-architecture LoRA paths can feed into a SharpInference <c>LoraStack</c>.
+/// the per-architecture LoRA paths can feed into a HartsyInference <c>LoraStack</c>.
 ///
 /// Mirrors the lookup logic in
 /// <c>WorkflowGenerator.LoadLorasForConfinement</c> (see
 /// <c>src/BuiltinExtensions/ComfyUIBackend/WorkflowGenerator.cs</c>) so that a LoRA
 /// dropdown selection routes to the same on-disk file Comfy would have used.
 ///
-/// Section-confined LoRAs (segment blocks etc.) are not yet handled by SharpInference;
+/// Section-confined LoRAs (segment blocks etc.) are not yet handled by HartsyInference;
 /// any LoRA with a non-global confinement is skipped with a warning.
 /// </summary>
 public static class LoraResolver
@@ -50,20 +50,20 @@ public static class LoraResolver
 
         if (!Program.T2IModelSets.TryGetValue("LoRA", out T2IModelHandler loraHandler))
         {
-            Logs.Warning("[SharpInference] LoRA model set not registered with Swarm; skipping LoRA application.");
+            Logs.Warning("[HartsyInference] LoRA model set not registered with Swarm; skipping LoRA application.");
             return new List<LoraSpec>();
         }
 
         List<LoraSpec> result = new(loras.Count);
         for (int i = 0; i < loras.Count; i++)
         {
-            // Skip non-global confinement: SharpInference doesn't model per-segment
+            // Skip non-global confinement: HartsyInference doesn't model per-segment
             // LoRA scopes yet, so honoring the global slot only is the safe behavior.
             if (confinements is not null && i < confinements.Count
                 && int.TryParse(confinements[i], out int confinementId)
                 && confinementId > 0)
             {
-                Logs.Debug($"[SharpInference] LoRA '{loras[i]}' has section confinement={confinementId}; skipping (not yet supported).");
+                Logs.Debug($"[HartsyInference] LoRA '{loras[i]}' has section confinement={confinementId}; skipping (not yet supported).");
                 continue;
             }
 

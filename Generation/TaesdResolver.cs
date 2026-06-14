@@ -4,9 +4,9 @@ using System.Collections.Concurrent;
 using System.IO;
 using SwarmUI.Text2Image;
 using SwarmUI.Utils;
-using SharpInference.Diffusion.Utilities;
+using HartsyInference.Diffusion.Utilities;
 
-namespace Hartsy.Extensions.SharpInferenceBackend.Generation;
+namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
 /// <summary>Lazy-loads and process-wide-caches the per-architecture TAESD preview decoders.
 /// First call for a given architecture triggers a one-time download (via
@@ -45,7 +45,7 @@ public static class TaesdResolver
             {
                 // EnsureSideModel handles the locking, hash-check, atomic .tmp staging, and
                 // Swarm model-set refresh. Returns a T2IModel whose RawFilePath we pass to
-                // the SharpInference loader.
+                // the HartsyInference loader.
                 T2IModel model = ModelAutoDownloader.EnsureSideModel(userPick: null, entry, log);
                 if (string.IsNullOrWhiteSpace(model.RawFilePath) || !File.Exists(model.RawFilePath))
                 {
@@ -60,7 +60,7 @@ public static class TaesdResolver
             catch (Exception ex)
             {
                 // A failed download / corrupt file shouldn't break generation — fall back.
-                Logs.Warning($"[SharpInference][TAESD] Failed to load decoder for {arch}: {ex.GetType().Name}: {ex.Message}. Falling back to latent2rgb.");
+                Logs.Warning($"[HartsyInference][TAESD] Failed to load decoder for {arch}: {ex.GetType().Name}: {ex.Message}. Falling back to latent2rgb.");
                 return null;
             }
         }, isThreadSafe: true));

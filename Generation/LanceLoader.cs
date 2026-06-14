@@ -2,19 +2,19 @@ using System.IO;
 using FreneticUtilities.FreneticExtensions;
 using SwarmUI.Text2Image;
 using SwarmUI.Utils;
-using SharpInference.Core.Backends;
-using SharpInference.Core.Tensors;
-using SharpInference.Diffusion.Models.Denoisers;
-using SharpInference.Diffusion.Models.Vae;
-using SharpInference.Diffusion.Pipelines;
-using SharpInference.Diffusion.Requests;
-using SharpInference.ModelHandler.SafeTensors;
-using SharpInference.ModelHandler.CheckpointConverters;
-using SharpInference.Tokenizers;
-using SharpInference.Video.Pipelines;
+using HartsyInference.Core.Backends;
+using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Models.Denoisers;
+using HartsyInference.Diffusion.Models.Vae;
+using HartsyInference.Diffusion.Pipelines;
+using HartsyInference.Diffusion.Requests;
+using HartsyInference.ModelHandler.SafeTensors;
+using HartsyInference.ModelHandler.CheckpointConverters;
+using HartsyInference.Tokenizers;
+using HartsyInference.Video.Pipelines;
 using Image = SwarmUI.Utils.Image;
 
-namespace Hartsy.Extensions.SharpInferenceBackend.Generation;
+namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
 /// <summary>
 /// Loads Lance (ByteDance's 3B unified multimodal model; Apache-2.0). Lance ships as a FOLDER
@@ -223,13 +223,13 @@ public static class LanceLoader
             int numFrames = Math.Min(121, VideoParamResolver.ResolveFrames(input, modelDefault: 81, step: 4));
             var (frames, outW, outH, _) = entry.VideoPipeline.GenerateFromTokens(
                 promptTokens, negativeTokens, request, numFrames, bridge);
-            Logs.Verbose($"[SharpInference][Lance] T2V returned {frames.Length} frames {outW}x{outH} in {Environment.TickCount64 - start}ms.");
+            Logs.Verbose($"[HartsyInference][Lance] T2V returned {frames.Length} frames {outW}x{outH} in {Environment.TickCount64 - start}ms.");
             return [VideoParamResolver.FinishVideo(frames, outW, outH, input, cancel)];
         }
 
         var (rgbData, imgW, imgH, _) = entry.ImagePipeline.GenerateFromTokens(
             promptTokens, negativeTokens, request, bridge);
-        Logs.Verbose($"[SharpInference][Lance] T2I returned {imgW}x{imgH} in {Environment.TickCount64 - start}ms.");
+        Logs.Verbose($"[HartsyInference][Lance] T2I returned {imgW}x{imgH} in {Environment.TickCount64 - start}ms.");
         return [RgbToImage.FromHwcRgb(rgbData, imgW, imgH)];
     }
 }

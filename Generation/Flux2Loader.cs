@@ -1,18 +1,18 @@
 using System.IO;
 using SwarmUI.Text2Image;
 using SwarmUI.Utils;
-using SharpInference.Core.Backends;
-using SharpInference.Core.Tensors;
-using SharpInference.Diffusion.Models.Denoisers;
-using SharpInference.Diffusion.Models.TextEncoders;
-using SharpInference.Diffusion.Models.Vae;
-using SharpInference.Diffusion.Pipelines;
-using SharpInference.Diffusion.Requests;
-using SharpInference.ModelHandler.CheckpointConverters;
-using SharpInference.ModelHandler.SafeTensors;
-using SharpInference.Tokenizers;
+using HartsyInference.Core.Backends;
+using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Models.Denoisers;
+using HartsyInference.Diffusion.Models.TextEncoders;
+using HartsyInference.Diffusion.Models.Vae;
+using HartsyInference.Diffusion.Pipelines;
+using HartsyInference.Diffusion.Requests;
+using HartsyInference.ModelHandler.CheckpointConverters;
+using HartsyInference.ModelHandler.SafeTensors;
+using HartsyInference.Tokenizers;
 
-namespace Hartsy.Extensions.SharpInferenceBackend.Generation;
+namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
 /// <summary>
 /// Loads Flux.2 family checkpoints (Klein 4B, Klein 9B, Dev). Flux.2 uses Qwen-style text
@@ -102,7 +102,7 @@ public static class Flux2Loader
         SafeTensorsLoader qwenLoader = new SafeTensorsLoader();
         qwenLoader.Load(encoderModel.RawFilePath);
         Dictionary<string, Tensor> qwenRaw = qwenLoader.GetAllTensors();
-        // Refuse FP4 weights at load time — SharpInference doesn't have an FP4 GEMM path yet,
+        // Refuse FP4 weights at load time — HartsyInference doesn't have an FP4 GEMM path yet,
         // so a Comfy fp4_mixed file would silently load with zeros and produce a black image.
         foreach (KeyValuePair<string, Tensor> kvp in qwenRaw)
         {
@@ -113,7 +113,7 @@ public static class Flux2Loader
                 transformerLoader.Dispose();
                 throw new NotSupportedException(
                     $"{encoderLabel} weights at '{encoderModel.Name}' contain FP4 tensors " +
-                    $"(e.g. '{kvp.Key}' is {dtypeName}). SharpInference doesn't support FP4 GEMM yet — " +
+                    $"(e.g. '{kvp.Key}' is {dtypeName}). HartsyInference doesn't support FP4 GEMM yet — " +
                     "swap to an fp8 or fp16 variant of the same encoder, or pick a different Flux.2 variant. " +
                     "Klein 4B (hidden=3072) uses Qwen3-4B which IS shipped as fp8-mixed and works today.");
             }
@@ -152,13 +152,18 @@ public static class Flux2Loader
         VaeDecoder vaeDecoder = new VaeDecoder(VaeConfig.Flux2);
         vaeDecoder.LoadWeights(vaeWeights);
 
+        // Encoder half of the same VAE — required for img2img (source → 32ch latent). The Flux.2
+        // VAE checkpoint carries both encoder.* and decoder.* keys, so this reuses vaeWeights.
+        VaeEncoder vaeEncoder = new VaeEncoder(VaeConfig.Flux2);
+        vaeEncoder.LoadWeights(vaeWeights);
+
         // ── 4. Tokenizer (embedded Qwen3 vocab/merges; same for 4B and 8B) ──
         log("Loading Qwen3 tokenizer (embedded)...");
         Qwen3Tokenizer tokenizer = new Qwen3Tokenizer(maxLength: 512);
 
         log("Building Flux.2 pipeline...");
         Flux2Pipeline pipeline = new Flux2Pipeline(
-            backend, encoder, transformer, vaeDecoder, vaeEncoder: null,
+            backend, encoder, transformer, vaeDecoder, vaeEncoder,
             bnMean, bnVar, config,
             hiddenLayers: null,    // null → defaults [9, 18, 27]
             bnEps: 1e-5f);
@@ -190,24 +195,45 @@ public static class Flux2Loader
     {
         string prompt = input.Get(T2IParamTypes.Prompt) ?? "";
         int steps = SamplingParamResolver.ResolveSteps(input, fallback: entry.Flux2Config.GuidanceEmbed ? 28 : 10);
-        int width = input.Get(T2IParamTypes.Width);
-        int height = input.Get(T2IParamTypes.Height);
+        // Flux.2 rounds image dims down to a multiple of 16 (VAE 8× × 2×2 patch). Resolve img2img
+        // against those rounded dims so the source tensor matches the pipeline's shape check.
+        int width = (input.Get(T2IParamTypes.Width) / 16) * 16;
+        int height = (input.Get(T2IParamTypes.Height) / 16) * 16;
         long seedLong = input.Get(T2IParamTypes.Seed);
+        int? seed = seedLong < 0 ? null : (int?)(int)(seedLong & 0x7FFFFFFF);
 
         // Klein has no guidance embedding; Dev uses guidance ~3.5 (BFL distillation target).
         float guidance = entry.Flux2Config.GuidanceEmbed ? 3.5f : 0f;
 
         int[] tokenIds = entry.Tokenizer.EncodeChat(prompt);
-        Logs.Verbose($"[SharpInference][Flux.2] Tokenized prompt: {tokenIds.Length} tokens, steps={steps}, guidance={guidance:F2}");
 
-        TextToImageRequest request = new TextToImageRequest
+        Img2ImgResolver.Img2ImgSpec img2img = Img2ImgResolver.Resolve(input, width, height);
+        TextToImageRequest request;
+        if (img2img is not null)
         {
-            Prompt = prompt,
-            Width = width,
-            Height = height,
-            Steps = steps,
-            Seed = seedLong < 0 ? null : (int?)(int)(seedLong & 0x7FFFFFFF),
-        };
+            request = new ImageToImageRequest
+            {
+                Prompt = prompt,
+                Width = width,
+                Height = height,
+                Steps = steps,
+                Seed = seed,
+                SourceImage = img2img.SourceTensor,
+                Strength = img2img.Strength,
+            };
+        }
+        else
+        {
+            request = new TextToImageRequest
+            {
+                Prompt = prompt,
+                Width = width,
+                Height = height,
+                Steps = steps,
+                Seed = seed,
+            };
+        }
+        Logs.Verbose($"[HartsyInference][Flux.2] Tokenized prompt: {tokenIds.Length} tokens, steps={steps}, guidance={guidance:F2}, mode={(img2img is not null ? "img2img" : "txt2img")}");
 
         long start = Environment.TickCount64;
         Action<GenerationProgress> bridge = p =>
@@ -216,11 +242,18 @@ public static class Flux2Loader
             onProgress(p);
         };
 
-        var (rgbBytes, outW, outH, _) = entry.Pipeline.GenerateFromTokens(
-            tokenIds, request, guidanceScale: guidance, onProgress: bridge);
+        try
+        {
+            var (rgbBytes, outW, outH, _) = entry.Pipeline.GenerateFromTokens(
+                tokenIds, request, guidanceScale: guidance, onProgress: bridge);
 
-        Logs.Verbose($"[SharpInference][Flux.2] Pipeline returned {outW}x{outH} in {Environment.TickCount64 - start}ms.");
-        return new[] { RgbToImage.FromHwcRgb(rgbBytes, outW, outH) };
+            Logs.Verbose($"[HartsyInference][Flux.2] Pipeline returned {outW}x{outH} in {Environment.TickCount64 - start}ms.");
+            return new[] { RgbToImage.FromHwcRgb(rgbBytes, outW, outH) };
+        }
+        finally
+        {
+            img2img?.SourceTensor?.Dispose();
+        }
     }
 
     /// <summary>Filename-based variant guess. Used as the initial config to pick which Qwen
@@ -277,7 +310,7 @@ public static class Flux2Loader
 
     /// <summary>Picks the right LlamaStyleEncoder preset + auto-download <see cref="SideModels.Entry"/>
     /// for the given Flux.2 variant. Klein 4B → Qwen3-4B (only verified path);
-    /// Klein 9B → Qwen3-8B (will refuse at runtime if file is FP4 quantized — SharpInference
+    /// Klein 9B → Qwen3-8B (will refuse at runtime if file is FP4 quantized — HartsyInference
     /// doesn't have FP4 GEMM yet); Dev → Mistral-Small-3 (same FP4 caveat).</summary>
     private static (LlamaStyleEncoderConfig encoder, SideModels.Entry sideModel, string label)
         ResolveTextEncoderForVariant(Flux2Config config)

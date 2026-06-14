@@ -1,21 +1,21 @@
 using System.IO;
 using SwarmUI.Text2Image;
 using SwarmUI.Utils;
-using SharpInference.Core.Backends;
-using SharpInference.Core.Tensors;
-using SharpInference.Diffusion.Models.Denoisers;
-using SharpInference.Diffusion.Models.Denoisers.DiTBlocks;
-using SharpInference.Diffusion.Models.TextEncoders;
-using SharpInference.Diffusion.Models.Vae;
-using SharpInference.Diffusion.Models.Vae.QwenImage;
-using SharpInference.Diffusion.Pipelines;
-using SharpInference.Diffusion.Requests;
-using SharpInference.ModelHandler.CheckpointConverters.Utils;
-using SharpInference.ModelHandler.CheckpointConverters;
-using SharpInference.ModelHandler.SafeTensors;
-using SharpInference.Tokenizers;
+using HartsyInference.Core.Backends;
+using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Models.Denoisers;
+using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
+using HartsyInference.Diffusion.Models.TextEncoders;
+using HartsyInference.Diffusion.Models.Vae;
+using HartsyInference.Diffusion.Models.Vae.QwenImage;
+using HartsyInference.Diffusion.Pipelines;
+using HartsyInference.Diffusion.Requests;
+using HartsyInference.ModelHandler.CheckpointConverters.Utils;
+using HartsyInference.ModelHandler.CheckpointConverters;
+using HartsyInference.ModelHandler.SafeTensors;
+using HartsyInference.Tokenizers;
 
-namespace Hartsy.Extensions.SharpInferenceBackend.Generation;
+namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
 /// <summary>
 /// Loads Anima (Cosmos-Predict2-2B family) models. Anima single-file checkpoints contain BOTH the DiT trunk
@@ -224,7 +224,7 @@ public static class AnimaLoader
             negativeT5TokenIds: negativeT5Ids,
             onProgress: bridge);
 
-        Logs.Verbose($"[SharpInference][Anima] Pipeline returned {outW}x{outH} in {Environment.TickCount64 - start}ms.");
+        Logs.Verbose($"[HartsyInference][Anima] Pipeline returned {outW}x{outH} in {Environment.TickCount64 - start}ms.");
         return new[] { RgbToImage.FromHwcRgb(rgbBytes, outW, outH) };
     }
 

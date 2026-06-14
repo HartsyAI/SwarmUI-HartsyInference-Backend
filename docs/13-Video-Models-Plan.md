@@ -1,6 +1,6 @@
 # 13 — Video Models Plan (Wan 2.2 TI2V-5B, LTX-Video)
 
-Goal: select a video model in SwarmUI and generate T2V / I2V through SharpInference's
+Goal: select a video model in SwarmUI and generate T2V / I2V through HartsyInference's
 in-process pipelines, with the same parameters and behavior the ComfyUI backend
 provides for those models. Comfy's handling (`WorkflowGeneratorModelSupport.cs`,
 `WGNodeData.SaveOutput`, `SwarmSaveAnimationWS.py`) is the baseline we mirror.
@@ -21,13 +21,13 @@ frame muxing. We must NOT re-implement:
 | Resolution fitting | `VideoResolution` semantics + `Utilities.ResToModelFit`, model `StandardWidth/Height` (Wan 960×960, LTX 768×512) | Apply the same logic Comfy does in `WorkflowGeneratorSteps` (~line 1926-1953) |
 
 What Swarm does NOT provide (genuinely ours to build):
-1. In-process loaders for the two architectures (checkpoint → SharpInference pipeline).
+1. In-process loaders for the two architectures (checkpoint → HartsyInference pipeline).
 2. Prompt encoding (Comfy loads the text encoder inside the Comfy process; we load
-   UMT5/T5 via SharpInference — same model *files*, selected by the same params).
+   UMT5/T5 via HartsyInference — same model *files*, selected by the same params).
 3. Raw RGB frames → encoded video container (Comfy does this in the
    `SwarmSaveAnimationWS` python node; for us it's a small ffmpeg-subprocess util).
 
-## SharpInference building blocks (already exist)
+## HartsyInference building blocks (already exist)
 
 - `WanVideoPipeline(backend, WanVideoTransformer, Wan22VaeDecoder, WanVideoConfig)`
   — `GenerateFromEmbeddings(promptEmbeds, negEmbeds, request, numFrames, onProgress, firstFrameLatent?)`
@@ -49,8 +49,8 @@ What Swarm does NOT provide (genuinely ours to build):
 
 ## Phase V1 — Text-to-Video (Wan 2.2 TI2V-5B + LTX-Video)
 
-### V1.0 Engine prereq (SharpInference repo)
-- [x] Embed the umT5 SentencePiece (256k, ~4.4 MB) in `SharpInference.Tokenizers`
+### V1.0 Engine prereq (HartsyInference repo)
+- [x] Embed the umT5 SentencePiece (256k, ~4.4 MB) in `HartsyInference.Tokenizers`
       (`Resources/umt5_spiece.model`) — `T5Tokenizer.CreateUmt5(maxLength)` factory added;
       Wan E2E test switched to it; embedded-resource tests verify the 256k vocab.
 - [x] fp8-scaled UMT5 load: already handled — `CheckpointConvertUtils.ApplyFp8ScaledDequant`
@@ -112,7 +112,7 @@ The only new subsystem — C# twin of `SwarmSaveAnimationWS.py`:
 - [x] Result wrapped as `new Image(bytes, MediaType.…)`; single frame short-circuits to PNG
       like the Comfy node. Swarm's save path + preview generation handle the rest.
 
-### V1.5 Backend wiring (`SharpInferenceBackend.cs`, `ModelSupport.cs`)
+### V1.5 Backend wiring (`HartsyInferenceBackend.cs`, `ModelSupport.cs`)
 - [x] `ModelSupport`: `wan-22-5b` + `lightricks-ltx-video` added to supported archs.
 - [x] `SupportedFeatures`: `"video"` advertised (exposes VideoFPS/VideoFormat/etc.).
       `"text2video"` needs no advertising — the UI derives it client-side from the model's
@@ -134,7 +134,7 @@ The only new subsystem — C# twin of `SwarmSaveAnimationWS.py`:
 
 ## Phase V2 — Image-to-Video (Wan TI2V first)
 
-- [x] **Engine:** `Wan22VaeEncoder` built in SharpInference (+ `AvgDown3D` shortcut,
+- [x] **Engine:** `Wan22VaeEncoder` built in HartsyInference (+ `AvgDown3D` shortcut,
       `Wan22Resample` downsample modes) with `EncodeRgbFrame(backend, rgb24, w, h)` →
       normalized `[1,48,1,H/16,W/16]` latent. Encoder key naming verified against the
       actual Comfy-Org `wan2.2_vae.safetensors` header (HTTP range fetch) — including

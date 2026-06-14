@@ -1,18 +1,18 @@
 using System.IO;
 using SwarmUI.Text2Image;
 using SwarmUI.Utils;
-using SharpInference.Core.Backends;
-using SharpInference.Core.Tensors;
-using SharpInference.Diffusion.Models.Denoisers;
-using SharpInference.Diffusion.Models.TextEncoders;
-using SharpInference.Diffusion.Models.Vae;
-using SharpInference.Diffusion.Pipelines;
-using SharpInference.Diffusion.Requests;
-using SharpInference.ModelHandler.CheckpointConverters;
-using SharpInference.ModelHandler.SafeTensors;
-using SharpInference.Tokenizers;
+using HartsyInference.Core.Backends;
+using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Models.Denoisers;
+using HartsyInference.Diffusion.Models.TextEncoders;
+using HartsyInference.Diffusion.Models.Vae;
+using HartsyInference.Diffusion.Pipelines;
+using HartsyInference.Diffusion.Requests;
+using HartsyInference.ModelHandler.CheckpointConverters;
+using HartsyInference.ModelHandler.SafeTensors;
+using HartsyInference.Tokenizers;
 
-namespace Hartsy.Extensions.SharpInferenceBackend.Generation;
+namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
 /// <summary>
 /// Loads Stable Diffusion 3 / 3.5 (Medium, 3.5 Medium, 3.5 Large). Three text encoders:
@@ -270,7 +270,7 @@ public static class Sd3Loader
                 promptMaskT5, negMaskT5,
                 request, bridge);
 
-            Logs.Verbose($"[SharpInference][SD3] Pipeline returned {outW}x{outH} in {Environment.TickCount64 - start}ms.");
+            Logs.Verbose($"[HartsyInference][SD3] Pipeline returned {outW}x{outH} in {Environment.TickCount64 - start}ms.");
             return new[] { RgbToImage.FromHwcRgb(rgbBytes, outW, outH) };
         }
         finally

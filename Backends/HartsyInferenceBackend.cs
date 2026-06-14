@@ -4,31 +4,31 @@ using Newtonsoft.Json.Linq;
 using SwarmUI.Backends;
 using SwarmUI.Text2Image;
 using SwarmUI.Utils;
-using Hartsy.Extensions.SharpInferenceBackend.Generation;
-using SharpInference.Core.Backends;
-using SiLogs = SharpInference.Core.Logging.Logs;
-using SharpInference.Cpu;
-using SharpInference.Cuda;
-using SharpInference.Diffusion.Pipelines;
-using SharpInference.Diffusion.Requests;
-using SharpInference.Vulkan;
+using Hartsy.Extensions.HartsyInferenceBackend.Generation;
+using HartsyInference.Core.Backends;
+using SiLogs = HartsyInference.Core.Logging.Logs;
+using HartsyInference.Cpu;
+using HartsyInference.Cuda;
+using HartsyInference.Diffusion.Pipelines;
+using HartsyInference.Diffusion.Requests;
+using HartsyInference.Vulkan;
 
-namespace Hartsy.Extensions.SharpInferenceBackend.Backends;
+namespace Hartsy.Extensions.HartsyInferenceBackend.Backends;
 
 /// <summary>
-/// SwarmUI backend that performs diffusion inference in-process via SharpInference.
+/// SwarmUI backend that performs diffusion inference in-process via HartsyInference.
 /// See docs/06-Backend-Lifecycle.md for the full lifecycle contract.
 /// </summary>
-public class SharpInferenceBackend : AbstractT2IBackend
+public class HartsyInferenceBackend : AbstractT2IBackend
 {
     /// <summary>Settings persisted to Data/Backends.fds. Must be nested inside the
     /// backend class so BackendHandler.RegisterBackendType discovers it via reflection.</summary>
-    public class SharpInferenceBackendSettings : AutoConfiguration
+    public class HartsyInferenceBackendSettings : AutoConfiguration
     {
         [ConfigComment("Compute backend to use. 'auto' tries CUDA, then Vulkan, then CPU.")]
         public string ComputeBackend = "auto";
 
-        [ConfigComment("Which GPU to use, if multiple are available (0 = first GPU, 1 = second, etc.).\nIgnored for the CPU compute backend. SharpInference uses a single GPU per backend — to use multiple GPUs, add one backend per GPU.")]
+        [ConfigComment("Which GPU to use, if multiple are available (0 = first GPU, 1 = second, etc.).\nIgnored for the CPU compute backend. HartsyInference uses a single GPU per backend — to use multiple GPUs, add one backend per GPU.")]
         public int DeviceOrdinal = 0;
 
         [ConfigComment("Maximum number of model pipelines to keep cached in VRAM/RAM at once.\nHigher values avoid reloading when switching between models, at the cost of memory. 1 is recommended for a single GPU.")]
@@ -44,9 +44,9 @@ public class SharpInferenceBackend : AbstractT2IBackend
         public string PreviewMethod = "latent2rgb";
     }
 
-    public SharpInferenceBackendSettings Settings => SettingsRaw as SharpInferenceBackendSettings;
+    public HartsyInferenceBackendSettings Settings => SettingsRaw as HartsyInferenceBackendSettings;
 
-    /// <summary>The SharpInference IBackend (CPU / Vulkan / CUDA). Constructed in <see cref="Init"/>.</summary>
+    /// <summary>The HartsyInference IBackend (CPU / Vulkan / CUDA). Constructed in <see cref="Init"/>.</summary>
     private IBackend _backend;
 
     /// <summary>Pipeline cache. One entry per loaded checkpoint.</summary>
@@ -56,7 +56,7 @@ public class SharpInferenceBackend : AbstractT2IBackend
     private CancellationTokenSource _cancelCts;
 
     /// <summary>Serializes generations so a backend with <c>OverQueue &gt; 0</c> (MaxUsages &gt; 1) accepts
-    /// extra requests into a queue but still runs them ONE AT A TIME. SharpInference shares
+    /// extra requests into a queue but still runs them ONE AT A TIME. HartsyInference shares
     /// <see cref="_backend"/> / <see cref="_cache"/> / <see cref="_cancelCts"/> across a generation, so
     /// concurrent execution would collide — this lock makes the over-queue safe by holding extra
     /// dispatched jobs here until the current one finishes.</summary>
@@ -71,15 +71,15 @@ public class SharpInferenceBackend : AbstractT2IBackend
             // etc. — all tagged "comfyui") would route to us and be silently dropped.
             //
             // Trade-off: with no "comfyui" flag, params tagged "comfyui" disappear from
-            // the UI when SharpInference is the only configured backend. For Flux that's
+            // the UI when HartsyInference is the only configured backend. For Flux that's
             // correct — we use FlowMatchEulerDiscrete unconditionally and don't expose
-            // sampler choice. When both Comfy and SharpInference are configured, the
+            // sampler choice. When both Comfy and HartsyInference are configured, the
             // UI shows comfyui params (their union) and T2IEngine routes them to Comfy.
             //
             // As we ship real capabilities (LoRA, refiner, ControlNet, img2img), add the
             // matching specific flag here. Mirror Comfy's NodeToFeatureMap: only declare
             // what's compiled in.
-            yield return "sharpinference";
+            yield return "hartsyinference";
             yield return "text2image";
             yield return "flux-dev";   // in DisregardedFeatureFlags — informational, but signals that FluxGuidanceScale is honored
             yield return "lora";       // SD 1.5 / SDXL / Flux supported via LoraStack; SD3 / Z-Image refused at validation time
@@ -96,7 +96,7 @@ public class SharpInferenceBackend : AbstractT2IBackend
         }
     }
 
-    /// <summary>Bridges SharpInference's internal logger into Swarm's logging system so
+    /// <summary>Bridges HartsyInference's internal logger into Swarm's logging system so
     /// diagnostics like the OOM probe in CudaMemory.Allocate appear in the main log file
     /// instead of falling into Console.Error (where Swarm captures stdout but routes it
     /// inconsistently). Idempotent — safe to call multiple times.</summary>
@@ -104,23 +104,23 @@ public class SharpInferenceBackend : AbstractT2IBackend
     private static void EnsureLoggerWired()
     {
         if (Interlocked.Exchange(ref _loggerWired, 1) != 0) return;
-        // Don't double-filter. Set SharpInference's level to Verbose (the chattiest) so
+        // Don't double-filter. Set HartsyInference's level to Verbose (the chattiest) so
         // every message reaches the bridge below; Swarm's own MinimumLevel filter then
         // decides what actually appears in the log/UI. Mirroring Swarm's MinimumLevel
         // here was fragile: Swarm's level can change at runtime (settings UI, debug flag),
         // and a stale snapshot meant Verbose progress was getting dropped at the
-        // SharpInference layer before it ever had a chance to be forwarded.
-        SiLogs.MinLevel = SharpInference.Core.Logging.LogLevel.Verbose;
+        // HartsyInference layer before it ever had a chance to be forwarded.
+        SiLogs.MinLevel = HartsyInference.Core.Logging.LogLevel.Verbose;
 
         SiLogs.SetLogger((level, msg) =>
         {
             switch (level)
             {
-                case SharpInference.Core.Logging.LogLevel.Verbose: Logs.Verbose(msg); break;
-                case SharpInference.Core.Logging.LogLevel.Debug: Logs.Debug(msg); break;
-                case SharpInference.Core.Logging.LogLevel.Info: Logs.Info(msg); break;
-                case SharpInference.Core.Logging.LogLevel.Warning: Logs.Warning(msg); break;
-                case SharpInference.Core.Logging.LogLevel.Error: Logs.Error(msg); break;
+                case HartsyInference.Core.Logging.LogLevel.Verbose: Logs.Verbose(msg); break;
+                case HartsyInference.Core.Logging.LogLevel.Debug: Logs.Debug(msg); break;
+                case HartsyInference.Core.Logging.LogLevel.Info: Logs.Info(msg); break;
+                case HartsyInference.Core.Logging.LogLevel.Warning: Logs.Warning(msg); break;
+                case HartsyInference.Core.Logging.LogLevel.Error: Logs.Error(msg); break;
                 default: Logs.Info(msg); break;
             }
         });
@@ -137,7 +137,7 @@ public class SharpInferenceBackend : AbstractT2IBackend
             // Kernels ship in our extension's own output dir, NOT Swarm's main runtime
             // dir (which is what AppContext.BaseDirectory returns when running inside
             // the Swarm process). Resolve from this assembly's location instead.
-            string extensionDir = Path.GetDirectoryName(typeof(SharpInferenceBackend).Assembly.Location) ?? AppContext.BaseDirectory;
+            string extensionDir = Path.GetDirectoryName(typeof(HartsyInferenceBackend).Assembly.Location) ?? AppContext.BaseDirectory;
             string ptxDir = string.IsNullOrWhiteSpace(Settings?.PtxDirectory)
                 ? Path.Combine(extensionDir, "Ptx")
                 : Settings.PtxDirectory;
@@ -161,20 +161,20 @@ public class SharpInferenceBackend : AbstractT2IBackend
             // disconnected) — it would make BackendHandler skip us for routing.
             Status = BackendStatus.RUNNING;
             AddLoadStatus("Ready. Pick a Flux .safetensors checkpoint to generate.");
-            Logs.Init($"[SharpInference] Backend #{BackendData?.ID} live on {_backend.Capabilities.Name}");
+            Logs.Init($"[HartsyInference] Backend #{BackendData?.ID} live on {_backend.Capabilities.Name}");
         }
         catch (Exception ex)
         {
             Status = BackendStatus.ERRORED;
             AddLoadStatus($"Init failed: {ex.Message}");
-            Logs.Error($"[SharpInference] Backend #{BackendData?.ID} init failed: {ex}");
+            Logs.Error($"[HartsyInference] Backend #{BackendData?.ID} init failed: {ex}");
             throw;
         }
 
         await Task.CompletedTask;
     }
 
-    /// <summary>Resolve the user's compute-backend choice into a live SharpInference IBackend.</summary>
+    /// <summary>Resolve the user's compute-backend choice into a live HartsyInference IBackend.</summary>
     /// <summary>Renders an ASCII progress bar for log lines: <c>[████████░░░░░░░░░░░░] 40.0%</c>.
     /// 20 cells wide so each cell represents exactly 5% — matches the 5%-threshold throttling
     /// in <c>progressBridge</c>, so the bar visibly grows by one filled cell per logged line.</summary>
@@ -218,7 +218,7 @@ public class SharpInferenceBackend : AbstractT2IBackend
         try { return new VulkanBackend(ordinal, spvDir); }
         catch (Exception ex) { attempts.Add($"Vulkan: {ex.Message}"); }
 
-        Logs.Info($"[SharpInference] Auto-backend falling through to CPU. Tried: {string.Join(" | ", attempts)}");
+        Logs.Info($"[HartsyInference] Auto-backend falling through to CPU. Tried: {string.Join(" | ", attempts)}");
         return new CpuBackend();
     }
 
@@ -307,6 +307,22 @@ public class SharpInferenceBackend : AbstractT2IBackend
                 {
                     ChromaCacheEntry entry = ChromaLoader.Load(_backend, model, input, msg => AddLoadStatus(msg));
                     _cache.PutChroma(entry);
+                });
+            }
+            else if (compat == ChromaRadianceLoader.ChromaRadianceCompatClassId)
+            {
+                await Task.Run(() =>
+                {
+                    ChromaRadianceCacheEntry entry = ChromaRadianceLoader.Load(_backend, model, input, msg => AddLoadStatus(msg));
+                    _cache.PutChromaRadiance(entry);
+                });
+            }
+            else if (compat == ZetaChromaLoader.ZetaChromaCompatClassId)
+            {
+                await Task.Run(() =>
+                {
+                    ZetaChromaCacheEntry entry = ZetaChromaLoader.Load(_backend, model, input, msg => AddLoadStatus(msg));
+                    _cache.PutZetaChroma(entry);
                 });
             }
             else if (compat == AuraFlowLoader.AuraFlowCompatClassId)
@@ -431,7 +447,7 @@ public class SharpInferenceBackend : AbstractT2IBackend
             }
             else
             {
-                Logs.Warning($"[SharpInference] LoadModel: architecture '{compat}' not supported. Returning false so another backend can handle it.");
+                Logs.Warning($"[HartsyInference] LoadModel: architecture '{compat}' not supported. Returning false so another backend can handle it.");
                 return false;
             }
 
@@ -440,7 +456,7 @@ public class SharpInferenceBackend : AbstractT2IBackend
         }
         catch (Exception ex)
         {
-            Logs.Error($"[SharpInference] LoadModel failed for '{model.Name}' ({compat}): {ex}");
+            Logs.Error($"[HartsyInference] LoadModel failed for '{model.Name}' ({compat}): {ex}");
             return false;
         }
         finally
@@ -480,7 +496,7 @@ public class SharpInferenceBackend : AbstractT2IBackend
             string compat = model.ModelClass?.CompatClass?.ID;
             if (!ModelSupport.IsArchitectureSupported(compat))
             {
-                throw new InvalidOperationException($"SharpInference doesn't yet support architecture '{compat}'.");
+                throw new InvalidOperationException($"HartsyInference doesn't yet support architecture '{compat}'.");
             }
 
             // Verbose: full job acceptance line with the parameters that drive timing /
@@ -492,7 +508,7 @@ public class SharpInferenceBackend : AbstractT2IBackend
             long wantedSeed = input.Get(T2IParamTypes.Seed);
             string promptPreview = input.Get(T2IParamTypes.Prompt) ?? "";
             if (promptPreview.Length > 80) promptPreview = promptPreview[..80] + "…";
-            Logs.Verbose($"[SharpInference] Backend #{BackendData?.ID} accepted job batch='{batchId}' " +
+            Logs.Verbose($"[HartsyInference] Backend #{BackendData?.ID} accepted job batch='{batchId}' " +
                 $"model='{model.Name}' compat='{compat}' {wantedW}x{wantedH} steps={wantedSteps} seed={wantedSeed} " +
                 $"prompt=\"{promptPreview}\"");
 
@@ -501,17 +517,17 @@ public class SharpInferenceBackend : AbstractT2IBackend
             bool cacheHit = CurrentModelName == model.Name && IsCached(compat, model.Name);
             if (cacheHit)
             {
-                Logs.Verbose($"[SharpInference] Model cache HIT — '{model.Name}' already resident, skipping load.");
+                Logs.Verbose($"[HartsyInference] Model cache HIT — '{model.Name}' already resident, skipping load.");
             }
             else
             {
-                Logs.Verbose($"[SharpInference] Model cache MISS — loading '{model.Name}' (current='{CurrentModelName ?? "<none>"}')");
+                Logs.Verbose($"[HartsyInference] Model cache MISS — loading '{model.Name}' (current='{CurrentModelName ?? "<none>"}')");
                 long loadStartMs = Environment.TickCount64;
                 if (!await LoadModel(model, input))
                 {
                     throw new InvalidOperationException($"Failed to load model '{model.Name}'.");
                 }
-                Logs.Verbose($"[SharpInference] Model load complete in {Environment.TickCount64 - loadStartMs}ms.");
+                Logs.Verbose($"[HartsyInference] Model load complete in {Environment.TickCount64 - loadStartMs}ms.");
             }
 
             CancellationToken cancel = _cancelCts.Token;
@@ -536,7 +552,7 @@ public class SharpInferenceBackend : AbstractT2IBackend
                 if (threshold != lastLoggedThreshold)
                 {
                     lastLoggedThreshold = threshold;
-                    Logs.Verbose($"[SharpInference] Progress batch='{batchId}' {RenderProgressBar(overall)} step {p.Step}/{p.TotalSteps}");
+                    Logs.Verbose($"[HartsyInference] Progress batch='{batchId}' {RenderProgressBar(overall)} step {p.Step}/{p.TotalSteps}");
                 }
                 JObject previewObj = previewEncoder.Enabled
                     ? previewEncoder.TryEncode(p, batchId, overall)
@@ -592,9 +608,9 @@ public class SharpInferenceBackend : AbstractT2IBackend
             // runs once here (before the lambda) and the resulting tokens flow through the
             // arch-specific loader. `using` ensures the spec's owned image-token tensors
             // are disposed at the end of the try block.
-            SharpInference.Diffusion.Adapters.IpAdapterBaseModel? ipaBaseModel = null;
-            if (compat == SdxlLoader.SdxlCompatClassId) ipaBaseModel = SharpInference.Diffusion.Adapters.IpAdapterBaseModel.Sdxl;
-            else if (compat == Sd15Loader.Sd15CompatClassId) ipaBaseModel = SharpInference.Diffusion.Adapters.IpAdapterBaseModel.Sd15;
+            HartsyInference.Diffusion.Adapters.IpAdapterBaseModel? ipaBaseModel = null;
+            if (compat == SdxlLoader.SdxlCompatClassId) ipaBaseModel = HartsyInference.Diffusion.Adapters.IpAdapterBaseModel.Sdxl;
+            else if (compat == Sd15Loader.Sd15CompatClassId) ipaBaseModel = HartsyInference.Diffusion.Adapters.IpAdapterBaseModel.Sd15;
             using IpAdapterResolver.ResolvedSpec ipaSpec = ipaBaseModel.HasValue
                 ? IpAdapterResolver.Resolve(input, _backend, ipaBaseModel.Value,
                     msg => AddLoadStatus(msg),
@@ -647,6 +663,18 @@ public class SharpInferenceBackend : AbstractT2IBackend
                     ChromaCacheEntry entry = _cache.TryGetChroma(model.Name)
                         ?? throw new InvalidOperationException("Chroma model loaded but not in cache.");
                     return ChromaLoader.Generate(entry, input, progressBridge, cancel);
+                }
+                if (compat == ChromaRadianceLoader.ChromaRadianceCompatClassId)
+                {
+                    ChromaRadianceCacheEntry entry = _cache.TryGetChromaRadiance(model.Name)
+                        ?? throw new InvalidOperationException("Chroma Radiance model loaded but not in cache.");
+                    return ChromaRadianceLoader.Generate(entry, input, progressBridge, cancel);
+                }
+                if (compat == ZetaChromaLoader.ZetaChromaCompatClassId)
+                {
+                    ZetaChromaCacheEntry entry = _cache.TryGetZetaChroma(model.Name)
+                        ?? throw new InvalidOperationException("Zeta-Chroma model loaded but not in cache.");
+                    return ZetaChromaLoader.Generate(entry, _backend, input, progressBridge, cancel);
                 }
                 if (compat == AuraFlowLoader.AuraFlowCompatClassId)
                 {
@@ -764,12 +792,25 @@ public class SharpInferenceBackend : AbstractT2IBackend
                 images = await Task.Run(() => RefinePass(images, refinerSpec, input, progressBridge, cancel), cancel);
             }
 
+            // Segment refinement (<segment:yolo-...>): detect → mask → re-denoise the region with
+            // the segment's prompt via the arch's existing img2img+inpaint path. Validation has
+            // already guaranteed the arch is inpaint-capable and all targets are YOLO.
+            if (SegmentRefiner.HasSegments(input))
+            {
+                Image[] preSegment = images;
+                images = await Task.Run(() => SegmentRefiner.Apply(
+                    _backend, preSegment, input,
+                    reGenerate: segInput => RunSegmentRedenoise(model, compat, segInput, cancel),
+                    log: msg => Logs.Verbose($"[HartsyInference] {msg}"),
+                    cancel: cancel), cancel);
+            }
+
             // Yield final images.
             long totalMs = Environment.TickCount64 - startMs;
             int idx = 0;
             foreach (Image img in images)
             {
-                Logs.Verbose($"[SharpInference] Yielding image {idx + 1}/{images.Length} batch='{batchId}' (genTime={totalMs}ms, bytes={img.RawData?.Length ?? 0})");
+                Logs.Verbose($"[HartsyInference] Yielding image {idx + 1}/{images.Length} batch='{batchId}' (genTime={totalMs}ms, bytes={img.RawData?.Length ?? 0})");
                 takeOutput(new T2IEngine.ImageOutput
                 {
                     File = img,
@@ -778,11 +819,11 @@ public class SharpInferenceBackend : AbstractT2IBackend
                 });
                 idx++;
             }
-            Logs.Verbose($"[SharpInference] Job batch='{batchId}' complete: {images.Length} image(s) in {totalMs}ms.");
+            Logs.Verbose($"[HartsyInference] Job batch='{batchId}' complete: {images.Length} image(s) in {totalMs}ms.");
         }
         catch (OperationCanceledException)
         {
-            Logs.Info("[SharpInference] Generation cancelled by user.");
+            Logs.Info("[HartsyInference] Generation cancelled by user.");
         }
         finally
         {
@@ -821,7 +862,7 @@ public class SharpInferenceBackend : AbstractT2IBackend
         for (int i = 0; i < baseImages.Length; i++)
         {
             cancel.ThrowIfCancellationRequested();
-            Logs.Info($"[SharpInference] Refining image {i + 1}/{baseImages.Length} (strength={spec.Strength}, steps={spec.Steps}, cfg={spec.CfgScale}).");
+            Logs.Info($"[HartsyInference] Refining image {i + 1}/{baseImages.Length} (strength={spec.Strength}, steps={spec.Steps}, cfg={spec.CfgScale}).");
             refined[i] = RefinerLoader.Refine(
                 refinerEntry, baseImages[i], input,
                 steps: spec.Steps,
@@ -833,15 +874,50 @@ public class SharpInferenceBackend : AbstractT2IBackend
         return refined;
     }
 
+    /// <summary>Re-denoise one segment region by dispatching the cloned input (InitImage + MaskImage +
+    /// segment prompt already set) through the active architecture's existing img2img+inpaint path.
+    /// Only the inpaint-capable arches reach here (validation enforces it). Progress is swallowed —
+    /// the base gen already drove the UI bar; segment passes are short.</summary>
+    private Image[] RunSegmentRedenoise(T2IModel model, string compat, T2IParamInput segInput, CancellationToken cancel)
+    {
+        static void NoProgress(GenerationProgress _) { }
+        if (compat == SdxlLoader.SdxlCompatClassId)
+        {
+            SdxlCacheEntry entry = _cache.TryGetSdxl(model.Name)
+                ?? throw new InvalidOperationException("SDXL model not in cache for segment re-denoise.");
+            return SdxlLoader.Generate(entry, segInput, NoProgress, cancel, refinerSwap: null, ipAdapters: null);
+        }
+        if (compat == FluxLoader.Flux1CompatClassId)
+        {
+            FluxCacheEntry entry = _cache.TryGetFlux(model.Name)
+                ?? throw new InvalidOperationException("Flux model not in cache for segment re-denoise.");
+            return FluxLoader.Generate(entry, segInput, NoProgress, cancel);
+        }
+        if (Sd3Loader.IsSd3Compat(compat))
+        {
+            Sd3CacheEntry entry = _cache.TryGetSd3(model.Name)
+                ?? throw new InvalidOperationException("SD3 model not in cache for segment re-denoise.");
+            return Sd3Loader.Generate(entry, segInput, NoProgress, cancel);
+        }
+        throw new InvalidOperationException($"Segment re-denoise not supported for compat '{compat}'.");
+    }
+
     /// <summary>Swarm prompt-syntax tags that a backend must service via conditioning /
-    /// segmentation machinery we don't have yet. Comfy handles these through
+    /// regional machinery we don't have yet. Comfy handles these through
     /// SwarmClipTextEncodeAdvanced + mask nodes; if we let them through, the tag text
     /// would be fed RAW into the text encoder and silently corrupt the generation.
-    /// Refuse instead — punchlist P3; P5 (YOLO) lifts `segment`, regional-conditioning
-    /// work lifts `region`/`object`/`break`.</summary>
+    /// Refuse instead. NOTE: <c>segment</c> is handled separately (YOLO segment refinement
+    /// IS supported on inpaint-capable arches) so it's NOT in this regex.</summary>
     private static readonly System.Text.RegularExpressions.Regex UnsupportedPromptSyntax =
-        new(@"<(segment|object|region|clear|embed)\s*:|<break\s*>",
+        new(@"<(object|region|clear|embed)\s*:|<break\s*>",
             System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    /// <summary>Architectures whose pipelines have the inpaint blend path — the only ones that
+    /// can run YOLO segment re-denoise (which is img2img + mask under the hood).</summary>
+    private static bool IsInpaintCapable(string compat) =>
+        compat == SdxlLoader.SdxlCompatClassId
+        || compat == FluxLoader.Flux1CompatClassId
+        || Sd3Loader.IsSd3Compat(compat);
 
     public override bool IsValidForThisBackend(T2IParamInput input)
     {
@@ -862,38 +938,59 @@ public class SharpInferenceBackend : AbstractT2IBackend
             {
                 string tag = match.Value.TrimStart('<').TrimEnd(':', '>', ' ');
                 input.RefusalReasons.Add(
-                    $"SharpInference: the '<{tag}:...>' prompt syntax isn't supported yet "
-                    + "(needs segmentation / regional-conditioning machinery). Remove the tag, "
+                    $"HartsyInference: the '<{tag}:...>' prompt syntax isn't supported yet "
+                    + "(needs regional-conditioning machinery). Remove the tag, "
                     + "or use a ComfyUI backend for this generation.");
                 return false;
             }
         }
 
-        // Variation seed: wired for SD 1.5 + SDXL (spatial [1,4,H/8,W/8] latents via
-        // InitialNoise slerp). Packed-latent archs (Flux, SD3, ...) need per-arch noise
-        // shapes before this lifts.
+        // Segment refinement (<segment:yolo-...>): supported on inpaint-capable arches with YOLO
+        // targets. Refuse cleanly for non-inpaint arches or non-YOLO (text/CLIP-Seg) targets.
+        if (SegmentRefiner.HasSegments(input))
+        {
+            if (!IsInpaintCapable(compat))
+            {
+                input.RefusalReasons.Add(
+                    $"HartsyInference: '<segment:>' refinement needs an inpaint-capable architecture "
+                    + $"(SDXL, Flux, or SD3); got '{compat}'. Remove the segment tag or switch models.");
+                return false;
+            }
+            if (!SegmentRefiner.AllSegmentsAreYolo(input))
+            {
+                input.RefusalReasons.Add(
+                    "HartsyInference: only '<segment:yolo-MODEL>' targets are supported (the engine has YOLO "
+                    + "detection but no CLIP-Seg/text segmentation head). Use a yolo- target, or a ComfyUI backend.");
+                return false;
+            }
+        }
+
+        // Variation seed: wired for SD 1.5 + SDXL (spatial [1,4,H/8,W/8]) and Flux
+        // ([1,16,H/8,W/8] unpacked) via InitialNoise slerp. SD3 doesn't inject
+        // InitialNoise in its pipeline yet (engine work), so it stays refused.
         if (input.TryGet(T2IParamTypes.VariationSeedStrength, out double varStrength) && varStrength > 0
             && input.TryGet(T2IParamTypes.VariationSeed, out long _))
         {
             bool varSeedSupported = compat == Sd15Loader.Sd15CompatClassId
-                || compat == SdxlLoader.SdxlCompatClassId;
+                || compat == SdxlLoader.SdxlCompatClassId
+                || compat == FluxLoader.Flux1CompatClassId;
             if (!varSeedSupported)
             {
                 input.RefusalReasons.Add(
-                    $"SharpInference: Variation Seed is currently supported on SD 1.5 and SDXL only (got '{compat}'). "
-                    + "Disable the Variation Seed group or pick an SD 1.5 / SDXL model.");
+                    $"HartsyInference: Variation Seed is currently supported on SD 1.5, SDXL, and Flux (got '{compat}'). "
+                    + "Disable the Variation Seed group or pick a supported model.");
                 return false;
             }
         }
         if (!ModelSupport.IsArchitectureSupported(compat))
         {
-            // Be specific about WHY this architecture is unsupported. SharpInference itself
+            // Be specific about WHY this architecture is unsupported. HartsyInference itself
             // has pipelines for many more architectures than the SwarmUI extension currently
             // dispatches to — we just haven't wired the per-arch loader (text-encoder selection,
             // VAE auto-download, tokenizer setup, IsValidForThisBackend rules) yet. Distinguish
-            // those cases from architectures SharpInference doesn't support at all.
+            // those cases from architectures HartsyInference doesn't support at all.
             string status = ModelSupport.WhyNotSupported(compat);
-            input.RefusalReasons.Add($"SharpInference: {status}");
+            input.RefusalReasons.Add($"HartsyInference: {status}");
             return false;
         }
 
@@ -903,7 +1000,7 @@ public class SharpInferenceBackend : AbstractT2IBackend
         if (input.Get(T2IParamTypes.VideoModel) is not null)
         {
             input.RefusalReasons.Add(
-                "SharpInference: the image-then-animate flow (Video Model param) isn't supported. "
+                "HartsyInference: the image-then-animate flow (Video Model param) isn't supported. "
                 + "For image-to-video, select a Wan 2.2 TI2V model as the main model and set an Init Image instead.");
             return false;
         }
@@ -918,17 +1015,17 @@ public class SharpInferenceBackend : AbstractT2IBackend
         {
             if (input.Get(T2IParamTypes.InitImage) is not null)
             {
-                input.RefusalReasons.Add("SharpInference: this is a music model — remove the Init Image.");
+                input.RefusalReasons.Add("HartsyInference: this is a music model — remove the Init Image.");
                 return false;
             }
             if (input.Get(T2IParamTypes.RefinerModel) is not null)
             {
-                input.RefusalReasons.Add("SharpInference: refiners can't run over audio outputs. Remove the Refiner Model selection.");
+                input.RefusalReasons.Add("HartsyInference: refiners can't run over audio outputs. Remove the Refiner Model selection.");
                 return false;
             }
             if (input.TryGet(T2IParamTypes.Loras, out List<string> audioLoras) && audioLoras is not null && audioLoras.Count > 0)
             {
-                input.RefusalReasons.Add("SharpInference: LoRAs aren't supported for music models yet. Remove the LoRA selection.");
+                input.RefusalReasons.Add("HartsyInference: LoRAs aren't supported for music models yet. Remove the LoRA selection.");
                 return false;
             }
             return true;
@@ -946,36 +1043,36 @@ public class SharpInferenceBackend : AbstractT2IBackend
             if (input.Get(T2IParamTypes.InitImage) is not null && compat == LtxVideoLoader.LtxVideoCompatClassId)
             {
                 input.RefusalReasons.Add(
-                    "SharpInference: image-to-video isn't supported for LTX-Video (text-to-video only). "
+                    "HartsyInference: image-to-video isn't supported for LTX-Video (text-to-video only). "
                     + "Remove the Init Image, or use a Wan 2.2 TI2V model for image-to-video.");
                 return false;
             }
             if (input.Get(T2IParamTypes.InitImage) is not null && compat == LanceLoader.LanceVideoCompatClassId)
             {
                 input.RefusalReasons.Add(
-                    "SharpInference: image-to-video isn't supported for Lance yet (text-to-video only — the "
+                    "HartsyInference: image-to-video isn't supported for Lance yet (text-to-video only — the "
                     + "image-editing/I2V path needs the frozen Qwen2.5-VL ViT, which the engine defers). "
                     + "Remove the Init Image, or use a Wan 2.2 TI2V model for image-to-video.");
                 return false;
             }
             if (input.Get(T2IParamTypes.VideoEndFrame) is not null)
             {
-                input.RefusalReasons.Add("SharpInference: video end-frame conditioning isn't supported yet. Remove the Video End Image.");
+                input.RefusalReasons.Add("HartsyInference: video end-frame conditioning isn't supported yet. Remove the Video End Image.");
                 return false;
             }
             if (input.Get(T2IParamTypes.VideoExtendModel) is not null)
             {
-                input.RefusalReasons.Add("SharpInference: video extending isn't supported yet. Remove the Video Extend Model selection.");
+                input.RefusalReasons.Add("HartsyInference: video extending isn't supported yet. Remove the Video Extend Model selection.");
                 return false;
             }
             if (input.Get(T2IParamTypes.VideoAudioInput) is not null || input.Get(T2IParamTypes.VideoAudioReference) is not null)
             {
-                input.RefusalReasons.Add("SharpInference: audio-conditioned video isn't supported (no supported model uses it). Remove the audio input.");
+                input.RefusalReasons.Add("HartsyInference: audio-conditioned video isn't supported (no supported model uses it). Remove the audio input.");
                 return false;
             }
             if (input.Get(T2IParamTypes.RefinerModel) is not null)
             {
-                input.RefusalReasons.Add("SharpInference: refiners can't run over video outputs. Remove the Refiner Model selection.");
+                input.RefusalReasons.Add("HartsyInference: refiners can't run over video outputs. Remove the Refiner Model selection.");
                 return false;
             }
         }
@@ -1007,7 +1104,7 @@ public class SharpInferenceBackend : AbstractT2IBackend
             if (refinerCompat != SdxlLoader.SdxlRefinerCompatClassId)
             {
                 input.RefusalReasons.Add(
-                    $"SharpInference: refiner model '{refinerModel.Name}' has compat class '{refinerCompat ?? "unknown"}', " +
+                    $"HartsyInference: refiner model '{refinerModel.Name}' has compat class '{refinerCompat ?? "unknown"}', " +
                     $"but only the official SDXL Refiner ('{SdxlLoader.SdxlRefinerCompatClassId}') is currently supported as a refiner.");
                 return false;
             }
@@ -1017,7 +1114,7 @@ public class SharpInferenceBackend : AbstractT2IBackend
                 if (compat != SdxlLoader.SdxlCompatClassId)
                 {
                     input.RefusalReasons.Add(
-                        $"SharpInference: refiner method 'StepSwap' is currently SDXL-base only " +
+                        $"HartsyInference: refiner method 'StepSwap' is currently SDXL-base only " +
                         $"(got base architecture '{compat}'). Switch the base model to SDXL or use 'PostApply' instead.");
                     return false;
                 }
@@ -1025,7 +1122,7 @@ public class SharpInferenceBackend : AbstractT2IBackend
             else if (refinerMethod != "PostApply")
             {
                 input.RefusalReasons.Add(
-                    $"SharpInference: refiner method '{refinerMethod}' isn't supported. " +
+                    $"HartsyInference: refiner method '{refinerMethod}' isn't supported. " +
                     "Use 'PostApply' (any base) or 'StepSwap' (SDXL base only).");
                 return false;
             }
@@ -1033,14 +1130,14 @@ public class SharpInferenceBackend : AbstractT2IBackend
             if (Math.Abs(refinerUpscale - 1.0) > 1e-6)
             {
                 input.RefusalReasons.Add(
-                    $"SharpInference: Refiner Upscale != 1.0 (got {refinerUpscale}) isn't supported yet. " +
+                    $"HartsyInference: Refiner Upscale != 1.0 (got {refinerUpscale}) isn't supported yet. " +
                     "Set Refiner Upscale to 1 or pick a different backend.");
                 return false;
             }
             if (input.Get(T2IParamTypes.RefinerVAE) is not null)
             {
                 input.RefusalReasons.Add(
-                    "SharpInference: Refiner VAE override isn't supported yet — we use the refiner checkpoint's bundled VAE. " +
+                    "HartsyInference: Refiner VAE override isn't supported yet — we use the refiner checkpoint's bundled VAE. " +
                     "Clear the Refiner VAE selection or pick a different backend.");
                 return false;
             }
@@ -1061,7 +1158,7 @@ public class SharpInferenceBackend : AbstractT2IBackend
             if (!isLoraSupported)
             {
                 input.RefusalReasons.Add(
-                    $"SharpInference: LoRAs aren't yet supported on architecture '{compat}'. " +
+                    $"HartsyInference: LoRAs aren't yet supported on architecture '{compat}'. " +
                     $"Currently supported: SD 1.5, SDXL, Flux, Wan 2.2. Remove the LoRA selection or pick a model from a supported architecture.");
                 return false;
             }
@@ -1077,12 +1174,13 @@ public class SharpInferenceBackend : AbstractT2IBackend
                 || compat == SdxlLoader.SdxlCompatClassId
                 || compat == FluxLoader.Flux1CompatClassId
                 || Sd3Loader.IsSd3Compat(compat)
-                || compat == ZImageLoader.ZImageCompatClassId;
+                || compat == ZImageLoader.ZImageCompatClassId
+                || Flux2Loader.IsFlux2Compat(compat);
             if (!isImg2ImgSupported)
             {
                 input.RefusalReasons.Add(
-                    $"SharpInference: img2img isn't supported on architecture '{compat}' yet. " +
-                    $"Currently supported: SD 1.5, SDXL, Flux, SD3, Z-Image. Remove the Init Image or pick a model from a supported architecture.");
+                    $"HartsyInference: img2img isn't supported on architecture '{compat}' yet. " +
+                    $"Currently supported: SD 1.5, SDXL, Flux, Flux.2, SD3, Z-Image. Remove the Init Image or pick a model from a supported architecture.");
                 return false;
             }
         }
@@ -1103,7 +1201,7 @@ public class SharpInferenceBackend : AbstractT2IBackend
             if (!isInpaintSupported)
             {
                 input.RefusalReasons.Add(
-                    $"SharpInference: inpainting (mask image) isn't wired for architecture '{compat}' yet. " +
+                    $"HartsyInference: inpainting (mask image) isn't wired for architecture '{compat}' yet. " +
                     $"Currently supported: SDXL, Flux, SD3. Remove the Mask Image or pick a model from a supported architecture.");
                 return false;
             }
@@ -1122,7 +1220,7 @@ public class SharpInferenceBackend : AbstractT2IBackend
             if (!ipaSupported)
             {
                 input.RefusalReasons.Add(
-                    $"SharpInference: IP-Adapter is currently supported on SD 1.5 and SDXL (got base architecture '{compat}'). " +
+                    $"HartsyInference: IP-Adapter is currently supported on SD 1.5 and SDXL (got base architecture '{compat}'). " +
                     $"Other architectures (Flux, SD3, Z-Image, Flux.2, AuraFlow, Chroma, F-Lite, ERNIE) don't have IPA wired — Flux needs a DiT-specific adapter, the others don't have published IPA checkpoints. " +
                     $"Either disable IP-Adapter (set Use IP-Adapter to None) or pick a SD 1.5 / SDXL model.");
                 return false;
@@ -1149,7 +1247,7 @@ public class SharpInferenceBackend : AbstractT2IBackend
             if (anyCnSelected && compat != SdxlLoader.SdxlCompatClassId)
             {
                 input.RefusalReasons.Add(
-                    $"SharpInference: ControlNet is currently supported on SDXL only (got '{compat}'). " +
+                    $"HartsyInference: ControlNet is currently supported on SDXL only (got '{compat}'). " +
                     $"Either remove the ControlNet selection or pick an SDXL model.");
                 return false;
             }
@@ -1191,6 +1289,8 @@ public class SharpInferenceBackend : AbstractT2IBackend
             SdxlLoader.SdxlCompatClassId => _cache.TryGetSdxl(modelName) is not null,
             FluxLoader.Flux1CompatClassId => _cache.TryGetFlux(modelName) is not null,
             ChromaLoader.ChromaCompatClassId => _cache.TryGetChroma(modelName) is not null,
+            ChromaRadianceLoader.ChromaRadianceCompatClassId => _cache.TryGetChromaRadiance(modelName) is not null,
+            ZetaChromaLoader.ZetaChromaCompatClassId => _cache.TryGetZetaChroma(modelName) is not null,
             AuraFlowLoader.AuraFlowCompatClassId => _cache.TryGetAuraFlow(modelName) is not null,
             FLiteLoader.FLiteCompatClassId => _cache.TryGetFLite(modelName) is not null,
             Ideogram4Loader.Ideogram4CompatClassId => _cache.TryGetIdeogram4(modelName) is not null,

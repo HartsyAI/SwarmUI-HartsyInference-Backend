@@ -1,0 +1,48 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+    <PropertyGroup>
+        <AssemblyName>SwarmExtensionHartsyInference</AssemblyName>
+        <!-- Required for pointer-math tensor slicing in a few loaders (e.g. ZImageLoader,
+             ChromaVariantLoaders) — Buffer.MemoryCopy + byte* to extract embedding sub-rows
+             without a managed copy. -->
+        <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+        <!-- The HartsyInference engine ships as a NuGet meta-package (CPU/CUDA/Vulkan backends +
+             all modality assemblies). Its private DLLs must land in THIS extension's output folder
+             so Swarm's per-extension AssemblyLoadContext can resolve them — extensions build with
+             CopyLocalLockFileAssemblies=false by default (SwarmUI.extension.props), so opt back in.
+             Swarm's loader is "host wins, then probe the extension folder", so the host-shared
+             packages (SixLabors, Newtonsoft, …) that also get copied are harmless — but we strip
+             them below to keep the folder clean and avoid "host already has it" log noise. -->
+        <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+    </PropertyGroup>
+    <Import Project="../../SwarmUI.extension.props" />
+
+    <!-- The pure-C#/.NET HartsyInference inference engine. The meta-package pulls every backend
+         (CPU/CUDA/Vulkan) and modality assembly (Diffusion/Audio/Video/Vision/…), and its build
+         targets auto-copy the CUDA PTX (→ Ptx/) and Vulkan SPIR-V (→ Spirv/) kernels into our
+         output, which is exactly where the backend resolves them next to the extension DLL.
+         https://www.nuget.org/packages/HartsyInference -->
+    <ItemGroup>
+        <PackageReference Include="HartsyInference" Version="1.0.0-alpha.3" />
+    </ItemGroup>
+
+    <!-- Strip host-provided packages back out of our output. SwarmUI.deps.props makes the extension
+         compile against the SAME SixLabors / Newtonsoft / etc. the host already loads; copying our
+         own duplicates would trigger Swarm's "ships X.dll but host already has it" warning and risk
+         version skew. The HartsyInference.* assemblies and their private deps (Microsoft.ML.Tokenizers,
+         Google.Protobuf) are NOT host-provided, so they stay. -->
+    <Target Name="StripHostProvidedDeps" AfterTargets="ResolveAssemblyReferences">
+        <ItemGroup>
+            <ReferenceCopyLocalPaths Remove="@(ReferenceCopyLocalPaths)"
+                Condition="
+                    $([System.String]::Copy('%(FileName)').StartsWith('SixLabors')) OR
+                    $([System.String]::Copy('%(FileName)').StartsWith('Newtonsoft')) OR
+                    $([System.String]::Copy('%(FileName)').StartsWith('LiteDB')) OR
+                    $([System.String]::Copy('%(FileName)').StartsWith('LLamaSharp')) OR
+                    $([System.String]::Copy('%(FileName)').StartsWith('Hardware.Info')) OR
+                    $([System.String]::Copy('%(FileName)').StartsWith('FreneticUtilities')) OR
+                    $([System.String]::Copy('%(FileName)').StartsWith('FreneticLLC')) OR
+                    $([System.String]::Copy('%(FileName)').StartsWith('Microsoft.Extensions')) OR
+                    $([System.String]::Copy('%(FileName)').StartsWith('System.'))" />
+        </ItemGroup>
+    </Target>
+</Project>

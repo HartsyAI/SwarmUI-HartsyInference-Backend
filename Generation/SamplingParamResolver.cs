@@ -1,11 +1,11 @@
 using SwarmUI.Text2Image;
 using SwarmUI.Utils;
 
-namespace Hartsy.Extensions.SharpInferenceBackend.Generation;
+namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
 /// <summary>
 /// Centralised resolution of Swarm sampling parameters into the concrete numbers we
-/// pass to a SharpInference pipeline. Currently handles step count + EndStepsEarly;
+/// pass to a HartsyInference pipeline. Currently handles step count + EndStepsEarly;
 /// will grow to cover refiner step splits and other per-stage tweaks.
 /// </summary>
 public static class SamplingParamResolver
@@ -31,7 +31,7 @@ public static class SamplingParamResolver
             if (reduced < 1)
             {
                 Logs.Warning(
-                    $"[SharpInference] EndStepsEarly={endEarly} would zero out the step count " +
+                    $"[HartsyInference] EndStepsEarly={endEarly} would zero out the step count " +
                     $"(steps={steps}); clamping to 1 step. Consider lowering EndStepsEarly.");
                 reduced = 1;
             }
@@ -41,13 +41,13 @@ public static class SamplingParamResolver
         return steps;
     }
 
-    /// <summary>Resolve the user's sampler choice into a SharpInference
+    /// <summary>Resolve the user's sampler choice into a HartsyInference
     /// <c>SchedulerFactory</c> name (<c>"ddim"</c> / <c>"dpm++2m"</c> / <c>"lcm"</c>), or null
     /// for the default Euler. Only meaningful for the sigma-domain SD-family pipelines
     /// (SD 1.5 / SDXL / SDXL Refiner); flow-match architectures use their canonical
     /// scheduler and ignore this.
     ///
-    /// Priority: our own "SharpInference Sampler" param, then ComfyUI's "sampler" param
+    /// Priority: our own "HartsyInference Sampler" param, then ComfyUI's "sampler" param
     /// as a courtesy fallback (so a user who configured a sampler while on a Comfy
     /// backend gets the same intent honored here when the value maps). Unmappable Comfy
     /// values (euler_ancestral, SDE variants, uni_pc, …) fall back to Euler with a
@@ -55,7 +55,7 @@ public static class SamplingParamResolver
     /// correctness contract.</summary>
     public static string ResolveSchedulerName(T2IParamInput input)
     {
-        if (input.TryGet(SwarmUISharpInference.SamplerParam, out string ours) && !string.IsNullOrWhiteSpace(ours))
+        if (input.TryGet(SwarmUIHartsyInference.SamplerParam, out string ours) && !string.IsNullOrWhiteSpace(ours))
         {
             return MapSamplerName(ours, logUnmapped: true);
         }
@@ -82,14 +82,14 @@ public static class SamplingParamResolver
     {
         if (log)
         {
-            Logs.Verbose($"[SharpInference] Sampler '{name}' isn't available in SharpInference (have: euler, ddim, dpm++2m, lcm) — using Euler.");
+            Logs.Verbose($"[HartsyInference] Sampler '{name}' isn't available in HartsyInference (have: euler, ddim, dpm++2m, lcm) — using Euler.");
         }
         return null;
     }
 
     /// <summary>Resolve Swarm's "CLIP Stop At Layer" (clip skip) param into the
     /// <c>TextToImageRequest.ClipSkip</c> layers-from-end convention: Swarm/Comfy use
-    /// negative-from-end (-1 = final layer, -2 = penultimate), SharpInference uses
+    /// negative-from-end (-1 = final layer, -2 = penultimate), HartsyInference uses
     /// positive (1 = final, 2 = penultimate). Returns null when unset or default.
     /// Only SD 1.5 honors this (SDXL is penultimate by spec, matching Comfy).</summary>
     public static int? ResolveClipSkip(T2IParamInput input)

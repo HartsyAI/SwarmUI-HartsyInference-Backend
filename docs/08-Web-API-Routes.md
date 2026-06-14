@@ -1,7 +1,7 @@
 # 08 — Web API Routes
 
 Extra HTTP routes the extension adds to Swarm's WebAPI. Registered in
-`WebAPI/SharpInferenceWebAPI.cs`. Pattern mirrors `ComfyUIBackend/ComfyUIWebAPI.cs`.
+`WebAPI/HartsyInferenceWebAPI.cs`. Pattern mirrors `ComfyUIBackend/ComfyUIWebAPI.cs`.
 
 ## Why we need so few
 
@@ -15,15 +15,15 @@ Our routes are about diagnostics, cache management, and device discovery.
 ## Registration
 
 ```csharp
-public static class SharpInferenceWebAPI
+public static class HartsyInferenceWebAPI
 {
     public static void Register()
     {
-        API.RegisterAPICall<JObject>(SharpInferenceProbeModel,            true,  SharpInferencePermissions.PermAdminSharpInference);
-        API.RegisterAPICall<JObject>(SharpInferenceListLoadedPipelines,   false, SharpInferencePermissions.PermAdminSharpInference);
-        API.RegisterAPICall<JObject>(SharpInferenceClearCache,            true,  SharpInferencePermissions.PermAdminSharpInference);
-        API.RegisterAPICall<JObject>(SharpInferenceGetDeviceInfo,         false, SharpInferencePermissions.PermAdminSharpInference);
-        API.RegisterAPICall<JObject>(SharpInferenceGetSupportedArchs,     false, SharpInferencePermissions.PermUseSharpInference);
+        API.RegisterAPICall<JObject>(HartsyInferenceProbeModel,            true,  HartsyInferencePermissions.PermAdminHartsyInference);
+        API.RegisterAPICall<JObject>(HartsyInferenceListLoadedPipelines,   false, HartsyInferencePermissions.PermAdminHartsyInference);
+        API.RegisterAPICall<JObject>(HartsyInferenceClearCache,            true,  HartsyInferencePermissions.PermAdminHartsyInference);
+        API.RegisterAPICall<JObject>(HartsyInferenceGetDeviceInfo,         false, HartsyInferencePermissions.PermAdminHartsyInference);
+        API.RegisterAPICall<JObject>(HartsyInferenceGetSupportedArchs,     false, HartsyInferencePermissions.PermUseHartsyInference);
     }
 }
 ```
@@ -33,15 +33,15 @@ The boolean is `isModifying` (true = mutation; affects cache invalidation). The
 
 ## Routes
 
-### `SharpInferenceProbeModel`
+### `HartsyInferenceProbeModel`
 
 Diagnose a checkpoint without loading it.
 
 | | |
 |---|---|
 | Method | POST |
-| Path | `/API/SharpInferenceProbeModel` |
-| Permission | `admin_sharpinference` |
+| Path | `/API/HartsyInferenceProbeModel` |
+| Permission | `admin_hartsyinference` |
 | Mutating | true (touches disk) |
 
 **Inputs:**
@@ -71,15 +71,15 @@ Implementation: open with `SafeTensorsLoader`, inspect tensor key prefixes,
 match against the architecture detection table from
 [`05-Pipeline-Translation.md`](./05-Pipeline-Translation.md).
 
-### `SharpInferenceListLoadedPipelines`
+### `HartsyInferenceListLoadedPipelines`
 
 Show what's currently in the pipeline cache (per backend instance).
 
 | | |
 |---|---|
 | Method | POST |
-| Path | `/API/SharpInferenceListLoadedPipelines` |
-| Permission | `admin_sharpinference` |
+| Path | `/API/HartsyInferenceListLoadedPipelines` |
+| Permission | `admin_hartsyinference` |
 | Mutating | false |
 
 **Returns:**
@@ -104,15 +104,15 @@ Show what's currently in the pipeline cache (per backend instance).
 }
 ```
 
-### `SharpInferenceClearCache`
+### `HartsyInferenceClearCache`
 
 Drop the pipeline cache, free VRAM. Useful when debugging or before a model swap.
 
 | | |
 |---|---|
 | Method | POST |
-| Path | `/API/SharpInferenceClearCache` |
-| Permission | `admin_sharpinference` |
+| Path | `/API/HartsyInferenceClearCache` |
+| Permission | `admin_hartsyinference` |
 | Mutating | true |
 
 **Inputs:**
@@ -132,7 +132,7 @@ evicts just that entry.
 { "success": true, "evicted_count": 2 }
 ```
 
-### `SharpInferenceGetDeviceInfo`
+### `HartsyInferenceGetDeviceInfo`
 
 Enumerate available compute devices. Used to populate the "Compute Backend" dropdown
 in the Backend settings UI.
@@ -140,8 +140,8 @@ in the Backend settings UI.
 | | |
 |---|---|
 | Method | POST |
-| Path | `/API/SharpInferenceGetDeviceInfo` |
-| Permission | `admin_sharpinference` |
+| Path | `/API/HartsyInferenceGetDeviceInfo` |
+| Permission | `admin_hartsyinference` |
 | Mutating | false |
 
 **Returns:**
@@ -159,16 +159,16 @@ in the Backend settings UI.
 }
 ```
 
-### `SharpInferenceGetSupportedArchs`
+### `HartsyInferenceGetSupportedArchs`
 
 Used by the model dropdown to grey out architectures we don't yet handle. Lower
-permission level so any user with `use_sharpinference` can call it.
+permission level so any user with `use_hartsyinference` can call it.
 
 | | |
 |---|---|
 | Method | POST |
-| Path | `/API/SharpInferenceGetSupportedArchs` |
-| Permission | `use_sharpinference` |
+| Path | `/API/HartsyInferenceGetSupportedArchs` |
+| Permission | `use_hartsyinference` |
 | Mutating | false |
 
 **Returns:**
@@ -199,9 +199,9 @@ permission level so any user with `use_sharpinference` can call it.
 
 ## How tabs / UI consume these
 
-If we ever add a Server → Tab for "SharpInference Diagnostics", it lives at
-`Tabs/Server/SharpInference Diagnostics.html` and calls these routes via Swarm's
-`genericRequest('SharpInferenceListLoadedPipelines', ...)` JS helper.
+If we ever add a Server → Tab for "HartsyInference Diagnostics", it lives at
+`Tabs/Server/HartsyInference Diagnostics.html` and calls these routes via Swarm's
+`genericRequest('HartsyInferenceListLoadedPipelines', ...)` JS helper.
 
 For v1, the routes are mostly there for command-line debugging (curl / browser-tab)
 and for the standard Backend-config UI to query device info. No custom tab is required.

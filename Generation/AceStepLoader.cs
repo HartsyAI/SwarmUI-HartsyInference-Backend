@@ -3,20 +3,20 @@ using Newtonsoft.Json.Linq;
 using SwarmUI.Core;
 using SwarmUI.Text2Image;
 using SwarmUI.Utils;
-using SharpInference.Core.Backends;
-using SharpInference.Core.Tensors;
-using SharpInference.Diffusion.Models.Denoisers;
-using SharpInference.Diffusion.Models.Music;
-using SharpInference.Diffusion.Models.TextEncoders;
-using SharpInference.Diffusion.Pipelines;
-using SharpInference.Diffusion.Requests;
-using SharpInference.Diffusion.Utilities;
-using SharpInference.ModelHandler.CheckpointConverters;
-using SharpInference.ModelHandler.SafeTensors;
-using SharpInference.Tokenizers;
+using HartsyInference.Core.Backends;
+using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Models.Denoisers;
+using HartsyInference.Diffusion.Models.Music;
+using HartsyInference.Diffusion.Models.TextEncoders;
+using HartsyInference.Diffusion.Pipelines;
+using HartsyInference.Diffusion.Requests;
+using HartsyInference.Diffusion.Utilities;
+using HartsyInference.ModelHandler.CheckpointConverters;
+using HartsyInference.ModelHandler.SafeTensors;
+using HartsyInference.Tokenizers;
 using Image = SwarmUI.Utils.Image;
 
-namespace Hartsy.Extensions.SharpInferenceBackend.Generation;
+namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
 /// <summary>
 /// Loads ACE-Step v1 (3.5B flow-matching music DiT; <c>ACE-Step/ACE-Step-v1-3.5B</c>). The user's
@@ -184,7 +184,7 @@ public static class AceStepLoader
                 sampler: AceStepPipeline.SamplerMode.Euler,
                 seed: seedLong < 0 ? null : (int?)(int)(seedLong & 0x7FFFFFFF),
                 onProgress: bridge);
-            Logs.Verbose($"[SharpInference][ACE] Pipeline returned {left.Length} samples/channel @ {sampleRate} Hz " +
+            Logs.Verbose($"[HartsyInference][ACE] Pipeline returned {left.Length} samples/channel @ {sampleRate} Hz " +
                 $"({duration:0}s requested, {lyricIds.Length} lyric tokens) in {Environment.TickCount64 - start}ms.");
             return new[] { AudioOutputEncoder.EncodeMp3(left, right, sampleRate, cancel) };
         }

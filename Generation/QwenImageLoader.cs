@@ -1,18 +1,18 @@
 using System.IO;
 using SwarmUI.Text2Image;
 using SwarmUI.Utils;
-using SharpInference.Core.Backends;
-using SharpInference.Core.Tensors;
-using SharpInference.Diffusion.Models.Denoisers;
-using SharpInference.Diffusion.Models.TextEncoders;
-using SharpInference.Diffusion.Models.Vae;
-using SharpInference.Diffusion.Pipelines;
-using SharpInference.Diffusion.Requests;
-using SharpInference.ModelHandler.CheckpointConverters;
-using SharpInference.ModelHandler.SafeTensors;
-using SharpInference.Tokenizers;
+using HartsyInference.Core.Backends;
+using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Models.Denoisers;
+using HartsyInference.Diffusion.Models.TextEncoders;
+using HartsyInference.Diffusion.Models.Vae;
+using HartsyInference.Diffusion.Pipelines;
+using HartsyInference.Diffusion.Requests;
+using HartsyInference.ModelHandler.CheckpointConverters;
+using HartsyInference.ModelHandler.SafeTensors;
+using HartsyInference.Tokenizers;
 
-namespace Hartsy.Extensions.SharpInferenceBackend.Generation;
+namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
 /// <summary>
 /// Loads Qwen-Image (Alibaba, 20B MMDiT). A single text encoder — Qwen2.5-VL-7B run as a feature
@@ -67,7 +67,7 @@ public static class QwenImageLoader
         log($"Building Qwen-Image transformer (depth={config.Depth}, hidden={config.HiddenSize})...");
         QwenImageTransformer transformer = new QwenImageTransformer(config);
         // Load transformer weights as-is (fp8/fp16 kept for the quantized GEMM path — matches the
-        // SharpInference reference test, which does NOT cast the transformer to F32).
+        // HartsyInference reference test, which does NOT cast the transformer to F32).
         transformer.LoadWeights(converted.Transformer);
 
         // 2. Resolve + load the Qwen2.5-VL-7B text encoder (bundled-if-present, else side-model).
@@ -173,7 +173,7 @@ public static class QwenImageLoader
             promptTokens, negTokens, request, bridge,
             promptDropIndex: promptDrop, negativeDropIndex: negDrop);
 
-        Logs.Verbose($"[SharpInference][Qwen-Image] Pipeline returned {outW}x{outH} in {Environment.TickCount64 - start}ms.");
+        Logs.Verbose($"[HartsyInference][Qwen-Image] Pipeline returned {outW}x{outH} in {Environment.TickCount64 - start}ms.");
         return new[] { RgbToImage.FromHwcRgb(rgbBytes, outW, outH) };
     }
 

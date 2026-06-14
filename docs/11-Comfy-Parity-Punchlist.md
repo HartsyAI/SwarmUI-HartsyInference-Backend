@@ -9,7 +9,7 @@ Last refresh: 2026-06-10. Excludes Comfy-only features that don't apply
 self-start, ComfyUser session management).
 
 Status legend: `[ ]` not started · `[~]` in progress · `[x]` done · `[!]` blocked
-upstream (waiting on SharpInference.Core).
+upstream (waiting on HartsyInference.Core).
 
 ---
 
@@ -21,7 +21,7 @@ touch points so any of them can be picked up cold.
 - [~] **P1 — Sampler / scheduler params + clip skip.**
   - *Sampler:* SD-family pipelines already route `request.Scheduler` through
     `SchedulerFactory` (euler / ddim / dpm++2m / lcm). Extension side: register
-    a `Sampler` param (ID `sisampler`, flag `sharpinference`, group Sampling),
+    a `Sampler` param (ID `sisampler`, flag `hartsyinference`, group Sampling),
     map Swarm names → factory names in `SamplingParamResolver`, thread into
     `Sd15Loader` / `SdxlLoader` / `RefinerLoader` request construction. Flow-match
     archs ignore it by design (log Verbose, don't refuse).
@@ -51,7 +51,7 @@ touch points so any of them can be picked up cold.
   `variation_seed` flag; refuse per-arch where unwired.
 - [ ] **P5 — `<segment:face>` via YOLO.** The one segmentation feature casual
   users depend on. Needs: ONNX runtime decision (Microsoft.ML.OnnxRuntime in
-  the extension, NOT upstream — keep SharpInference pure), YOLOv8-face ONNX
+  the extension, NOT upstream — keep HartsyInference pure), YOLOv8-face ONNX
   auto-download, detect → mask → MaskBlur/Grow → re-denoise crop via existing
   inpaint path. (b) ControlNet Depth/OpenPose preprocessors ride the same
   ONNX runtime once it exists.
@@ -143,7 +143,7 @@ touch points so any of them can be picked up cold.
   post-pass skipped when StepSwap was applied. `PostApply` mode unchanged.
   `StepSwapNoisy` deferred (re-noise at swap is a minor variant).
 - [!] **Upscaling (RealESRGAN / latent upscale)** — blocked upstream:
-  SharpInference.Core has no upscaler loaders.
+  HartsyInference.Core has no upscaler loaders.
 
 ## Tier 2 — Sampling / quality
 
@@ -168,9 +168,9 @@ touch points so any of them can be picked up cold.
   `SideModels.cs`.
 - [ ] **SD3 LoRA path** — scaffolded upstream but untested.
 - [ ] **TensorRT compile WebAPI endpoint** — replicate
-  `DoTensorRTCreateWS` against SharpInference's TRT path.
+  `DoTensorRTCreateWS` against HartsyInference's TRT path.
 - [ ] **LoRA extraction utility** — diff two checkpoints, write LoRA. New
-  endpoint in `SharpInferenceWebAPI.cs`.
+  endpoint in `HartsyInferenceWebAPI.cs`.
 
 ## Tier 4 — Niche / advanced
 
@@ -224,7 +224,7 @@ PostApply + StepSwap, img2img, inpaint (SDXL/Flux/SD3), IP-Adapter
 (SD1.5/SDXL), ControlNet SDXL+Canny, TAESD/latent2rgb live previews,
 CUDA + Vulkan + CPU backends, cancellation, model hot-swap, pipeline cache.
 
-## Upstream-blocked items — file these as SharpInference issues
+## Upstream-blocked items — file these as HartsyInference issues
 
 1. Upscaler loader infrastructure (RealESRGAN / latent upscalers).
 2. Video pipeline framework (HunyuanVideo, LTX, Wan, HiDream).

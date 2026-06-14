@@ -19,12 +19,12 @@
 │                              │ IsValidForThisBackend, capacity check)    │
 │                              ▼                                           │
 │  ┌────────────────────────────────────────────────────────────────────┐  │
-│  │  SharpInference SwarmUI extension (this repo)                       │  │
+│  │  HartsyInference SwarmUI extension (this repo)                       │  │
 │  │                                                                     │  │
-│  │   SwarmUISharpInference : Extension                                 │  │
+│  │   SwarmUIHartsyInference : Extension                                 │  │
 │  │     OnInit() registers backend type, params, feature flags, perms   │  │
 │  │                                                                     │  │
-│  │   SharpInferenceBackend : AbstractT2IBackend                        │  │
+│  │   HartsyInferenceBackend : AbstractT2IBackend                        │  │
 │  │     • Init()       — create IBackend (CPU/Vulkan/CUDA), warm caches │  │
 │  │     • Generate()   — translate input → run → return Image[]         │  │
 │  │     • GenerateLive — same, but pushes progress + previews           │  │
@@ -44,7 +44,7 @@
 │                              │ direct method calls — no IPC, no JSON     │
 │                              ▼                                           │
 │  ┌────────────────────────────────────────────────────────────────────┐  │
-│  │  SharpInference (NuGet packages, also in-process)                   │  │
+│  │  HartsyInference (NuGet packages, also in-process)                   │  │
 │  │                                                                     │  │
 │  │   • IBackend (CpuBackend / CudaBackend / VulkanBackend)             │  │
 │  │   • Diffusion.Pipelines.{StableDiffusion15,Sdxl,Flux,Sd3,...}       │  │
@@ -62,18 +62,18 @@
 
 ## Layers, top-down
 
-### 1. Extension class (`SwarmUISharpInference.cs`)
+### 1. Extension class (`SwarmUIHartsyInference.cs`)
 
 The entry point. Inherits from `SwarmUI.Core.Extension`. Responsibilities, by lifecycle hook:
 
 | Hook | Responsibility |
 |------|----------------|
 | `OnPreInit()` | Register feature flags this extension's backend will advertise; register any custom `T2IModelClass` for unusual checkpoints; add CSS/JS assets to `OtherAssets` if any. |
-| `OnInit()` | Register the backend type via `Program.Backends.RegisterBackendType<SharpInferenceBackend>()`; register any new parameters via `T2IParamTypes.Register<>()`; register permissions; call `SharpInferenceWebAPI.Register()`; subscribe to model-folder change events. |
+| `OnInit()` | Register the backend type via `Program.Backends.RegisterBackendType<HartsyInferenceBackend>()`; register any new parameters via `T2IParamTypes.Register<>()`; register permissions; call `HartsyInferenceWebAPI.Register()`; subscribe to model-folder change events. |
 | `OnPreLaunch()` | Final wiring (route maps, etc.). Probably nothing to do. |
 | `OnShutdown()` | Best-effort: tell the backend handler we're shutting down (the handler itself does the per-instance shutdown). |
 
-### 2. Backend class (`Backends/SharpInferenceBackend.cs`)
+### 2. Backend class (`Backends/HartsyInferenceBackend.cs`)
 
 Subclass of `SwarmUI.Backends.AbstractT2IBackend`. **One instance per user-configured
 "backend" entry** in Swarm's Server → Backends UI. A user might configure two: one
@@ -124,15 +124,15 @@ When the user runs a second generation with the same checkpoint, no reload happe
 When they switch checkpoints, the LRU evicts the least-recently-used pipeline and
 calls `IBackend.FreeWeights()` on its tensor set.
 
-### 5. Web API surface (`WebAPI/SharpInferenceWebAPI.cs`)
+### 5. Web API surface (`WebAPI/HartsyInferenceWebAPI.cs`)
 
 A small set of HTTP routes the extension adds for diagnostics and admin tasks. See
 [`08-Web-API-Routes.md`](./08-Web-API-Routes.md). At minimum:
 
-- `SharpInferenceProbeModel` — given a checkpoint path, return detected architecture and required components
-- `SharpInferenceListLoadedPipelines` — show the pipeline cache state
-- `SharpInferenceClearCache` — flush the pipeline cache (admin)
-- `SharpInferenceGetDeviceInfo` — list available CUDA / Vulkan / CPU devices
+- `HartsyInferenceProbeModel` — given a checkpoint path, return detected architecture and required components
+- `HartsyInferenceListLoadedPipelines` — show the pipeline cache state
+- `HartsyInferenceClearCache` — flush the pipeline cache (admin)
+- `HartsyInferenceGetDeviceInfo` — list available CUDA / Vulkan / CPU devices
 
 This is **much smaller** than `ComfyUIWebAPI.cs` — we don't have workflows to save,
 no node types to enumerate, no LoRA extraction (yet).
@@ -143,7 +143,7 @@ no node types to enumerate, no LoRA extraction (yet).
    (prompt, negative prompt, model name, steps, seed, LoRAs, etc.).
 2. **Swarm BackendHandler picks a backend.** Iterates registered backends. For each,
    checks `IsAlive()` and `IsValidForThisBackend(input)`. Picks one with capacity.
-3. **`SharpInferenceBackend.GenerateLive(input, batchId, takeOutput)`.**
+3. **`HartsyInferenceBackend.GenerateLive(input, batchId, takeOutput)`.**
 4. **Pipeline assembly.** `InferencePipeline.Execute(input)`:
    - Determine model architecture from `input.Get(T2IParamTypes.Model)`'s
      `ModelClass.CompatClass` (SD15 / SDXL / Flux / SD3 / ...).
@@ -158,15 +158,15 @@ no node types to enumerate, no LoRA extraction (yet).
      weights**, so the cache key must include applied-LoRA fingerprint or we must
      deep-clone before applying.
    - If ControlNet requested: load the ControlNet adapter and pass to the pipeline
-     (when SharpInference's pipeline ctors accept it — see
-     [`04-SharpInference-Integration.md`](./04-SharpInference-Integration.md) gaps
+     (when HartsyInference's pipeline ctors accept it — see
+     [`04-HartsyInference-Integration.md`](./04-HartsyInference-Integration.md) gaps
      section).
    - Construct the pipeline (each pipeline class has a unique constructor).
    - Build a `TextToImageRequest` DTO from `T2IParamInput`.
 5. **Run inference.** Call `pipeline.GenerateFromTokens(...)` (synchronous). Pass a
    `progress => takeOutput(...)` callback that converts `GenerationProgress` to the
    `JObject` format `GenerateLive` expects.
-6. **Post-process.** SharpInference returns raw RGB bytes. Wrap them as a
+6. **Post-process.** HartsyInference returns raw RGB bytes. Wrap them as a
    `SwarmUI.Image`. If the user wants extra steps (Swarm's "after generation" hooks
    handled by core — we don't own those), they run after our return.
 7. **Return.** `takeOutput(image)` for each image; method returns. Swarm forwards to
@@ -174,7 +174,7 @@ no node types to enumerate, no LoRA extraction (yet).
 
 ## Why this structure (rationales)
 
-- **One pipeline cache per `IBackend`.** SharpInference tensors are device-bound —
+- **One pipeline cache per `IBackend`.** HartsyInference tensors are device-bound —
   a tensor allocated for a CUDA backend can't be used by a CPU backend. Two configured
   Swarm backends (CUDA + CPU) can't share a cache.
 - **`InferencePipeline` rather than ad-hoc switch-on-architecture in `Generate()`.**
@@ -182,8 +182,8 @@ no node types to enumerate, no LoRA extraction (yet).
   step pattern that lets extensions inject behaviour without modifying core. We get
   the same benefit for free, and future extensions to *this* extension (e.g., a
   side extension that adds support for some new model) can register their own steps.
-- **No HTTP between Swarm and SharpInference.** The whole point is in-process. We
-  ignore SharpInference.Server entirely (it's not implemented yet anyway).
+- **No HTTP between Swarm and HartsyInference.** The whole point is in-process. We
+  ignore HartsyInference.Server entirely (it's not implemented yet anyway).
 - **One backend type, not two.** The Comfy extension has both `comfyui_api`
   (remote URL) and `comfyui_selfstart` (auto-launch). For us there's no "remote"
   notion in v1 — we always run in-process. Single backend type, with settings to
@@ -193,14 +193,14 @@ no node types to enumerate, no LoRA extraction (yet).
 
 - **Feature flags.** Same string IDs ("controlnet", "ipadapter", "video", etc.) so
   Swarm's existing parameter-gating Just Works. Our backend advertises a subset based
-  on what SharpInference supports.
+  on what HartsyInference supports.
 - **Step-priority pipeline assembly.** Mirroring `WorkflowGenerator.AddStep`.
 - **Per-architecture model loaders.** Mirroring `WorkflowGeneratorModelSupport`.
 - **Permission groups.** Following the same `PermInfoGroup` pattern.
 
 ## What we explicitly don't inherit
 
-- **JSON workflow IR.** We don't build a JSON DAG. We call SharpInference methods
+- **JSON workflow IR.** We don't build a JSON DAG. We call HartsyInference methods
   directly. The "workflow" is a `PipelineExecution` C# object.
 - **HTTP/WebSocket bridge.** Comfy needs `/ComfyBackendDirect/{*Path}` and a
   WebSocket relay for live updates. We don't — `Action<GenerationProgress>` callbacks

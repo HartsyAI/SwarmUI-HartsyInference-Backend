@@ -1,19 +1,19 @@
 using System.IO;
 using SwarmUI.Text2Image;
 using SwarmUI.Utils;
-using SharpInference.Core.Backends;
-using SharpInference.Core.Tensors;
-using SharpInference.Diffusion.Models.Denoisers;
-using SharpInference.Diffusion.Models.TextEncoders;
-using SharpInference.Diffusion.Models.Vae;
-using SharpInference.Diffusion.Pipelines;
-using SharpInference.Diffusion.Requests;
-using SharpInference.ModelHandler.CheckpointConverters;
-using SharpInference.ModelHandler.Lora;
-using SharpInference.ModelHandler.SafeTensors;
-using SharpInference.Tokenizers;
+using HartsyInference.Core.Backends;
+using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Models.Denoisers;
+using HartsyInference.Diffusion.Models.TextEncoders;
+using HartsyInference.Diffusion.Models.Vae;
+using HartsyInference.Diffusion.Pipelines;
+using HartsyInference.Diffusion.Requests;
+using HartsyInference.ModelHandler.CheckpointConverters;
+using HartsyInference.ModelHandler.Lora;
+using HartsyInference.ModelHandler.SafeTensors;
+using HartsyInference.Tokenizers;
 
-namespace Hartsy.Extensions.SharpInferenceBackend.Generation;
+namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
 /// <summary>
 /// Loads Stable Diffusion XL (base) from a single all-in-one .safetensors (LDM format,
@@ -114,7 +114,7 @@ public static class SdxlLoader
         Action<GenerationProgress> onProgress,
         CancellationToken cancel,
         RefinerSwapConfig refinerSwap = null,
-        IReadOnlyList<SharpInference.Diffusion.Adapters.IpAdapterConditioning> ipAdapters = null)
+        IReadOnlyList<HartsyInference.Diffusion.Adapters.IpAdapterConditioning> ipAdapters = null)
     {
         Dictionary<string, Tensor> unetWeights = LoraApplier.ShallowClone(entry.UnetWeights);
         Dictionary<string, Tensor> clipLWeights = LoraApplier.ShallowClone(entry.ClipLWeights);
@@ -153,7 +153,7 @@ public static class SdxlLoader
         Action<GenerationProgress> onProgress,
         CancellationToken cancel,
         RefinerSwapConfig refinerSwap = null,
-        IReadOnlyList<SharpInference.Diffusion.Adapters.IpAdapterConditioning> ipAdapters = null)
+        IReadOnlyList<HartsyInference.Diffusion.Adapters.IpAdapterConditioning> ipAdapters = null)
     {
         return RunSdxlPipeline(entry.Pipeline, entry.Tokenizer, input, onProgress, cancel, refinerSwap, ipAdapters);
     }
@@ -169,7 +169,7 @@ public static class SdxlLoader
         Action<GenerationProgress> onProgress,
         CancellationToken cancel,
         RefinerSwapConfig refinerSwap = null,
-        IReadOnlyList<SharpInference.Diffusion.Adapters.IpAdapterConditioning> ipAdapters = null)
+        IReadOnlyList<HartsyInference.Diffusion.Adapters.IpAdapterConditioning> ipAdapters = null)
     {
         string prompt = input.Get(T2IParamTypes.Prompt) ?? "";
         string negative = input.Get(T2IParamTypes.NegativePrompt) ?? "";
@@ -189,12 +189,12 @@ public static class SdxlLoader
         int negEosG = ClipTokenizer.FindEosPosition(negTokensG);
 
         Img2ImgResolver.Img2ImgSpec img2img = Img2ImgResolver.Resolve(input, width, height);
-        ControlNetResolver.ResolvedSpec controlnets = ControlNetResolver.Resolve(input, UNetConfig.SdxlBase, width, height, msg => Logs.Verbose($"[SharpInference][SDXL] {msg}"));
+        ControlNetResolver.ResolvedSpec controlnets = ControlNetResolver.Resolve(input, UNetConfig.SdxlBase, width, height, msg => Logs.Verbose($"[HartsyInference][SDXL] {msg}"));
         string schedulerName = SamplingParamResolver.ResolveSchedulerName(input);
         int? seed = seedLong < 0 ? null : (int?)(int)(seedLong & 0x7FFFFFFF);
         // Variation seed: pre-blend the initial noise (pipeline takes ownership of the tensor).
         // No ClipSkip here — SDXL uses penultimate CLIP layers by spec (same as Comfy).
-        SharpInference.Core.Tensors.Tensor variationNoise = VariationSeedResolver.Resolve(input, width, height, seed);
+        HartsyInference.Core.Tensors.Tensor variationNoise = VariationSeedResolver.Resolve(input, width, height, seed);
         TextToImageRequest request;
         if (img2img is not null)
         {
@@ -248,7 +248,7 @@ public static class SdxlLoader
                 refinerSwap,
                 ipAdapters);
 
-            Logs.Verbose($"[SharpInference][SDXL] Pipeline returned {outW}x{outH} in {Environment.TickCount64 - start}ms.");
+            Logs.Verbose($"[HartsyInference][SDXL] Pipeline returned {outW}x{outH} in {Environment.TickCount64 - start}ms.");
             return new[] { RgbToImage.FromHwcRgb(rgbBytes, outW, outH) };
         }
         finally

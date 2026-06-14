@@ -1,12 +1,12 @@
 using SwarmUI.Utils;
-using SharpInference.Core.Backends;
-using SharpInference.Core.Tensors;
-using SharpInference.ModelHandler.Lora;
+using HartsyInference.Core.Backends;
+using HartsyInference.Core.Tensors;
+using HartsyInference.ModelHandler.Lora;
 
-namespace Hartsy.Extensions.SharpInferenceBackend.Generation;
+namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
 /// <summary>
-/// Builds and applies a SharpInference <see cref="LoraStack"/> from a list of resolved
+/// Builds and applies a HartsyInference <see cref="LoraStack"/> from a list of resolved
 /// <see cref="LoraResolver.LoraSpec"/> entries against a per-architecture set of weight
 /// dictionaries. The dicts passed in are mutated in place: matching keys have their
 /// Tensor entries replaced with newly-allocated merged tensors owned by the returned
@@ -40,7 +40,7 @@ public static class LoraApplier
         {
             foreach (LoraResolver.LoraSpec spec in loras)
             {
-                Logs.Verbose($"[SharpInference][LoRA] Loading '{spec.Model.Name}' (model={spec.ModelStrength}, tenc={spec.TencStrength}).");
+                Logs.Verbose($"[HartsyInference][LoRA] Loading '{spec.Model.Name}' (model={spec.ModelStrength}, tenc={spec.TencStrength}).");
                 stack.AddFromPath(spec.FilePath, strength: spec.ModelStrength);
             }
 
@@ -60,12 +60,12 @@ public static class LoraApplier
             if (merged == 0)
             {
                 Logs.Warning(
-                    "[SharpInference] LoRA stack matched 0 weights. The LoRA's target keys may not align with this architecture, " +
-                    "or the LoRA format may not be supported by SharpInference. Generation will proceed without LoRA effect.");
+                    "[HartsyInference] LoRA stack matched 0 weights. The LoRA's target keys may not align with this architecture, " +
+                    "or the LoRA format may not be supported by HartsyInference. Generation will proceed without LoRA effect.");
             }
             else
             {
-                Logs.Verbose($"[SharpInference][LoRA] Stack merged {merged} weights across components.");
+                Logs.Verbose($"[HartsyInference][LoRA] Stack merged {merged} weights across components.");
             }
 
             return stack;

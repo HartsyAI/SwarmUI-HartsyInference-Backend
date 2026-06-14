@@ -54,7 +54,7 @@ matters if a user tries that variant directly).
     `MaskShrinkGrow`, `MaskBlurThreshold` → produce a single-channel
     `byte[]` aligned to the latent's spatial dims.
   - Implement grow (morphological dilate), shrink-grow (erode then dilate to
-    fill holes), Gaussian blur, threshold. Pure C#; no SharpInference
+    fill holes), Gaussian blur, threshold. Pure C#; no HartsyInference
     dependency.
 - Add unit test against a 64×64 synthetic mask: round-trip preserves a
   hand-drawn pattern; grow + shrink gives expected pixel counts.
@@ -142,12 +142,12 @@ and B.2+ (breadth) so we have something shippable.
 
 ## Phase B — ControlNet + preprocessors
 
-**Partial upstream blocker.** SharpInference has a `ControlNet` adapter class
+**Partial upstream blocker.** HartsyInference has a `ControlNet` adapter class
 but pipelines don't accept it as a parameter. Preprocessors don't exist
 upstream.
 
 ### B.1 Upstream — pipeline ControlNet integration
-- File SharpInference issue: `Pipelines must accept ControlNet conditioning`.
+- File HartsyInference issue: `Pipelines must accept ControlNet conditioning`.
 - Scope: `StableDiffusion15Pipeline`, `SdxlPipeline`, `FluxPipeline`,
   `Sd3Pipeline` accept `IReadOnlyList<ControlNetConditioning>` plus per-step
   control strength.
@@ -155,7 +155,7 @@ upstream.
   Phases B.2 and B.4 can run in parallel.
 
 ### B.2 Upstream — preprocessor module
-- File SharpInference issue: `New module SharpInference.Vision.ControlNetPreprocessors`.
+- File HartsyInference issue: `New module HartsyInference.Vision.ControlNetPreprocessors`.
 - Phase B.2 ships:
   - **Canny** — pure C# (Sobel + non-max suppression + hysteresis), no
     model needed.
@@ -178,7 +178,7 @@ upstream.
   - DepthAnything-V2 small ONNX (Comfy hosts these)
   - DWPose ONNX
   - MangaLineExtractor ONNX (optional)
-- Expose via `SharpInferenceWebAPI` so the UI can list which preprocessors
+- Expose via `HartsyInferenceWebAPI` so the UI can list which preprocessors
   are available without inspecting the disk.
 
 ### B.5 Swarm-side — wiring
@@ -208,7 +208,7 @@ across SDXL/SD15/Flux — realistically 2-3 weeks. Cut to SDXL standard + Plus
 FaceID needs InsightFace ArcFace embeddings (different image encoder), and
 SD15/Flux IPA need their own pipeline integrations — all separate sessions.
 
-**Shipped upstream (SharpInference):**
+**Shipped upstream (HartsyInference):**
 - `ClipVisionEncoderConfig` + `ClipVisionEncoder` — ViT-H/14 (32 layers,
   hidden=1280, head_dim=80, patch=14, optional projection_dim=1024). Two
   output paths: `EncodeImageEmbeds` (CLS-projected, IPA standard) and
@@ -286,7 +286,7 @@ SD15/Flux IPA need their own pipeline integrations — all separate sessions.
 **Refused with technical justification (not laziness — actual blockers):**
 - **FaceID variants** (h94/IP-Adapter-FaceID family) — use InsightFace ArcFace
   512-dim face embeddings instead of CLIP-Vision. Need an InsightFace runtime
-  (face detection + ArcFace ONNX) which SharpInference doesn't link. Adding
+  (face detection + ArcFace ONNX) which HartsyInference doesn't link. Adding
   ONNX Runtime is a separate infrastructure track. Refused at IPA load time
   with a clear message ("Use a non-FaceID variant").
 - **Flux IPA** (XLabs-AI/flux-ip-adapter) — Flux is a DiT (FluxTransformer with
@@ -313,17 +313,17 @@ SD15/Flux IPA need their own pipeline integrations — all separate sessions.
 
 ## Phase C — IP-Adapter
 
-**Partial upstream blocker.** SharpInference has IP-Adapter stubs but not the
+**Partial upstream blocker.** HartsyInference has IP-Adapter stubs but not the
 plus / face variants and not full pipeline integration.
 
 ### C.1 Upstream — IP-Adapter pipeline integration
-- File SharpInference issue: `Pipelines accept IPAdapter image-prompt conditioning`.
+- File HartsyInference issue: `Pipelines accept IPAdapter image-prompt conditioning`.
 - Scope: SDXL + Flux at minimum. SD1.5 IP-Adapter is legacy but cheap to add.
 - Variants: standard, plus, plus-face, FaceID. Each has its own
   CLIP-Vision encoding + cross-attention injection pattern.
 
 ### C.2 Upstream — CLIP-Vision encoder
-- Verify `SharpInference.Diffusion.Models.TextEncoders.ClipVisionEncoder`
+- Verify `HartsyInference.Diffusion.Models.TextEncoders.ClipVisionEncoder`
   state. If incomplete, finish it.
 
 ### C.3 Swarm-side — IPA loader
@@ -385,12 +385,12 @@ plus / face variants and not full pipeline integration.
 
 ## Phase D — Refiner StepSwap
 
-**No hard upstream blocker** — sampling loop in SharpInference already exposes
+**No hard upstream blocker** — sampling loop in HartsyInference already exposes
 a per-step callback; we just need to be able to swap the denoiser model object
 mid-loop.
 
 ### D.1 Verify upstream capability
-- Read `SharpInference.Diffusion.Pipelines.SdxlPipeline.GenerateFromTokens`:
+- Read `HartsyInference.Diffusion.Pipelines.SdxlPipeline.GenerateFromTokens`:
   is the denoiser object passed in once or referenced per step?
 - If passed once, file upstream issue: `SdxlPipeline allows mid-loop denoiser
   swap at a specified step boundary`.
@@ -417,11 +417,11 @@ mid-loop.
 
 ## Phase E — Upscaling (deferred)
 
-**Blocked upstream.** SharpInference.Core has no upscaler loader. File the
+**Blocked upstream.** HartsyInference.Core has no upscaler loader. File the
 issue, defer to Tier 2 timing.
 
 ### E.1 Upstream issue to file
-- `Add upscaler loader (RealESRGAN, 4x-Ultrasharp class) to SharpInference.Core`.
+- `Add upscaler loader (RealESRGAN, 4x-Ultrasharp class) to HartsyInference.Core`.
 - Scope: ESRGAN architecture, weights loaded from .pth or .safetensors,
   tiled inference for large outputs.
 
@@ -444,13 +444,13 @@ These touch all phases.
 - **Documentation pass.** Each completed phase updates the punchlist
   (`11-Comfy-Parity-Punchlist.md`) status and marks any upstream issues
   closed.
-- **Upstream issue tracker.** All "file SharpInference issue" items above
+- **Upstream issue tracker.** All "file HartsyInference issue" items above
   should be opened during Phase A (the inpainting work) so they have
   maximum lead time before the Swarm side needs them.
 
 ## Suggested execution order
 
-1. **Today:** open SharpInference issues B.1, B.2, C.1, D.1, E.1.
+1. **Today:** open HartsyInference issues B.1, B.2, C.1, D.1, E.1.
 2. **Week 1:** Phase A (inpainting). Pure Swarm-side; ships independently.
 3. **Weeks 2-4:** Phase B (ControlNet) — upstream B.1/B.2 in parallel with
    B.3-B.5 Swarm-side.
@@ -459,4 +459,4 @@ These touch all phases.
 6. **Phase E** lands when E.1 ships upstream.
 
 Total Tier 1 production-ready: **~5 weeks of Swarm-side work** plus parallel
-upstream work in SharpInference.Core.
+upstream work in HartsyInference.Core.

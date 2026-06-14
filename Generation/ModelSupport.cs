@@ -1,7 +1,7 @@
-namespace Hartsy.Extensions.SharpInferenceBackend.Generation;
+namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
 /// <summary>
-/// Maps SwarmUI's <c>T2IModel.ModelClass.CompatClass.ID</c> → SharpInference architecture.
+/// Maps SwarmUI's <c>T2IModel.ModelClass.CompatClass.ID</c> → HartsyInference architecture.
 /// CompatClass IDs are registered in <c>src/Text2Image/T2IModelClassSorter.cs</c>; we
 /// dispatch off them in the backend's LoadModel/GenerateLive.
 ///
@@ -22,8 +22,10 @@ public static class ModelSupport
         Flux2Loader.Flux2Klein4BCompatClassId,    // "flux-2-klein-4b"
         Flux2Loader.Flux2Klein9BCompatClassId,    // "flux-2-klein-9b" — loader refuses at runtime if Qwen3-8B preset missing
         ChromaLoader.ChromaCompatClassId,         // "chroma"
+        ChromaRadianceLoader.ChromaRadianceCompatClassId, // "chroma-radiance" — pixel-space (no VAE); validation-gated numerics
+        ZetaChromaLoader.ZetaChromaCompatClassId, // "zeta-chroma" — pixel-space Qwen3-4B; validation-gated numerics
         AuraFlowLoader.AuraFlowCompatClassId,     // "auraflow-v1"
-        FLiteLoader.FLiteCompatClassId,           // "f-lite" — wired-untested (no E2E test in SharpInference yet)
+        FLiteLoader.FLiteCompatClassId,           // "f-lite" — wired-untested (no E2E test in HartsyInference yet)
         Ideogram4Loader.Ideogram4CompatClassId,   // "ideogram-4" — dual 9.3B DiT; ≥22 GB VRAM gate at load time; non-commercial license
         ZImageLoader.ZImageCompatClassId,         // "z-image"
         AnimaLoader.AnimaCompatClassId,           // "anima" — Cosmos-Predict2-2B family + LlmAdapter
@@ -33,43 +35,48 @@ public static class ModelSupport
         LtxVideoLoader.LtxVideoCompatClassId,     // "lightricks-ltx-video" — LTX-Video 0.9 single-file text-to-video
         AceStepLoader.AceStepCompatClassId,       // "ace-step-1_5" — v1 checkpoints route to AceStepLoader, real v1.5
                                                   // checkpoints to AceStep15Loader (2B turbo, validation-pending numerics)
-        MusicGenLoader.MusicGenCompatClassId,     // "musicgen" — Meta MusicGen small/medium/large (self-contained checkpoint)
-        YueLoader.YueCompatClassId,               // "yue" — YuE stage-1 lyrics-to-music (folder model; needs tokenizer.model + xcodec.safetensors)
+        // MusicGenLoader.MusicGenCompatClassId — moved to _pendingArchs until the engine ships
+        // EnCodec-32kHz + T5-Base presets and the converter's text-encoder path (loader is otherwise complete)
+        // YueLoader.YueCompatClassId — moved to _pendingArchs until HartsyInference ships YueTokenizer (loader is otherwise complete)
         LanceLoader.LanceCompatClassId,           // "lance" — ByteDance Lance 3B folder-checkpoint T2I (validation-pending numerics)
         LanceLoader.LanceVideoCompatClassId,      // "lance-video" — Lance 3B Video T2V (validation-pending numerics)
         LensLoader.LensCompatClassId,             // "lens" — Microsoft Lens 3.8B MMDiT + GPT-OSS-20B encoder (Comfy split files)
         // TODO: SdxlLoader.SdxlRefinerCompatClassId once we wire the refiner two-pass flow.
     };
 
-    /// <summary>Architectures where SharpInference HAS a working pipeline but the SwarmUI
+    /// <summary>Architectures where HartsyInference HAS a working pipeline but the SwarmUI
     /// extension hasn't wired a loader yet. Refusing one of these isn't "we can't do this";
     /// it's "the backend code exists but the SwarmUI integration glue (text-encoder selection,
     /// VAE auto-download, tokenizer wiring, parameter rules) is a TODO." The error message
     /// for these should suggest using ComfyUI in the meantime, not "this won't work."</summary>
     private static readonly Dictionary<string, string> _pendingArchs = new()
     {
-        // NOTE (2026-06-10 verification): these two have NO engine pipeline despite earlier notes —
-        // Chroma Radiance / Zeta-Chroma need SharpInference work first, not just a loader.
-        ["chroma-radiance"] = "Chroma Radiance",
-        ["zeta-chroma"] = "Zeta-Chroma",
-        // Kandinsky 5 / OmniGen 2 / Lumina 2: the SharpInference pipelines exist and pass structural
+        // Kandinsky 5 / OmniGen 2 / Lumina 2: the HartsyInference pipelines exist and pass structural
         // tests, but their conditioning encoders are NOT faithfully implemented — the upstream E2E
         // tests feed PRE-COMPUTED embeddings from .bin dumps (Kandinsky: dual Qwen2.5-VL + CLIP-L with
-        // an unverified prompt template; OmniGen 2: Qwen2.5-VL; Lumina 2: Gemma-2-2B, and SharpInference
+        // an unverified prompt template; OmniGen 2: Qwen2.5-VL; Lumina 2: Gemma-2-2B, and HartsyInference
         // has no Gemma tokenizer at all). Wiring a loader with guessed templates would produce
         // semantically-wrong conditioning — same reason HunyuanImage is refused below.
         ["kandinsky5-imglite"] = "Kandinsky 5 Image Lite (engine pipeline needs pre-computed Qwen2.5-VL + CLIP-L embeddings — live encode path unverified)",
         ["omnigen-2"] = "OmniGen 2 (engine pipeline needs pre-computed Qwen2.5-VL embeddings — live encode path unverified)",
-        ["lumina-2"] = "Lumina-Image-2.0 (no Gemma-2 tokenizer/encoder path in SharpInference yet)",
-        // ErnieImage: pipeline + Ministral3B encoder preset both exist, but the SharpInference
+        ["lumina-2"] = "Lumina-Image-2.0 (no Gemma-2 tokenizer/encoder path in HartsyInference yet)",
+        // ErnieImage: pipeline + Ministral3B encoder preset both exist, but the HartsyInference
         // upstream test uses HARDCODED token IDs ([1,2,3,...]) — there is no real Ernie tokenizer
         // implementation. Wiring a loader without a tokenizer means the user's prompt would
-        // never reach the model. Refuse cleanly until SharpInference ships an Ernie tokenizer.
-        ["ernie-image"] = "ErnieImage (no tokenizer in SharpInference yet — prompts can't be encoded)",
-        // HunyuanImage: the SharpInference pipeline exists and the E2E test runs, BUT it substitutes
+        // never reach the model. Refuse cleanly until HartsyInference ships an Ernie tokenizer.
+        ["ernie-image"] = "ErnieImage (no tokenizer in HartsyInference yet — prompts can't be encoded)",
+        // YuE: the extension loader (YueLoader.cs) is fully written, but HartsyInference has no
+        // YueTokenizer (the mm SentencePiece wrapper) — lyrics can't be encoded. Same class of
+        // blocker as Ernie. Lift by restoring the TODO(engine-blocked) lines in YueLoader.cs and
+        // re-adding YueCompatClassId to _supportedArchs.
+        [YueLoader.YueCompatClassId] = "YuE (no YuE mm tokenizer in HartsyInference yet — lyrics can't be encoded)",
+        // MusicGen: extension loader (MusicGenLoader.cs) fully written; engine is missing the
+        // EnCodec-32kHz preset, T5-Base preset, and the converter's bundled-text-encoder path.
+        [MusicGenLoader.MusicGenCompatClassId] = "MusicGen (engine missing EnCodec-32kHz/T5-Base presets + text-encoder converter path)",
+        // HunyuanImage: the HartsyInference pipeline exists and the E2E test runs, BUT it substitutes
         // T5-XXL for the real Qwen2.5-VL MLLM primary encoder (and drops the byT5 glyph stream), so
         // output wouldn't match the real model. Refuse until the engine wires the correct encoders.
-        ["hunyuan-image-2_1"] = "HunyuanImage (SharpInference pipeline uses T5-XXL as a stand-in for the real Qwen2.5-VL encoder — not faithful yet)",
+        ["hunyuan-image-2_1"] = "HunyuanImage (HartsyInference pipeline uses T5-XXL as a stand-in for the real Qwen2.5-VL encoder — not faithful yet)",
     };
 
     public static bool IsArchitectureSupported(string compatClass)
@@ -84,25 +91,29 @@ public static class ModelSupport
     {
         if (string.IsNullOrEmpty(compatClass))
         {
-            return "Model has no architecture compat class set — SharpInference can't dispatch.";
+            return "Model has no architecture compat class set — HartsyInference can't dispatch.";
         }
         if (_pendingArchs.TryGetValue(compatClass, out string friendlyName))
         {
             return $"{friendlyName} ('{compatClass}') is not yet wired into the SwarmUI extension. " +
-                   "SharpInference itself has the pipeline + checkpoint converter, but the per-architecture " +
+                   "HartsyInference itself has the pipeline + checkpoint converter, but the per-architecture " +
                    "loader (text-encoder selection, VAE auto-download, tokenizer setup) is a TODO. " +
                    "Use the ComfyUI backend for this architecture in the meantime.";
         }
-        return $"Architecture '{compatClass}' is not implemented in SharpInference. " +
+        return $"Architecture '{compatClass}' is not implemented in HartsyInference. " +
                $"Supported today: {string.Join(", ", _supportedArchs)}.";
     }
 
     public static IReadOnlyCollection<string> SupportedArchitectures => _supportedArchs;
 
+    /// <summary>Architectures the engine has a pipeline for but the extension refuses today,
+    /// mapped to the human-readable blocker reason. Surfaced by the WebAPI for admin UX.</summary>
+    public static IReadOnlyDictionary<string, string> PendingArchitectures => _pendingArchs;
+
     /// <summary>Stub from earlier scaffolding; legacy step-priority registration is unused
     /// while we're flat-dispatching from the backend's GenerateLive.</summary>
     public static void RegisterBuiltins()
     {
-        // No-op; loaders are invoked directly from SharpInferenceBackend.
+        // No-op; loaders are invoked directly from HartsyInferenceBackend.
     }
 }

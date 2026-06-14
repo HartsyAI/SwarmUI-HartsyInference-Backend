@@ -4,10 +4,10 @@ using SwarmUI.Media;
 using SwarmUI.Utils;
 using Image = SwarmUI.Utils.Image;
 
-namespace Hartsy.Extensions.SharpInferenceBackend.Generation;
+namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
 /// <summary>
-/// Muxes raw RGB frames from a SharpInference video pipeline into an encoded video container,
+/// Muxes raw RGB frames from a HartsyInference video pipeline into an encoded video container,
 /// returning a SwarmUI <see cref="Image"/> (videos are Image objects with a video MediaType —
 /// Swarm's save path, mime handling, and history previews all key off the MediaType).
 ///
@@ -37,11 +37,11 @@ public static class VideoOutputEncoder
         if (string.IsNullOrWhiteSpace(ffmpeg))
         {
             throw new SwarmUserErrorException(
-                "SharpInference video output requires ffmpeg, but no ffmpeg was found. "
+                "HartsyInference video output requires ffmpeg, but no ffmpeg was found. "
                 + "Install ffmpeg on your system PATH (or install the ComfyUI self-start backend, whose bundled copy Swarm reuses).");
         }
         (string videoArgs, string ext, MediaType type) = FormatArgs(format);
-        string tmpFile = Path.Combine(Path.GetTempPath(), $"sharpinference_video_{Guid.NewGuid():N}.{ext}");
+        string tmpFile = Path.Combine(Path.GetTempPath(), $"hartsyinference_video_{Guid.NewGuid():N}.{ext}");
         string args = $"-v error -f rawvideo -pix_fmt rgb24 -s {width}x{height} -r {fps} -i - {videoArgs} -y \"{tmpFile}\"";
         ProcessStartInfo psi = new()
         {
@@ -52,7 +52,7 @@ public static class VideoOutputEncoder
             UseShellExecute = false,
             CreateNoWindow = true,
         };
-        Logs.Verbose($"[SharpInference] Encoding {frames.Length} frames {width}x{height}@{fps}fps as '{format}' via ffmpeg {args}");
+        Logs.Verbose($"[HartsyInference] Encoding {frames.Length} frames {width}x{height}@{fps}fps as '{format}' via ffmpeg {args}");
         Process proc = Process.Start(psi) ?? throw new InvalidOperationException("Failed to launch ffmpeg.");
         try
         {
@@ -76,11 +76,11 @@ public static class VideoOutputEncoder
         {
             if (!proc.HasExited)
             {
-                try { proc.Kill(); } catch (Exception ex) { Logs.Error($"[SharpInference] Failed to kill ffmpeg: {ex.Message}"); }
+                try { proc.Kill(); } catch (Exception ex) { Logs.Error($"[HartsyInference] Failed to kill ffmpeg: {ex.Message}"); }
             }
             proc.Dispose();
             try { if (File.Exists(tmpFile)) File.Delete(tmpFile); }
-            catch (Exception ex) { Logs.Warning($"[SharpInference] Failed to delete temp video file '{tmpFile}': {ex.Message}"); }
+            catch (Exception ex) { Logs.Warning($"[HartsyInference] Failed to delete temp video file '{tmpFile}': {ex.Message}"); }
         }
     }
 

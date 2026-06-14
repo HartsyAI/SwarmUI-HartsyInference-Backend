@@ -1,7 +1,7 @@
 using SwarmUI.Text2Image;
 using SwarmUI.Utils;
 
-namespace Hartsy.Extensions.SharpInferenceBackend.Generation;
+namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
 /// <summary>
 /// Shared SwarmUI-param → video-pipeline value mapping for the video loaders (Wan, LTX).
@@ -22,7 +22,7 @@ public static class VideoParamResolver
         snapped = Math.Max(1, snapped);
         if (snapped != requested)
         {
-            Logs.Info($"[SharpInference] Video frame count {requested} rounded to {snapped} (model requires {step}n+1 frames).");
+            Logs.Info($"[HartsyInference] Video frame count {requested} rounded to {snapped} (model requires {step}n+1 frames).");
         }
         return snapped;
     }
@@ -41,7 +41,7 @@ public static class VideoParamResolver
         int height = SnapToMultiple(input.Get(T2IParamTypes.Height), multiple);
         if (width != input.Get(T2IParamTypes.Width) || height != input.Get(T2IParamTypes.Height))
         {
-            Logs.Info($"[SharpInference] Video resolution {input.Get(T2IParamTypes.Width)}x{input.Get(T2IParamTypes.Height)} rounded to {width}x{height} (model requires multiples of {multiple}).");
+            Logs.Info($"[HartsyInference] Video resolution {input.Get(T2IParamTypes.Width)}x{input.Get(T2IParamTypes.Height)} rounded to {width}x{height} (model requires multiples of {multiple}).");
         }
         return (width, height);
     }

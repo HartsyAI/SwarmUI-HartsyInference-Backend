@@ -1,17 +1,17 @@
 using System.IO;
 using SwarmUI.Text2Image;
 using SwarmUI.Utils;
-using SharpInference.Core.Backends;
-using SharpInference.Core.Tensors;
-using SharpInference.Diffusion.Models.Denoisers;
-using SharpInference.Diffusion.Models.TextEncoders;
-using SharpInference.Diffusion.Models.Vae;
-using SharpInference.Diffusion.Pipelines;
-using SharpInference.Diffusion.Requests;
-using SharpInference.ModelHandler.CheckpointConverters;
-using SharpInference.Tokenizers;
+using HartsyInference.Core.Backends;
+using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Models.Denoisers;
+using HartsyInference.Diffusion.Models.TextEncoders;
+using HartsyInference.Diffusion.Models.Vae;
+using HartsyInference.Diffusion.Pipelines;
+using HartsyInference.Diffusion.Requests;
+using HartsyInference.ModelHandler.CheckpointConverters;
+using HartsyInference.Tokenizers;
 
-namespace Hartsy.Extensions.SharpInferenceBackend.Generation;
+namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
 /// <summary>
 /// Loads F-Lite (Freepik's lightweight Flux Schnell-derivative). F-Lite ships ONLY in the
@@ -26,7 +26,7 @@ namespace Hartsy.Extensions.SharpInferenceBackend.Generation;
 ///
 /// The user picks any <c>.safetensors</c> inside one of those subfolders in SwarmUI's model
 /// picker; the loader walks up two levels to find the F-Lite root. F-Lite has no end-to-end
-/// test in SharpInference yet — first generation through this loader is the test.
+/// test in HartsyInference yet — first generation through this loader is the test.
 /// </summary>
 public static class FLiteLoader
 {
@@ -134,7 +134,7 @@ public static class FLiteLoader
         var (rgbBytes, outW, outH, _) = entry.Pipeline.GenerateFromTokens(
             promptTokens, promptMask, negTokens, negMask, request, bridge);
 
-        Logs.Verbose($"[SharpInference][F-Lite] Pipeline returned {outW}x{outH} in {Environment.TickCount64 - start}ms.");
+        Logs.Verbose($"[HartsyInference][F-Lite] Pipeline returned {outW}x{outH} in {Environment.TickCount64 - start}ms.");
         return new[] { RgbToImage.FromHwcRgb(rgbBytes, outW, outH) };
     }
 

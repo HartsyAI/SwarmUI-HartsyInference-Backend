@@ -1,23 +1,23 @@
 using System.IO;
 using SwarmUI.Text2Image;
 using SwarmUI.Utils;
-using SharpInference.Core.Backends;
-using SharpInference.Core.Tensors;
-using SharpInference.Diffusion.Models.Denoisers;
-using SharpInference.Diffusion.Models.TextEncoders;
-using SharpInference.Diffusion.Models.Vae;
-using SharpInference.Diffusion.Pipelines;
-using SharpInference.Diffusion.Requests;
-using SharpInference.Diffusion.Utilities;
-using SharpInference.ModelHandler.CheckpointConverters;
-using SharpInference.ModelHandler.SafeTensors;
-using SharpInference.Tokenizers;
+using HartsyInference.Core.Backends;
+using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Models.Denoisers;
+using HartsyInference.Diffusion.Models.TextEncoders;
+using HartsyInference.Diffusion.Models.Vae;
+using HartsyInference.Diffusion.Pipelines;
+using HartsyInference.Diffusion.Requests;
+using HartsyInference.Diffusion.Utilities;
+using HartsyInference.ModelHandler.CheckpointConverters;
+using HartsyInference.ModelHandler.SafeTensors;
+using HartsyInference.Tokenizers;
 
-namespace Hartsy.Extensions.SharpInferenceBackend.Generation;
+namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
 /// <summary>
 /// Loads the official SDXL Refiner checkpoint and runs the post-base "PostApply"
-/// refine pass via SharpInference's <see cref="SdxlRefinerPipeline"/>. The refiner
+/// refine pass via HartsyInference's <see cref="SdxlRefinerPipeline"/>. The refiner
 /// owns its own CLIP-G encoder (no CLIP-L), refiner UNet (4-level config),
 /// VAE encoder + decoder, and tokenizer — independent of the base pipeline.
 ///
@@ -30,8 +30,8 @@ namespace Hartsy.Extensions.SharpInferenceBackend.Generation;
 /// output. <c>StepSwap</c> reuses the same loaded refiner UNet (exposed via
 /// <see cref="RefinerCacheEntry.RefinerUnet"/>) but plugs it into the SDXL base
 /// pipeline's denoise loop directly via
-/// <see cref="SharpInference.Diffusion.Pipelines.RefinerSwapConfig"/>; that wiring
-/// lives in <see cref="Hartsy.Extensions.SharpInferenceBackend.Backends.SharpInferenceBackend"/>.
+/// <see cref="HartsyInference.Diffusion.Pipelines.RefinerSwapConfig"/>; that wiring
+/// lives in <see cref="Hartsy.Extensions.HartsyInferenceBackend.Backends.HartsyInferenceBackend"/>.
 /// <c>StepSwapNoisy</c> remains unimplemented — it would re-noise the latent at the
 /// swap point, a minor variant we haven't surfaced yet.</para>
 /// </summary>
@@ -155,7 +155,7 @@ public static class RefinerLoader
             var (refinedRgb, outW, outH, _) = entry.Pipeline.RefineFromTokens(
                 promptTokens, negTokens, promptEos, negEos, request, bridge);
 
-            Logs.Verbose($"[SharpInference][Refiner] Pass complete: {outW}x{outH} in {Environment.TickCount64 - start}ms.");
+            Logs.Verbose($"[HartsyInference][Refiner] Pass complete: {outW}x{outH} in {Environment.TickCount64 - start}ms.");
             return RgbToImage.FromHwcRgb(refinedRgb, outW, outH);
         }
         finally

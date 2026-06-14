@@ -2,11 +2,11 @@ using System.IO;
 using Newtonsoft.Json.Linq;
 using SwarmUI.Utils;
 
-namespace Hartsy.Extensions.SharpInferenceBackend.Generation;
+namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
 /// <summary>
 /// One-time download + export of a HuggingFace <c>tokenizer.json</c> into the
-/// <c>vocab.json</c> + <c>merges.txt</c> pair SharpInference's file-based BPE tokenizers consume
+/// <c>vocab.json</c> + <c>merges.txt</c> pair HartsyInference's file-based BPE tokenizers consume
 /// (<c>AceStepLyricTokenizer</c>, <c>GptOssTokenizer</c>). The exported files are cached on disk —
 /// subsequent loads skip the network entirely. Non-safetensors files under the Clip folder don't
 /// appear in Swarm's model lists, so subfolders there are a safe home.

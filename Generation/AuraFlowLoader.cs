@@ -2,18 +2,18 @@ using System.IO;
 using SwarmUI.Core;
 using SwarmUI.Text2Image;
 using SwarmUI.Utils;
-using SharpInference.Core.Backends;
-using SharpInference.Core.Tensors;
-using SharpInference.Diffusion.Models.Denoisers;
-using SharpInference.Diffusion.Models.TextEncoders;
-using SharpInference.Diffusion.Models.Vae;
-using SharpInference.Diffusion.Pipelines;
-using SharpInference.Diffusion.Requests;
-using SharpInference.ModelHandler.CheckpointConverters;
-using SharpInference.ModelHandler.SafeTensors;
-using SharpInference.Tokenizers;
+using HartsyInference.Core.Backends;
+using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Models.Denoisers;
+using HartsyInference.Diffusion.Models.TextEncoders;
+using HartsyInference.Diffusion.Models.Vae;
+using HartsyInference.Diffusion.Pipelines;
+using HartsyInference.Diffusion.Requests;
+using HartsyInference.ModelHandler.CheckpointConverters;
+using HartsyInference.ModelHandler.SafeTensors;
+using HartsyInference.Tokenizers;
 
-namespace Hartsy.Extensions.SharpInferenceBackend.Generation;
+namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
 /// <summary>
 /// Loads AuraFlow v0.2 / v0.3 (fal/AuraFlow). Single-file checkpoints bundle the
@@ -179,7 +179,7 @@ public static class AuraFlowLoader
         var (rgbBytes, outW, outH, _) = entry.Pipeline.GenerateFromTokens(
             promptTokens, negTokens, promptMask, negMask, request, bridge);
 
-        Logs.Verbose($"[SharpInference][AuraFlow] Pipeline returned {outW}x{outH} in {Environment.TickCount64 - start}ms.");
+        Logs.Verbose($"[HartsyInference][AuraFlow] Pipeline returned {outW}x{outH} in {Environment.TickCount64 - start}ms.");
         return new[] { RgbToImage.FromHwcRgb(rgbBytes, outW, outH) };
     }
 }

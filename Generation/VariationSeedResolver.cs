@@ -1,9 +1,9 @@
 using SwarmUI.Text2Image;
 using SwarmUI.Utils;
-using SharpInference.Core.Tensors;
-using SharpInference.Diffusion.Utilities;
+using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Utilities;
 
-namespace Hartsy.Extensions.SharpInferenceBackend.Generation;
+namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
 /// <summary>
 /// Variation seed support (Comfy parity: SwarmKSampler's second-seed blended noise).
@@ -14,18 +14,25 @@ namespace Hartsy.Extensions.SharpInferenceBackend.Generation;
 ///
 /// Currently wired for the spatial-latent architectures (SD 1.5 / SDXL, latent
 /// [1, 4, H/8, W/8]); packed-latent archs (Flux, SD3) need their per-arch shapes wired
-/// before the validation gate in <c>SharpInferenceBackend.IsValidForThisBackend</c> lifts.
+/// before the validation gate in <c>HartsyInferenceBackend.IsValidForThisBackend</c> lifts.
 /// </summary>
 public static class VariationSeedResolver
 {
     /// <summary>Latent channel count for SD 1.5 / SDXL spatial latents.</summary>
     public const int SdLatentChannels = 4;
 
+    /// <summary>Latent channel count for Flux (and other 16-channel VAE) spatial latents.
+    /// Flux's pipeline injects the unpacked <c>[1, 16, H/8, W/8]</c> noise BEFORE the 2×2
+    /// patchify, so the variation noise is built in that unpacked space.</summary>
+    public const int FluxLatentChannels = 16;
+
     /// <summary>Returns the blended initial-noise tensor, or null when no variation seed
     /// is requested (param unset, strength 0) — null means "let the pipeline seed normally".
     /// Caller passes the SAME int seed value it puts on the request, so strength→0
-    /// continuity holds.</summary>
-    public static Tensor Resolve(T2IParamInput input, int width, int height, int? requestSeed)
+    /// continuity holds. <paramref name="latentChannels"/> must match the architecture's
+    /// unpacked latent channel count (4 for SD 1.5 / SDXL, 16 for Flux); the pipeline
+    /// validates the injected-noise shape and throws on mismatch.</summary>
+    public static Tensor Resolve(T2IParamInput input, int width, int height, int? requestSeed, int latentChannels = SdLatentChannels)
     {
         if (!input.TryGet(T2IParamTypes.VariationSeedStrength, out double strength) || strength <= 0)
         {
@@ -39,19 +46,19 @@ public static class VariationSeedResolver
         int varSeed = varSeedLong < 0 ? SeedGenerator.RandomSeed() : (int)(varSeedLong & 0x7FFFFFFF);
         strength = Math.Clamp(strength, 0.0, 1.0);
 
-        TensorShape shape = new(1, SdLatentChannels, height / 8, width / 8);
+        TensorShape shape = new(1, latentChannels, height / 8, width / 8);
         Tensor baseNoise = SeedGenerator.CreateNoise(shape, baseSeed);
         if (strength >= 1.0)
         {
             // Full replacement: just use the variation seed's noise.
             baseNoise.Dispose();
-            Logs.Verbose($"[SharpInference] Variation seed {varSeed} at strength 1 — replacing base noise entirely.");
+            Logs.Verbose($"[HartsyInference] Variation seed {varSeed} at strength 1 — replacing base noise entirely.");
             return SeedGenerator.CreateNoise(shape, varSeed);
         }
         Tensor varNoise = SeedGenerator.CreateNoise(shape, varSeed);
         SlerpInPlace(baseNoise, varNoise, (float)strength);
         varNoise.Dispose();
-        Logs.Verbose($"[SharpInference] Variation seed {varSeed} blended at strength {strength} (slerp).");
+        Logs.Verbose($"[HartsyInference] Variation seed {varSeed} blended at strength {strength} (slerp).");
         return baseNoise;
     }
 

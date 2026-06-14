@@ -1,20 +1,20 @@
 using System.IO;
 using SwarmUI.Text2Image;
 using SwarmUI.Utils;
-using SharpInference.Core.Backends;
-using SharpInference.Core.Tensors;
-using SharpInference.Diffusion.Models.Denoisers;
-using SharpInference.Diffusion.Models.TextEncoders;
-using SharpInference.Diffusion.Models.Vae;
-using SharpInference.Diffusion.Requests;
-using SharpInference.Diffusion.Utilities;
-using SharpInference.ModelHandler.CheckpointConverters;
-using SharpInference.ModelHandler.SafeTensors;
-using SharpInference.Tokenizers;
-using SharpInference.Video.Pipelines;
+using HartsyInference.Core.Backends;
+using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Models.Denoisers;
+using HartsyInference.Diffusion.Models.TextEncoders;
+using HartsyInference.Diffusion.Models.Vae;
+using HartsyInference.Diffusion.Requests;
+using HartsyInference.Diffusion.Utilities;
+using HartsyInference.ModelHandler.CheckpointConverters;
+using HartsyInference.ModelHandler.SafeTensors;
+using HartsyInference.Tokenizers;
+using HartsyInference.Video.Pipelines;
 using Image = SwarmUI.Utils.Image;
 
-namespace Hartsy.Extensions.SharpInferenceBackend.Generation;
+namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
 /// <summary>
 /// Loads LTX-Video (Lightricks; SwarmUI compat class <c>lightricks-ltx-video</c>). Targets the
@@ -65,7 +65,7 @@ public static class LtxVideoLoader
         {
             ckptLoader.Dispose();
             throw new InvalidOperationException(
-                $"LTX checkpoint '{model.Name}' has no bundled VAE weights. SharpInference currently requires "
+                $"LTX checkpoint '{model.Name}' has no bundled VAE weights. HartsyInference currently requires "
                 + "a full single-file LTX-Video checkpoint (DiT + VAE in one file, e.g. ltx-video-2b-v0.9.safetensors).");
         }
         log($"  Converted: {conv.Transformer.Count} DiT keys, {conv.Vae.Count} VAE keys");
@@ -165,7 +165,7 @@ public static class LtxVideoLoader
         {
             var (frames, outW, outH, _) = entry.Pipeline.GenerateFromEmbeddings(
                 promptEmbeds, negEmbeds, request, numFrames, frameRate, bridge);
-            Logs.Verbose($"[SharpInference][LTX] Pipeline returned {frames.Length} frames {outW}x{outH} in {Environment.TickCount64 - start}ms.");
+            Logs.Verbose($"[HartsyInference][LTX] Pipeline returned {frames.Length} frames {outW}x{outH} in {Environment.TickCount64 - start}ms.");
             return new[] { VideoParamResolver.FinishVideo(frames, outW, outH, input, cancel) };
         }
         finally

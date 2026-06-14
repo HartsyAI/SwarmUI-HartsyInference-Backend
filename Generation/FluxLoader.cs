@@ -1,20 +1,21 @@
 using System.IO;
 using SwarmUI.Text2Image;
 using SwarmUI.Utils;
-using SharpInference.Core.Backends;
-using SharpInference.Core.Tensors;
-using SharpInference.Diffusion.Models.Denoisers;
-using SharpInference.Diffusion.Models.TextEncoders;
-using SharpInference.Diffusion.Models.Vae;
-using SharpInference.Diffusion.Pipelines;
-using SharpInference.Diffusion.Requests;
-using SharpInference.ModelHandler.CheckpointConverters;
-using SharpInference.ModelHandler.CheckpointConverters.Utils;
-using SharpInference.ModelHandler.Lora;
-using SharpInference.ModelHandler.SafeTensors;
-using SharpInference.Tokenizers;
+using HartsyInference.Core.Backends;
+using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Models.Denoisers;
+using HartsyInference.Diffusion.Models.TextEncoders;
+using HartsyInference.Diffusion.Models.Vae;
+using HartsyInference.Diffusion.Pipelines;
+using HartsyInference.Diffusion.Requests;
+using HartsyInference.ModelHandler.CheckpointConverters;
+using HartsyInference.ModelHandler.CheckpointConverters.Utils;
+using HartsyInference.ModelHandler.Gguf;
+using HartsyInference.ModelHandler.Lora;
+using HartsyInference.ModelHandler.SafeTensors;
+using HartsyInference.Tokenizers;
 
-namespace Hartsy.Extensions.SharpInferenceBackend.Generation;
+namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
 /// <summary>
 /// Loads Flux.1 (dev or schnell) using Swarm's built-in model registration:
@@ -57,19 +58,27 @@ public static class FluxLoader
         Dictionary<string, Tensor> clipLWeights;
         Dictionary<string, Tensor> t5Weights;
         Dictionary<string, Tensor> vaeWeights;
-        SafeTensorsLoader mainLoader;
+        SafeTensorsLoader mainLoader = null;
+        IDisposable ggufHandle = null;
         SafeTensorsLoader clipLLoader = null, t5Loader = null, vaeLoader = null;
 
-        bool splitMode = clipL is not null && t5 is not null && vae is not null;
+        // A .gguf main file is a quantized transformer ONLY — CLIP-L / T5 / VAE must be picked
+        // separately (Comfy's UnetLoaderGGUF works the same way). Force split mode for GGUF.
+        bool isGguf = model.RawFilePath.EndsWith(".gguf", StringComparison.OrdinalIgnoreCase);
+        bool splitMode = (clipL is not null && t5 is not null && vae is not null) || isGguf;
+        if (isGguf && !(clipL is not null && t5 is not null && vae is not null))
+        {
+            throw new InvalidOperationException(
+                "Flux GGUF: a .gguf file is a transformer-only quantized model. Pick CLIP-L Model + T5-XXL Model + VAE "
+                + "in Swarm's parameters (Models/clip/ and Models/vae/) so HartsyInference can load the rest.");
+        }
         if (splitMode)
         {
-            log($"Loading Flux (split-file mode) — main: {Path.GetFileName(model.RawFilePath)}");
-            // Convert main file (transformer-only or all-in-one — converter handles both).
-            (var converted, mainLoader) = FluxCheckpointConverter.LoadAndConvert(model.RawFilePath);
-            transformerWeights = converted.Transformer;
+            transformerWeights = LoadFluxTransformer(model.RawFilePath, isGguf, ref mainLoader, ref ggufHandle, log);
             if (transformerWeights.Count == 0)
             {
-                mainLoader.Dispose();
+                mainLoader?.Dispose();
+                ggufHandle?.Dispose();
                 throw new InvalidOperationException("Main Flux file contains no transformer weights.");
             }
 
@@ -121,7 +130,8 @@ public static class FluxLoader
         log($"Architecture: {doubleBlocks} double, {singleBlocks} single, guidance={hasGuidance} ({(hasGuidance ? "Dev" : "Schnell")}), tools={toolsMode}");
         if (toolsMode == FluxToolsMode.Depth)
         {
-            mainLoader.Dispose();
+            mainLoader?.Dispose();
+            ggufHandle?.Dispose();
             clipLLoader?.Dispose();
             t5Loader?.Dispose();
             vaeLoader?.Dispose();
@@ -131,7 +141,8 @@ public static class FluxLoader
         }
         if (toolsMode == FluxToolsMode.Fill)
         {
-            mainLoader.Dispose();
+            mainLoader?.Dispose();
+            ggufHandle?.Dispose();
             clipLLoader?.Dispose();
             t5Loader?.Dispose();
             vaeLoader?.Dispose();
@@ -166,7 +177,7 @@ public static class FluxLoader
         log("Building pipeline...");
         FluxPipeline pipeline = new FluxPipeline(backend, clipLEnc, t5Enc, transformer, vaeDec, vaeEnc, fluxConfig);
 
-        log("Loading tokenizers (embedded in SharpInference.Tokenizers)...");
+        log("Loading tokenizers (embedded in HartsyInference.Tokenizers)...");
         ClipTokenizer clipTok = new ClipTokenizer();
         int t5MaxLength = hasGuidance ? 512 : 256;
         T5Tokenizer t5Tok = new T5Tokenizer(maxLength: t5MaxLength);
@@ -188,11 +199,12 @@ public static class FluxLoader
             Vae = vaeDec,
             VaeEncoder = vaeEnc,
             CheckpointLoader = mainLoader,
+            GgufHandle = ggufHandle,
             ClipLLoader = clipLLoader,
             T5Loader = t5Loader,
             VaeLoader = vaeLoader,
             // Retained for the LoRA path. T5 isn't a LoraTarget in upstream
-            // SharpInference (no Kohya/Diffusers Flux LoRA targets it), and the VAE
+            // HartsyInference (no Kohya/Diffusers Flux LoRA targets it), and the VAE
             // never is, so we only retain Transformer + ClipL.
             TransformerWeights = transformerWeights,
             ClipLWeights = clipLWeights,
@@ -272,7 +284,7 @@ public static class FluxLoader
         int eosPos = ClipTokenizer.FindEosPosition(clipTokens);
         int[] t5Tokens = entry.T5Tokenizer.Encode(prompt);
         int[] t5Mask = T5Tokenizer.CreateAttentionMask(t5Tokens);
-        Logs.Verbose($"[SharpInference][Flux] Tokenized — CLIP-L: {clipTokens.Length} tokens (eos@{eosPos}), T5: {t5Tokens.Length} tokens. " +
+        Logs.Verbose($"[HartsyInference][Flux] Tokenized — CLIP-L: {clipTokens.Length} tokens (eos@{eosPos}), T5: {t5Tokens.Length} tokens. " +
             $"Mode={(entry.IsDev ? "Dev" : "Schnell")}, steps={steps}, guidance={guidance:F2}.");
 
         // FLUX.1 Canny: build the control-image tensor from the user's reference. We
@@ -296,7 +308,7 @@ public static class FluxLoader
                 throw new InvalidOperationException(
                     "FLUX.1 Canny requires a reference image. Set ControlNet Image Input or Init Image — the canny edges will be extracted from it and used as the control conditioning.");
             }
-            Logs.Verbose($"[SharpInference][Flux Canny] Building canny control from reference image at {width}x{height}.");
+            Logs.Verbose($"[HartsyInference][Flux Canny] Building canny control from reference image at {width}x{height}.");
             Tensor cannyZeroOne = CannyPreprocessor.Process(cnImage, width, height);
             try
             {
@@ -310,6 +322,9 @@ public static class FluxLoader
         }
 
         Img2ImgResolver.Img2ImgSpec img2img = Img2ImgResolver.Resolve(input, width, height);
+        int? seed = seedLong < 0 ? null : (int?)(int)(seedLong & 0x7FFFFFFF);
+        // Variation seed: Flux injects unpacked [1,16,H/8,W/8] noise (FluxLatentChannels=16).
+        Tensor variationNoise = VariationSeedResolver.Resolve(input, width, height, seed, VariationSeedResolver.FluxLatentChannels);
         TextToImageRequest request;
         if (img2img is not null)
         {
@@ -319,7 +334,8 @@ public static class FluxLoader
                 Width = width,
                 Height = height,
                 Steps = steps,
-                Seed = seedLong < 0 ? null : (int?)(int)(seedLong & 0x7FFFFFFF),
+                Seed = seed,
+                InitialNoise = variationNoise,
                 SourceImage = img2img.SourceTensor,
                 Strength = img2img.Strength,
                 Mask = img2img.MaskTensor,
@@ -333,7 +349,8 @@ public static class FluxLoader
                 Width = width,
                 Height = height,
                 Steps = steps,
-                Seed = seedLong < 0 ? null : (int?)(int)(seedLong & 0x7FFFFFFF),
+                Seed = seed,
+                InitialNoise = variationNoise,
             };
         }
 
@@ -352,7 +369,7 @@ public static class FluxLoader
                 onProgress: bridge,
                 controlImage: fluxCannyControl);
 
-            Logs.Verbose($"[SharpInference][Flux] Pipeline returned {outW}x{outH} in {Environment.TickCount64 - start}ms.");
+            Logs.Verbose($"[HartsyInference][Flux] Pipeline returned {outW}x{outH} in {Environment.TickCount64 - start}ms.");
             return new[] { RgbToImage.FromHwcRgb(rgbBytes, outW, outH) };
         }
         finally
@@ -360,6 +377,27 @@ public static class FluxLoader
             img2img?.Dispose();
             fluxCannyControl?.Dispose();
         }
+    }
+
+    /// <summary>Loads + converts the Flux transformer from either a .safetensors or a .gguf file.
+    /// GGUF goes through <see cref="GgufConverterBridge"/> (dequantize to F16 → same FluxCheckpointConverter),
+    /// keeping the dequant handle alive via <paramref name="ggufHandle"/>; safetensors uses the normal
+    /// mmap loader. Exactly one of <paramref name="mainLoader"/> / <paramref name="ggufHandle"/> is set.</summary>
+    private static Dictionary<string, Tensor> LoadFluxTransformer(
+        string path, bool isGguf, ref SafeTensorsLoader mainLoader, ref IDisposable ggufHandle, Action<string> log)
+    {
+        if (isGguf)
+        {
+            log($"Loading Flux (GGUF transformer + split CLIP/T5/VAE) — main: {Path.GetFileName(path)}");
+            (FluxCheckpointConverter.ConvertedWeights converted, GgufModelLoader.LoadedGgufModel handle) =
+                GgufConverterBridge.LoadGguf(path, DType.F16, FluxCheckpointConverter.Convert);
+            ggufHandle = handle;
+            return converted.Transformer;
+        }
+        log($"Loading Flux (split-file mode) — main: {Path.GetFileName(path)}");
+        (FluxCheckpointConverter.ConvertedWeights conv, SafeTensorsLoader loader) = FluxCheckpointConverter.LoadAndConvert(path);
+        mainLoader = loader;
+        return conv.Transformer;
     }
 
     /// <summary>Read FluxGuidanceScale (registered by the Comfy extension under "flux-dev"
@@ -414,7 +452,7 @@ public static class FluxLoader
     }
 
     /// <summary>Standalone T5-XXL safetensors typically store keys directly (no prefix).
-    /// SharpInference's T5TextEncoder.LoadWeights expects "encoder.embed_tokens.weight"
+    /// HartsyInference's T5TextEncoder.LoadWeights expects "encoder.embed_tokens.weight"
     /// etc. Strip Comfy's "text_encoders.t5xxl.transformer." wrapper if present.</summary>
     private static Dictionary<string, Tensor> ConvertT5FromStandalone(Dictionary<string, Tensor> raw)
     {
@@ -521,7 +559,11 @@ public sealed class FluxCacheEntry : IDisposable
     public required FluxTransformer Transformer { get; init; }
     public required VaeDecoder Vae { get; init; }
     public required VaeEncoder VaeEncoder { get; init; }
-    public required SafeTensorsLoader CheckpointLoader { get; init; }
+    /// <summary>Holds the main transformer file open for the safetensors path. Null when the
+    /// transformer came from a .gguf — see <see cref="GgufHandle"/>.</summary>
+    public SafeTensorsLoader CheckpointLoader { get; init; }
+    /// <summary>Keeps the dequantized GGUF transformer weights alive (null for the safetensors path).</summary>
+    public IDisposable GgufHandle { get; init; }
     public SafeTensorsLoader ClipLLoader { get; init; }
     public SafeTensorsLoader T5Loader { get; init; }
     public SafeTensorsLoader VaeLoader { get; init; }
@@ -543,6 +585,7 @@ public sealed class FluxCacheEntry : IDisposable
         ClipTokenizer?.Dispose();
         T5Tokenizer?.Dispose();
         CheckpointLoader?.Dispose();
+        GgufHandle?.Dispose();
         ClipLLoader?.Dispose();
         T5Loader?.Dispose();
         VaeLoader?.Dispose();

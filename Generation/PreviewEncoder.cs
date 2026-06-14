@@ -1,16 +1,16 @@
 #nullable enable
 using System;
 using Newtonsoft.Json.Linq;
-using SharpInference.Core.Backends;
-using SharpInference.Core.Tensors;
-using SharpInference.Diffusion.Requests;
-using SharpInference.Diffusion.Utilities;
+using HartsyInference.Core.Backends;
+using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Requests;
+using HartsyInference.Diffusion.Utilities;
 using SixLabors.ImageSharp.PixelFormats;
 using SixLabors.ImageSharp.Formats.Jpeg;
 using ISImage = SixLabors.ImageSharp.Image;
 using SwarmUI.Utils;
 
-namespace Hartsy.Extensions.SharpInferenceBackend.Generation;
+namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
 /// <summary>Turns an in-flight diffusion latent into a base64-encoded JPEG that the
 /// SwarmUI frontend can render directly via its existing <c>gen_progress.preview</c>
@@ -129,7 +129,7 @@ public sealed class PreviewEncoder
         try { decoder = _taesdResolver(arch); }
         catch (Exception ex)
         {
-            Logs.Warning($"[SharpInference][TAESD] resolver threw: {ex.GetType().Name}: {ex.Message}");
+            Logs.Warning($"[HartsyInference][TAESD] resolver threw: {ex.GetType().Name}: {ex.Message}");
             return null;
         }
         if (decoder is null) return null;
@@ -142,7 +142,7 @@ public sealed class PreviewEncoder
         }
         catch (Exception ex)
         {
-            Logs.Warning($"[SharpInference][TAESD] forward pass threw: {ex.GetType().Name}: {ex.Message}");
+            Logs.Warning($"[HartsyInference][TAESD] forward pass threw: {ex.GetType().Name}: {ex.Message}");
             return null;
         }
         finally

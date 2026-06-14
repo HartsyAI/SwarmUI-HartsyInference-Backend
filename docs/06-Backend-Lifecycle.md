@@ -1,6 +1,6 @@
 # 06 — Backend Lifecycle
 
-How `SharpInferenceBackend` (subclass of `AbstractT2IBackend`) handles its lifetime
+How `HartsyInferenceBackend` (subclass of `AbstractT2IBackend`) handles its lifetime
 and per-request flow.
 
 ## The backend contract (recap)
@@ -23,10 +23,10 @@ From `src/Backends/AbstractT2IBackend.cs` and `src/Backends/AbstractBackend.cs`:
 ## Settings record
 
 Configured via Swarm's `AutoConfiguration` — saved to `Data/Backends.fds`. Defined as
-a nested class on `SharpInferenceBackend`:
+a nested class on `HartsyInferenceBackend`:
 
 ```csharp
-public class SharpInferenceBackendSettings : AutoConfiguration
+public class HartsyInferenceBackendSettings : AutoConfiguration
 {
     [ConfigComment("Compute backend to use. 'auto' picks best available (CUDA > Vulkan > CPU).")]
     public string ComputeBackend = "auto"; // auto | cuda | vulkan | cpu
@@ -104,7 +104,7 @@ public override async Task Shutdown()
 }
 ```
 
-The `using` blocks in SharpInference's pipeline classes mean disposing the pipeline
+The `using` blocks in HartsyInference's pipeline classes mean disposing the pipeline
 also disposes the components. We rely on that.
 
 ## SupportedFeatures
@@ -114,7 +114,7 @@ public override IEnumerable<string> SupportedFeatures
 {
     get
     {
-        yield return "sharpinference";  // our own feature flag
+        yield return "hartsyinference";  // our own feature flag
         yield return "comfyui";          // claim Comfy parity for params marked with this flag
         yield return "refiners";
         yield return "endstepsearly";
@@ -160,7 +160,7 @@ public override async Task<bool> LoadModel(T2IModel model, T2IParamInput input)
         var loader = ResolveLoader(ctx.CompatClass);
         if (loader == null)
         {
-            Logs.Warning($"[SharpInference] Unknown architecture '{ctx.CompatClass}' for model {model.Name}");
+            Logs.Warning($"[HartsyInference] Unknown architecture '{ctx.CompatClass}' for model {model.Name}");
             Status = BackendStatus.IDLE;
             return false;
         }
@@ -173,7 +173,7 @@ public override async Task<bool> LoadModel(T2IModel model, T2IParamInput input)
     }
     catch (Exception ex)
     {
-        Logs.Error($"[SharpInference] LoadModel failed: {ex}");
+        Logs.Error($"[HartsyInference] LoadModel failed: {ex}");
         Status = BackendStatus.IDLE;
         return false;
     }
@@ -224,7 +224,7 @@ public override async Task GenerateLive(T2IParamInput input, string batchId, Act
         if (ctx.Execution?.Run == null)
             throw new InvalidOperationException("No pipeline step assembled an Execution.Run");
 
-        // Convert SharpInference progress callback → Swarm live updates
+        // Convert HartsyInference progress callback → Swarm live updates
         long startMs = Environment.TickCount64;
         Action<GenerationProgress> progressBridge = p =>
         {
@@ -240,7 +240,7 @@ public override async Task GenerateLive(T2IParamInput input, string batchId, Act
             });
         };
 
-        // 4. Run on a background thread (SharpInference is sync)
+        // 4. Run on a background thread (HartsyInference is sync)
         Image[] images = await Task.Run(() => ctx.Execution.Run(progressBridge));
 
         // 5. Yield results
@@ -258,8 +258,8 @@ public override async Task GenerateLive(T2IParamInput input, string batchId, Act
 
 ## Cancellation
 
-Until SharpInference adds `CancellationToken` parameters to its pipeline methods
-(see [`04-SharpInference-Integration.md`](./04-SharpInference-Integration.md) gap #3),
+Until HartsyInference adds `CancellationToken` parameters to its pipeline methods
+(see [`04-HartsyInference-Integration.md`](./04-HartsyInference-Integration.md) gap #3),
 we use a stop-flag pattern:
 
 - The backend holds a `CancellationTokenSource` per active generation.
@@ -289,14 +289,14 @@ public override bool IsValidForThisBackend(T2IParamInput input)
     string compat = model.ModelClass?.CompatClass;
     if (string.IsNullOrEmpty(compat) || ResolveLoader(compat) == null)
     {
-        input.RefusalReasons.Add($"Architecture '{compat}' not supported by SharpInference (yet)");
+        input.RefusalReasons.Add($"Architecture '{compat}' not supported by HartsyInference (yet)");
         return false;
     }
 
     // Img2img / inpaint requires VaeEncoder — phase 4
     if (input.TryGet(T2IParamTypes.InitImage, out _) && !HasVaeEncoder())
     {
-        input.RefusalReasons.Add("img2img not yet supported in SharpInference (VaeEncoder pending)");
+        input.RefusalReasons.Add("img2img not yet supported in HartsyInference (VaeEncoder pending)");
         return false;
     }
 
@@ -374,7 +374,7 @@ public override async Task<bool> FreeMemory(bool systemRam)
             │                                └──────────┘
 ```
 
-For our in-process SharpInference backend, `IDLE` is essentially never the right
+For our in-process HartsyInference backend, `IDLE` is essentially never the right
 state — we don't have a remote endpoint that can drop. `LoadModel` enters `LOADING`
 and returns to `RUNNING`; `GenerateLive` stays `RUNNING` throughout (utilization
 flows through `Usages`); a failed generation leaves Status at `RUNNING` because the

@@ -1,7 +1,7 @@
 using SwarmUI.Text2Image;
 using SwarmUI.Utils;
 
-namespace Hartsy.Extensions.SharpInferenceBackend.Generation;
+namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
 /// <summary>
 /// Reads Swarm's refiner-related params and produces a <see cref="RefinerSpec"/> when
@@ -39,7 +39,7 @@ public static class RefinerResolver
         double refinerControl = input.Get(T2IParamTypes.RefinerControl);
         if (refinerControl <= 0)
         {
-            Logs.Debug("[SharpInference] RefinerControl=0 → skipping refiner pass.");
+            Logs.Debug("[HartsyInference] RefinerControl=0 → skipping refiner pass.");
             return null;
         }
 

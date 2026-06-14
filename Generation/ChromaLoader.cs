@@ -1,19 +1,19 @@
 using System.IO;
 using SwarmUI.Text2Image;
 using SwarmUI.Utils;
-using SharpInference.Core.Backends;
-using SharpInference.Core.Tensors;
-using SharpInference.Diffusion.Models.Denoisers;
-using SharpInference.Diffusion.Models.TextEncoders;
-using SharpInference.Diffusion.Models.Vae;
-using SharpInference.Diffusion.Pipelines;
-using SharpInference.Diffusion.Requests;
-using SharpInference.ModelHandler.CheckpointConverters;
-using SharpInference.ModelHandler.CheckpointConverters.Utils;
-using SharpInference.ModelHandler.SafeTensors;
-using SharpInference.Tokenizers;
+using HartsyInference.Core.Backends;
+using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Models.Denoisers;
+using HartsyInference.Diffusion.Models.TextEncoders;
+using HartsyInference.Diffusion.Models.Vae;
+using HartsyInference.Diffusion.Pipelines;
+using HartsyInference.Diffusion.Requests;
+using HartsyInference.ModelHandler.CheckpointConverters;
+using HartsyInference.ModelHandler.CheckpointConverters.Utils;
+using HartsyInference.ModelHandler.SafeTensors;
+using HartsyInference.Tokenizers;
 
-namespace Hartsy.Extensions.SharpInferenceBackend.Generation;
+namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
 /// <summary>
 /// Loads Chroma (Lodestone Rock's 8.9B Flux derivative; <c>lodestones/Chroma</c> on
@@ -26,7 +26,7 @@ namespace Hartsy.Extensions.SharpInferenceBackend.Generation;
 ///
 /// The Chroma checkpoint itself is the user-selected main model. Currently only <c>chroma</c>
 /// is supported — Radiance and Zeta variants would need additional <see cref="ChromaConfig"/>
-/// presets in SharpInference.
+/// presets in HartsyInference.
 /// </summary>
 public static class ChromaLoader
 {
@@ -164,7 +164,7 @@ public static class ChromaLoader
         var (rgbBytes, outW, outH, _) = entry.Pipeline.GenerateFromTokens(
             promptTokens, negTokens, promptMask, negMask, request, bridge);
 
-        Logs.Verbose($"[SharpInference][Chroma] Pipeline returned {outW}x{outH} in {Environment.TickCount64 - start}ms.");
+        Logs.Verbose($"[HartsyInference][Chroma] Pipeline returned {outW}x{outH} in {Environment.TickCount64 - start}ms.");
         return new[] { RgbToImage.FromHwcRgb(rgbBytes, outW, outH) };
     }
 

@@ -42,10 +42,10 @@ The honest pattern is:
 
 1. **Advertise only flags we genuinely service.** Mirror Comfy's
    [`NodeToFeatureMap`](../../../BuiltinExtensions/ComfyUIBackend/ComfyUIBackendExtension.cs)
-   pattern: at Init, probe what SharpInference can actually do, declare those
+   pattern: at Init, probe what HartsyInference can actually do, declare those
    specific flags.
 2. **Accept that we lose params we can't support.** Without `"comfyui"`, the UI
-   hides Sampler/Scheduler/etc. when SharpInference is the only configured backend.
+   hides Sampler/Scheduler/etc. when HartsyInference is the only configured backend.
    That's the correct UX — those params don't have a home in our pipeline today.
 3. **Coexist gracefully with Comfy.** When both backends are configured, the UI
    shows the union of features. Users who pick comfyui-only options route to Comfy
@@ -57,30 +57,30 @@ The honest pattern is:
 This matches the [`docs/Making Extensions.md`](../../../../docs/Making%20Extensions.md)
 guidance and the working API Backends extension's pattern.
 
-### C. Parameters specific to SharpInference
+### C. Parameters specific to HartsyInference
 
-Cases where SharpInference exposes a setting that has no Comfy equivalent — e.g.,
+Cases where HartsyInference exposes a setting that has no Comfy equivalent — e.g.,
 quantization mode, FP8 scaling, scheduler-specific options.
 
-We register these under our own group with `FeatureFlag: "sharpinference"`:
+We register these under our own group with `FeatureFlag: "hartsyinference"`:
 
 ```csharp
-public static T2IRegisteredParam<string> SharpInferenceDtype;
-public static T2IRegisteredParam<int> SharpInferenceTilesize;
+public static T2IRegisteredParam<string> HartsyInferenceDtype;
+public static T2IRegisteredParam<int> HartsyInferenceTilesize;
 
-public static T2IParamGroup SharpInferenceParamGroup;
+public static T2IParamGroup HartsyInferenceParamGroup;
 
 public override void OnInit()
 {
-    SharpInferenceParamGroup = new("SharpInference", Toggles: false, Open: false, IsAdvanced: true);
+    HartsyInferenceParamGroup = new("HartsyInference", Toggles: false, Open: false, IsAdvanced: true);
 
-    SharpInferenceDtype = T2IParamTypes.Register<string>(new(
-        "SharpInference Dtype",
+    HartsyInferenceDtype = T2IParamTypes.Register<string>(new(
+        "HartsyInference Dtype",
         "Per-generation dtype override. fp16 (default), bf16, fp32.",
         "fp16",
         Toggleable: true,
-        Group: SharpInferenceParamGroup,
-        FeatureFlag: "sharpinference",
+        Group: HartsyInferenceParamGroup,
+        FeatureFlag: "hartsyinference",
         GetValues: _ => new[] { "fp16", "bf16", "fp32" }));
 }
 ```
@@ -92,7 +92,7 @@ The full list (subject to phase progress — see
 
 | Flag | What it gates | Phase we'll claim it |
 |------|---------------|----------------------|
-| `sharpinference` | Our own settings group | 1 (active) |
+| `hartsyinference` | Our own settings group | 1 (active) |
 | `text2image` | Universal text-to-image params | 1 (active) |
 | `flux-dev` | FluxGuidanceScale param. In `DisregardedFeatureFlags` so advertising is informational — backend selection doesn't enforce it | 1 (active) |
 | `lora` | LoRA list | 2 |
@@ -123,27 +123,27 @@ Mirror the `APIBackendsPermissions` / `ComfyUIBackendExtension` pattern. All
 permissions live in the extension entry file:
 
 ```csharp
-public static class SharpInferencePermissions
+public static class HartsyInferencePermissions
 {
     public static readonly PermInfoGroup Group = new(
-        "SharpInference",
-        "Permissions for the pure-C# SharpInference backend.");
+        "HartsyInference",
+        "Permissions for the pure-C# HartsyInference backend.");
 
-    public static readonly PermInfo PermUseSharpInference = Permissions.Register(new(
-        "use_sharpinference",
-        "Use SharpInference backend",
-        "Allows generating images using the in-process SharpInference backend.",
+    public static readonly PermInfo PermUseHartsyInference = Permissions.Register(new(
+        "use_hartsyinference",
+        "Use HartsyInference backend",
+        "Allows generating images using the in-process HartsyInference backend.",
         PermissionDefault.POWERUSERS, Group));
 
-    public static readonly PermInfo PermAdminSharpInference = Permissions.Register(new(
-        "admin_sharpinference",
-        "Administer SharpInference",
+    public static readonly PermInfo PermAdminHartsyInference = Permissions.Register(new(
+        "admin_hartsyinference",
+        "Administer HartsyInference",
         "Allows clearing the pipeline cache, probing models, and managing devices.",
         PermissionDefault.ADMINS, Group));
 }
 ```
 
-The first gates whether `SharpInferenceBackend.IsValidForThisBackend` returns true at
+The first gates whether `HartsyInferenceBackend.IsValidForThisBackend` returns true at
 all for a user. The second gates the admin-only HTTP routes (see
 [`08-Web-API-Routes.md`](./08-Web-API-Routes.md)).
 
@@ -178,16 +178,16 @@ core params like `T2IParamTypes.Width` via the `=>` alias trick).
 ### Sharpinference-only: Dtype override
 
 ```csharp
-SharpInferenceDtype = T2IParamTypes.Register<string>(new(
-    "SharpInference Dtype",
+HartsyInferenceDtype = T2IParamTypes.Register<string>(new(
+    "HartsyInference Dtype",
     "Override the model's loaded dtype. fp16 = saves VRAM, fp32 = max accuracy on CPU.",
     "fp16", Toggleable: true,
-    Group: SharpInferenceParamGroup,
-    FeatureFlag: "sharpinference",
+    Group: HartsyInferenceParamGroup,
+    FeatureFlag: "hartsyinference",
     GetValues: _ => new[] { "fp16", "bf16", "fp32" }));
 ```
 
-Because the flag is `"sharpinference"`, this control only appears when our backend is selected.
+Because the flag is `"hartsyinference"`, this control only appears when our backend is selected.
 
 ## What we explicitly don't surface
 

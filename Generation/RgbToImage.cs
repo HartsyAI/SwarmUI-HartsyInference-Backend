@@ -3,11 +3,11 @@ using SixLabors.ImageSharp.Processing;
 using ISImage = SixLabors.ImageSharp.Image;
 using Image = SwarmUI.Utils.Image;
 
-namespace Hartsy.Extensions.SharpInferenceBackend.Generation;
+namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
 /// <summary>
-/// Convert SharpInference's HWC RGB byte output (the format
-/// <see cref="SharpInference.Diffusion.Pipelines.FluxPipeline.GenerateFromTokens"/>
+/// Convert HartsyInference's HWC RGB byte output (the format
+/// <see cref="HartsyInference.Diffusion.Pipelines.FluxPipeline.GenerateFromTokens"/>
 /// returns) into a SwarmUI <see cref="Image"/> as PNG bytes.
 /// </summary>
 public static class RgbToImage
@@ -66,7 +66,7 @@ public static class RgbToImage
         int w = frame.Width;
         int h = frame.Height;
         byte[] rgb = new byte[w * h * 3];
-        // CopyPixelDataTo writes contiguous HWC bytes — same layout SharpInference's
+        // CopyPixelDataTo writes contiguous HWC bytes — same layout HartsyInference's
         // ImagePostProcessor.RgbBytesToTensor expects.
         frame.CopyPixelDataTo(rgb);
         return (rgb, w, h);

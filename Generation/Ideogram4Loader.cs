@@ -1,20 +1,20 @@
 using System.IO;
 using SwarmUI.Text2Image;
 using SwarmUI.Utils;
-using SharpInference.Core.Backends;
-using SharpInference.Core.Tensors;
-using SharpInference.Cuda;
-using SharpInference.Diffusion.Models.Denoisers;
-using SharpInference.Diffusion.Models.TextEncoders;
-using SharpInference.Diffusion.Models.Vae;
-using SharpInference.Diffusion.Pipelines;
-using SharpInference.Diffusion.Requests;
-using SharpInference.Diffusion.Schedulers;
-using SharpInference.ModelHandler.CheckpointConverters;
-using SharpInference.ModelHandler.SafeTensors;
-using SharpInference.Tokenizers;
+using HartsyInference.Core.Backends;
+using HartsyInference.Core.Tensors;
+using HartsyInference.Cuda;
+using HartsyInference.Diffusion.Models.Denoisers;
+using HartsyInference.Diffusion.Models.TextEncoders;
+using HartsyInference.Diffusion.Models.Vae;
+using HartsyInference.Diffusion.Pipelines;
+using HartsyInference.Diffusion.Requests;
+using HartsyInference.Diffusion.Schedulers;
+using HartsyInference.ModelHandler.CheckpointConverters;
+using HartsyInference.ModelHandler.SafeTensors;
+using HartsyInference.Tokenizers;
 
-namespace Hartsy.Extensions.SharpInferenceBackend.Generation;
+namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
 /// <summary>
 /// Loads Ideogram 4 (<c>ideogram-oss/ideogram4</c>, 9.3B, released 2026-06-03).
@@ -171,7 +171,7 @@ public static class Ideogram4Loader
         int snappedH = Math.Clamp(height / 16 * 16, 256, 2048);
         if (snappedW != width || snappedH != height)
         {
-            Logs.Info($"[SharpInference][Ideogram4] Snapped resolution {width}x{height} → {snappedW}x{snappedH} (must be multiple of 16, 256–2048).");
+            Logs.Info($"[HartsyInference][Ideogram4] Snapped resolution {width}x{height} → {snappedW}x{snappedH} (must be multiple of 16, 256–2048).");
         }
 
         // Steps → official sampler preset. The presets carry the per-step guidance
@@ -183,11 +183,11 @@ public static class Ideogram4Loader
             : Ideogram4SamplerPreset.Default20;
         if (steps != preset.NumSteps)
         {
-            Logs.Info($"[SharpInference][Ideogram4] Steps={steps} mapped to official preset {preset.Name} ({preset.NumSteps} steps — Ideogram 4 uses fixed preset schedules).");
+            Logs.Info($"[HartsyInference][Ideogram4] Steps={steps} mapped to official preset {preset.Name} ({preset.NumSteps} steps — Ideogram 4 uses fixed preset schedules).");
         }
         if (!string.IsNullOrWhiteSpace(negative))
         {
-            Logs.Info("[SharpInference][Ideogram4] Negative prompt is ignored — Ideogram 4's asymmetric CFG runs the unconditional branch with zeroed text features.");
+            Logs.Info("[HartsyInference][Ideogram4] Negative prompt is ignored — Ideogram 4's asymmetric CFG runs the unconditional branch with zeroed text features.");
         }
 
         // Chat-template tokenize, then trim the right-pad run (EncodeChat pads to
@@ -195,7 +195,7 @@ public static class Ideogram4Loader
         // conditioning and ~3x the attention cost of the unified sequence).
         int[] padded = entry.Tokenizer.EncodeChat(prompt);
         int[] promptTokens = TrimRightPad(padded, Qwen3Tokenizer.BosTokenId);
-        Logs.Verbose($"[SharpInference][Ideogram4] Prompt tokenized to {promptTokens.Length} tokens (chat template, pad trimmed).");
+        Logs.Verbose($"[HartsyInference][Ideogram4] Prompt tokenized to {promptTokens.Length} tokens (chat template, pad trimmed).");
 
         TextToImageRequest request = new()
         {
@@ -217,7 +217,7 @@ public static class Ideogram4Loader
 
         var (rgbBytes, outW, outH, _) = entry.Pipeline.GenerateFromTokens(promptTokens, request, preset, bridge);
 
-        Logs.Verbose($"[SharpInference][Ideogram4] Pipeline returned {outW}x{outH} in {Environment.TickCount64 - start}ms.");
+        Logs.Verbose($"[HartsyInference][Ideogram4] Pipeline returned {outW}x{outH} in {Environment.TickCount64 - start}ms.");
         return [RgbToImage.FromHwcRgb(rgbBytes, outW, outH)];
     }
 

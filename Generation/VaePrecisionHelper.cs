@@ -1,14 +1,14 @@
-using SharpInference.Core.Backends;
-using SharpInference.Core.Tensors;
+using HartsyInference.Core.Backends;
+using HartsyInference.Core.Tensors;
 
-namespace Hartsy.Extensions.SharpInferenceBackend.Generation;
+namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
 /// <summary>
 /// SDXL-VAE precision policy. SDXL's AutoencoderKL is famously unstable in F16:
 /// resnet activations exceed F16's Â±65504 range, producing +Inf â NaN â all-black
 /// output. This is documented industry-wide (madebyollin's sdxl-vae-fp16-fix repo,
 /// Diffusers' <c>force_upcast: true</c>, ComfyUI's allow-list <c>[bf16, fp32]</c>).
-/// SharpInference matches ComfyUI's policy here: prefer BF16 on Ampere+ (same byte
+/// HartsyInference matches ComfyUI's policy here: prefer BF16 on Ampere+ (same byte
 /// count as F16 but F32-equivalent dynamic range, so structurally cannot overflow),
 /// fall back to F32 on Turing/older where BF16 isn't supported.
 /// </summary>

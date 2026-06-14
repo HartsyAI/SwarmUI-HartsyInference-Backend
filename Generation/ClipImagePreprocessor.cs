@@ -1,15 +1,15 @@
 using SixLabors.ImageSharp.PixelFormats;
 using SixLabors.ImageSharp.Processing;
 using SwarmUI.Utils;
-using SharpInference.Core.Tensors;
+using HartsyInference.Core.Tensors;
 using ISImage = SixLabors.ImageSharp.Image;
 using ISSize = SixLabors.ImageSharp.Size;
 
-namespace Hartsy.Extensions.SharpInferenceBackend.Generation;
+namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
 /// <summary>
 /// Preprocesses a Swarm <see cref="Image"/> into the <c>[1, 3, H, W]</c> F32 tensor
-/// the upstream <see cref="SharpInference.Diffusion.Models.TextEncoders.ClipVisionEncoder"/>
+/// the upstream <see cref="HartsyInference.Diffusion.Models.TextEncoders.ClipVisionEncoder"/>
 /// expects: bicubic resize so the shorter edge equals the target image size, then
 /// center-crop to a square <c>imageSize × imageSize</c>, then per-channel normalize
 /// with CLIP's standard mean / std (the OpenAI values that OpenCLIP also uses).
@@ -69,7 +69,7 @@ public static unsafe class ClipImagePreprocessor
                 dp[chOff + i] = (b * inv255 - mean) * invStd;
             }
         }
-        Logs.Verbose($"[SharpInference][ClipImage] Preprocessed Swarm image -> [1, 3, {imageSize}, {imageSize}] F32 (CLIP normalized).");
+        Logs.Verbose($"[HartsyInference][ClipImage] Preprocessed Swarm image -> [1, 3, {imageSize}, {imageSize}] F32 (CLIP normalized).");
         return output;
     }
 }

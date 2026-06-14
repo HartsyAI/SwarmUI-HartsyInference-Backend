@@ -1,18 +1,18 @@
 using System.IO;
 using SwarmUI.Text2Image;
 using SwarmUI.Utils;
-using SharpInference.Core.Backends;
-using SharpInference.Core.Tensors;
-using SharpInference.Diffusion.Models.Denoisers;
-using SharpInference.Diffusion.Models.TextEncoders;
-using SharpInference.Diffusion.Models.Vae;
-using SharpInference.Diffusion.Pipelines;
-using SharpInference.Diffusion.Requests;
-using SharpInference.ModelHandler.CheckpointConverters;
-using SharpInference.ModelHandler.SafeTensors;
-using SharpInference.Tokenizers;
+using HartsyInference.Core.Backends;
+using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Models.Denoisers;
+using HartsyInference.Diffusion.Models.TextEncoders;
+using HartsyInference.Diffusion.Models.Vae;
+using HartsyInference.Diffusion.Pipelines;
+using HartsyInference.Diffusion.Requests;
+using HartsyInference.ModelHandler.CheckpointConverters;
+using HartsyInference.ModelHandler.SafeTensors;
+using HartsyInference.Tokenizers;
 
-namespace Hartsy.Extensions.SharpInferenceBackend.Generation;
+namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
 /// <summary>
 /// Loads HiDream-I1 (Full / Dev). HiDream is an MMDiT with FOUR text encoders — CLIP-L, CLIP-G,
@@ -33,7 +33,7 @@ namespace Hartsy.Extensions.SharpInferenceBackend.Generation;
 /// flux-ae VAE.</para>
 ///
 /// <para><b>Llama tokenizer requirement:</b> the Llama-3.1 branch needs a real 128k-vocab BPE
-/// tokenizer. SharpInference ships it as an embedded resource only when the asset files are present
+/// tokenizer. HartsyInference ships it as an embedded resource only when the asset files are present
 /// in the build (see <see cref="EmbeddedTokenizerResources.HasLlama3Assets"/>). If they're absent,
 /// loading fails here with a clear instruction rather than producing garbage from placeholder tokens.</para>
 /// </summary>
@@ -53,15 +53,15 @@ public static class HiDreamLoader
             throw new FileNotFoundException($"HiDream checkpoint not found: {model.RawFilePath}");
 
         // Fail fast with an actionable message if the Llama-3.1 tokenizer assets weren't embedded
-        // into this SharpInference build. Without them the Llama branch can't tokenize and HiDream
+        // into this HartsyInference build. Without them the Llama branch can't tokenize and HiDream
         // output would be garbage — better to refuse at load than silently produce noise.
         if (!EmbeddedTokenizerResources.HasLlama3Assets)
         {
             throw new InvalidOperationException(
-                "HiDream needs the Llama-3.1 tokenizer, which isn't embedded in this SharpInference build. " +
+                "HiDream needs the Llama-3.1 tokenizer, which isn't embedded in this HartsyInference build. " +
                 "Extract vocab.json + merges.txt from the Llama-3.1 tokenizer.json and drop them into " +
-                "SharpInference/src/SharpInference.Tokenizers/Resources/ as llama3_vocab.json + llama3_merges.txt, " +
-                "then rebuild SharpInference (and reload this extension).");
+                "HartsyInference/src/HartsyInference.Tokenizers/Resources/ as llama3_vocab.json + llama3_merges.txt, " +
+                "then rebuild HartsyInference (and reload this extension).");
         }
 
         // 1. Load + convert the HiDream transformer (and any bundled components in an all-in-one file).
@@ -257,7 +257,7 @@ public static class HiDreamLoader
             llamaTokens, negLlamaTokens,
             request, bridge);
 
-        Logs.Verbose($"[SharpInference][HiDream] Pipeline returned {outW}x{outH} in {Environment.TickCount64 - start}ms.");
+        Logs.Verbose($"[HartsyInference][HiDream] Pipeline returned {outW}x{outH} in {Environment.TickCount64 - start}ms.");
         return new[] { RgbToImage.FromHwcRgb(rgbBytes, outW, outH) };
     }
 

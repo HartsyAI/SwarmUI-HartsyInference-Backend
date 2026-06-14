@@ -1,50 +1,50 @@
-# 04 — SharpInference Integration
+# 04 — HartsyInference Integration
 
-The contract between this extension and the upstream SharpInference library.
+The contract between this extension and the upstream HartsyInference library.
 Everything we use, everything we wish existed, and where to find it in the
-SharpInference repo (`/home/kalebbroo/Desktop/Projects/SharpInference/`).
+HartsyInference repo (`/home/kalebbroo/Desktop/Projects/HartsyInference/`).
 
 ## Distribution model
 
-**Phase 1 — git submodule + ProjectReference.** Until SharpInference ships on
-NuGet, vendor it under `Vendor/SharpInference/` as a submodule and reference the
+**Phase 1 — git submodule + ProjectReference.** Until HartsyInference ships on
+NuGet, vendor it under `Vendor/HartsyInference/` as a submodule and reference the
 relevant `.csproj` files directly:
 
 ```bash
-cd src/Extensions/SwarmUI-SharpInference
-git submodule add <SharpInference-repo-url> Vendor/SharpInference
+cd src/Extensions/SwarmUI-HartsyInference
+git submodule add <HartsyInference-repo-url> Vendor/HartsyInference
 git submodule update --init --recursive
 ```
 
-Then in `SwarmUI-SharpInference.csproj`:
+Then in `SwarmUI-HartsyInference.csproj`:
 
 ```xml
 <ItemGroup>
-  <ProjectReference Include="Vendor/SharpInference/src/SharpInference.Core/SharpInference.Core.csproj" />
-  <ProjectReference Include="Vendor/SharpInference/src/SharpInference.Diffusion/SharpInference.Diffusion.csproj" />
-  <ProjectReference Include="Vendor/SharpInference/src/SharpInference.ModelHandler/SharpInference.ModelHandler.csproj" />
-  <ProjectReference Include="Vendor/SharpInference/src/SharpInference.Tokenizers/SharpInference.Tokenizers.csproj" />
-  <ProjectReference Include="Vendor/SharpInference/src/SharpInference.Cpu/SharpInference.Cpu.csproj" />
-  <ProjectReference Include="Vendor/SharpInference/src/SharpInference.Cuda/SharpInference.Cuda.csproj" />
-  <ProjectReference Include="Vendor/SharpInference/src/SharpInference.Vulkan/SharpInference.Vulkan.csproj" />
+  <ProjectReference Include="Vendor/HartsyInference/src/HartsyInference.Core/HartsyInference.Core.csproj" />
+  <ProjectReference Include="Vendor/HartsyInference/src/HartsyInference.Diffusion/HartsyInference.Diffusion.csproj" />
+  <ProjectReference Include="Vendor/HartsyInference/src/HartsyInference.ModelHandler/HartsyInference.ModelHandler.csproj" />
+  <ProjectReference Include="Vendor/HartsyInference/src/HartsyInference.Tokenizers/HartsyInference.Tokenizers.csproj" />
+  <ProjectReference Include="Vendor/HartsyInference/src/HartsyInference.Cpu/HartsyInference.Cpu.csproj" />
+  <ProjectReference Include="Vendor/HartsyInference/src/HartsyInference.Cuda/HartsyInference.Cuda.csproj" />
+  <ProjectReference Include="Vendor/HartsyInference/src/HartsyInference.Vulkan/HartsyInference.Vulkan.csproj" />
 </ItemGroup>
 ```
 
-**Phase 2 — NuGet PackageReferences.** Once SharpInference publishes packages, swap
-the `<ProjectReference>` block for `<PackageReference Include="SharpInference.Diffusion" Version="..." />`
+**Phase 2 — NuGet PackageReferences.** Once HartsyInference publishes packages, swap
+the `<ProjectReference>` block for `<PackageReference Include="HartsyInference.Diffusion" Version="..." />`
 and a few siblings, and remove the submodule.
 
-## What we consume from SharpInference
+## What we consume from HartsyInference
 
-### From `SharpInference.Core`
+### From `HartsyInference.Core`
 
 | Type | Path | Why |
 |------|------|-----|
-| `IBackend` | `src/SharpInference.Core/Backends/IBackend.cs:6` | Required by every pipeline; we instantiate one of `CpuBackend` / `CudaBackend` / `VulkanBackend` and pass it to pipelines |
-| `Tensor` | `src/SharpInference.Core/Tensors/Tensor.cs:8` | We don't typically construct these — the pipeline does — but we touch them for LoRA application |
-| `DeviceKind` | `src/SharpInference.Core/Backends/DeviceKind.cs:4` | Identifies the device of a tensor |
+| `IBackend` | `src/HartsyInference.Core/Backends/IBackend.cs:6` | Required by every pipeline; we instantiate one of `CpuBackend` / `CudaBackend` / `VulkanBackend` and pass it to pipelines |
+| `Tensor` | `src/HartsyInference.Core/Tensors/Tensor.cs:8` | We don't typically construct these — the pipeline does — but we touch them for LoRA application |
+| `DeviceKind` | `src/HartsyInference.Core/Backends/DeviceKind.cs:4` | Identifies the device of a tensor |
 
-### From `SharpInference.Cpu` / `SharpInference.Cuda` / `SharpInference.Vulkan`
+### From `HartsyInference.Cpu` / `HartsyInference.Cuda` / `HartsyInference.Vulkan`
 
 | Type | Why |
 |------|-----|
@@ -55,35 +55,35 @@ and a few siblings, and remove the submodule.
 We instantiate exactly one of these per Swarm-configured backend instance, based on
 the user's setting.
 
-### From `SharpInference.ModelHandler`
+### From `HartsyInference.ModelHandler`
 
 | Type | Path | Why |
 |------|------|-----|
-| `SafeTensorsLoader` | `src/SharpInference.ModelHandler/SafeTensors/` | Load `.safetensors` checkpoints. Pattern: `using var loader = new SafeTensorsLoader(); loader.Load(path); var tensors = loader.GetAllTensors();` |
-| `LoraStack` | `src/SharpInference.ModelHandler/Lora/LoraStack.cs:9` | Multi-LoRA application |
-| `LoraFile` | `src/SharpInference.ModelHandler/Lora/LoraFile.cs` | Loaded LoRA file representation |
-| `LoraTarget` enum | `src/SharpInference.ModelHandler/Lora/LoraTarget.cs:7` | UNet / Transformer / ClipL / ClipG |
-| `ModelRegistry` | `src/SharpInference.ModelHandler/Registry/` | Optional — in-memory model cache. We may use our own `PipelineCache` instead |
+| `SafeTensorsLoader` | `src/HartsyInference.ModelHandler/SafeTensors/` | Load `.safetensors` checkpoints. Pattern: `using var loader = new SafeTensorsLoader(); loader.Load(path); var tensors = loader.GetAllTensors();` |
+| `LoraStack` | `src/HartsyInference.ModelHandler/Lora/LoraStack.cs:9` | Multi-LoRA application |
+| `LoraFile` | `src/HartsyInference.ModelHandler/Lora/LoraFile.cs` | Loaded LoRA file representation |
+| `LoraTarget` enum | `src/HartsyInference.ModelHandler/Lora/LoraTarget.cs:7` | UNet / Transformer / ClipL / ClipG |
+| `ModelRegistry` | `src/HartsyInference.ModelHandler/Registry/` | Optional — in-memory model cache. We may use our own `PipelineCache` instead |
 
 We do **not** use `HuggingFace/` (download utilities) or `Gguf/` in v1. Models come
 from Swarm's `Models/` folder; the user is responsible for putting files there.
 
-### From `SharpInference.Tokenizers`
+### From `HartsyInference.Tokenizers`
 
 | Type | Why |
 |------|-----|
 | `ClipTokenizer(string vocabPath, string mergesPath)` | Tokenize prompt + negative prompt for SD/SDXL/Flux CLIP-L paths |
 | `T5Tokenizer` | T5 path for Flux / SD3 |
 
-### From `SharpInference.Diffusion`
+### From `HartsyInference.Diffusion`
 
 This is the bulk of our consumption surface.
 
-#### Pipelines (`src/SharpInference.Diffusion/Pipelines/`)
+#### Pipelines (`src/HartsyInference.Diffusion/Pipelines/`)
 
 Each pipeline is **a sealed concrete class with a unique constructor**. There is
 no `IPipeline` interface (despite an unused skeleton at
-`src/SharpInference.Core/Pipelines/IDiffusionPipeline.cs`). Every pipeline class
+`src/HartsyInference.Core/Pipelines/IDiffusionPipeline.cs`). Every pipeline class
 exposes:
 
 - A constructor taking the `IBackend`, the loaded model components, and (for some)
@@ -112,7 +112,7 @@ exposes:
 pipeline-translation layer (`Generation/ModelSupport.cs`) holds one
 `IPipelineHandler` per architecture, so the dispatch is closed over the differences.
 
-#### Models (`src/SharpInference.Diffusion/Models/`)
+#### Models (`src/HartsyInference.Diffusion/Models/`)
 
 | Subdir | What we use |
 |--------|-------------|
@@ -155,18 +155,18 @@ typically a single .safetensors with everything inside. Our model loader
 prefix** (e.g., `text_model.*`, `model.diffusion_model.*`, `first_stage_model.*`)
 and feed each component its slice.
 
-#### Schedulers (`src/SharpInference.Diffusion/Schedulers/`)
+#### Schedulers (`src/HartsyInference.Diffusion/Schedulers/`)
 
 `EulerDiscreteScheduler`, `DdimScheduler`, `DpmPlusPlus2MScheduler`, `LcmScheduler`,
 `FlowMatchEulerDiscreteScheduler`. Pipelines select a scheduler internally based on
 `TextToImageRequest.Scheduler` (a string). We map Swarm's sampler enum to that string.
 
-#### Adapters (`src/SharpInference.Diffusion/Adapters/`)
+#### Adapters (`src/HartsyInference.Diffusion/Adapters/`)
 
 `ControlNet`, `IpAdapter`. These exist as classes but **pipelines don't accept them
 yet.** Wiring them in is upstream work scheduled for phase 5.
 
-### From `SharpInference.Diffusion/Requests/`
+### From `HartsyInference.Diffusion/Requests/`
 
 `TextToImageRequest` is the only DTO. Properties:
 
@@ -187,11 +187,11 @@ explicit tensor parameters on the method signature.
 
 ## Gaps we'll either route around or upstream
 
-These are required for Comfy parity but don't exist in SharpInference today.
+These are required for Comfy parity but don't exist in HartsyInference today.
 
 | # | Gap | Impact | Plan |
 |---|-----|--------|------|
-| 1 | **TFM mismatch (net10 vs net8)** | Cannot reference SharpInference at all | Upstream PR — multi-target net8.0/net10.0. **Phase 0 blocker.** |
+| 1 | **TFM mismatch (net10 vs net8)** | Cannot reference HartsyInference at all | Upstream PR — multi-target net8.0/net10.0. **Phase 0 blocker.** |
 | 2 | **No `VaeEncoder`** | Blocks all img2img / inpaint paths | Upstream PR. Phase 4 dependency. Substantial — VAE encode is a real model, not a wrapper. |
 | 3 | **No `CancellationToken` on pipelines** | UI cancel button does nothing | Workaround in phase 3: stop-flag checked in progress callback (only stops at next-step boundary, with up-to-1-step latency). Long-term: upstream PR. |
 | 4 | **Progress callback exposes only `(Step, Total, Elapsed)`** | Can't show preview images | Upstream: extend `GenerationProgress` to expose the in-flight latent (or a hook to extract it). Phase 3. |
@@ -201,44 +201,44 @@ These are required for Comfy parity but don't exist in SharpInference today.
 | 8 | **Pipelines don't accept ControlNet in ctor** | No ControlNet parity | Upstream PR per pipeline class. Phase 5. |
 | 9 | **No ControlNet preprocessors** | User has to provide pre-processed canny/depth maps | Upstream feature request — ports of canny (trivial), zoedepth (small NN), openpose (large), lineart. Phase 5. |
 | 10 | **No textual-inversion embedding API** | Embeddings parameter is dead | Upstream feature request. Phase 5 (low priority). |
-| 11 | **`SharpInference.Server` is a stub** | We can't lean on it for an out-of-process variant | Upstream finishes phase 7 of their own roadmap; meanwhile our backend is in-process only |
+| 11 | **`HartsyInference.Server` is a stub** | We can't lean on it for an out-of-process variant | Upstream finishes phase 7 of their own roadmap; meanwhile our backend is in-process only |
 
 We open issues for #1 and #2 during phase 1 so they're in flight by the time we need them.
 
 ## How we package the dependency
 
-Once SharpInference ships NuGets:
+Once HartsyInference ships NuGets:
 
 ```xml
 <ItemGroup>
-  <PackageReference Include="SharpInference.Core" Version="x.y.z" />
-  <PackageReference Include="SharpInference.Diffusion" Version="x.y.z" />
-  <PackageReference Include="SharpInference.ModelHandler" Version="x.y.z" />
-  <PackageReference Include="SharpInference.Tokenizers" Version="x.y.z" />
-  <PackageReference Include="SharpInference.Cpu" Version="x.y.z" />
-  <PackageReference Include="SharpInference.Cuda" Version="x.y.z" />
-  <PackageReference Include="SharpInference.Vulkan" Version="x.y.z" />
+  <PackageReference Include="HartsyInference.Core" Version="x.y.z" />
+  <PackageReference Include="HartsyInference.Diffusion" Version="x.y.z" />
+  <PackageReference Include="HartsyInference.ModelHandler" Version="x.y.z" />
+  <PackageReference Include="HartsyInference.Tokenizers" Version="x.y.z" />
+  <PackageReference Include="HartsyInference.Cpu" Version="x.y.z" />
+  <PackageReference Include="HartsyInference.Cuda" Version="x.y.z" />
+  <PackageReference Include="HartsyInference.Vulkan" Version="x.y.z" />
 </ItemGroup>
 ```
 
 Then the user's Swarm install picks them up automatically as part of the extension's
-NuGet restore step. **No manual git-clone of SharpInference required.**
+NuGet restore step. **No manual git-clone of HartsyInference required.**
 
 ## Native dependencies (CUDA / Vulkan)
 
-- **CUDA** — SharpInference's CUDA backend ships PTX files (`Ptx/` folder, copied to
-  output by SharpInference's build). User must have CUDA 12.x driver installed; no CUDA
+- **CUDA** — HartsyInference's CUDA backend ships PTX files (`Ptx/` folder, copied to
+  output by HartsyInference's build). User must have CUDA 12.x driver installed; no CUDA
   Toolkit needed (Driver API only).
-- **Vulkan** — SharpInference ships SPIR-V shaders. User must have Vulkan 1.3 ICD.
+- **Vulkan** — HartsyInference ships SPIR-V shaders. User must have Vulkan 1.3 ICD.
 - **CPU** — pure managed; no native deps.
 
 The extension's csproj will need to ensure the `Ptx/` and SPIR-V folders are
-copied to the Swarm output directory. SharpInference's build props should handle
+copied to the Swarm output directory. HartsyInference's build props should handle
 this; if not, we add an `<ItemGroup>` with `<Content>` copy rules.
 
 ## Versioning and compatibility
 
-SharpInference uses semantic versioning (planned). We pin to a specific minor in our
-`<PackageReference>` and bump intentionally. A SharpInference major bump should
+HartsyInference uses semantic versioning (planned). We pin to a specific minor in our
+`<PackageReference>` and bump intentionally. A HartsyInference major bump should
 require an explicit extension review — the pipeline constructors are the contract,
 and they could shift between majors.

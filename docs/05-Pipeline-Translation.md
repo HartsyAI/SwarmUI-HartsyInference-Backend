@@ -1,6 +1,6 @@
 # 05 — Pipeline Translation
 
-How we convert a Swarm `T2IParamInput` into a SharpInference pipeline call. This is
+How we convert a Swarm `T2IParamInput` into a HartsyInference pipeline call. This is
 the architectural equivalent of `ComfyUIBackend.WorkflowGenerator` —  but instead
 of producing a JSON DAG, we produce a `PipelineExecution` C# object.
 
@@ -92,11 +92,11 @@ PipelineSteps.AddModelLoader(ctx =>
 {
     if (ctx.CompatClass != "stable-diffusion-v1") return;
 
-    var entry = SharpInferenceBackend.Cache.Get(ctx.Backend, ctx.Model.Name);
+    var entry = HartsyInferenceBackend.Cache.Get(ctx.Backend, ctx.Model.Name);
     if (entry == null)
     {
         entry = LoadSd15Components(ctx);
-        SharpInferenceBackend.Cache.Put(ctx.Backend, ctx.Model.Name, entry);
+        HartsyInferenceBackend.Cache.Put(ctx.Backend, ctx.Model.Name, entry);
     }
 
     ctx.CacheEntry = entry;
@@ -111,7 +111,7 @@ PipelineSteps.AddModelLoader(ctx =>
 ## The architecture detection table
 
 Maps Swarm's `T2IModelClass.CompatClass` (which is what Comfy already uses to
-identify a checkpoint) to the SharpInference pipeline. Defined in
+identify a checkpoint) to the HartsyInference pipeline. Defined in
 `Generation/ModelSupport.cs`:
 
 | `CompatClass` (from Swarm core) | Pipeline | Components |
@@ -133,7 +133,7 @@ Each row is one `AddModelLoader` registration in `Generation/ModelSupport.cs`.
 ## All-in-one checkpoint partitioning
 
 Swarm checkpoints typically bundle text encoder + UNet + VAE in one .safetensors.
-SharpInference's components want their tensors as separate dicts. Our loader
+HartsyInference's components want their tensors as separate dicts. Our loader
 partitions by key prefix:
 
 | Prefix | Component (SD1.5/SDXL) |
@@ -181,7 +181,7 @@ gen, compare requested LoRA fingerprint to last-applied fingerprint:
 The reset is the painful part — undoing a destructive merge requires storing pristine.
 
 **Option C — PR a non-destructive `ApplyOverride` upstream.**
-Add a SharpInference API that takes a base weight dict + LoRA stack and produces
+Add a HartsyInference API that takes a base weight dict + LoRA stack and produces
 runtime-merged tensors *during* the forward pass (or as a separate output dict).
 Cleanest long-term, requires upstream work.
 
@@ -207,10 +207,10 @@ T2IParamInput.Get(T2IParamTypes.Sampler)        → mapped via SamplerMap → Te
 
 `SamplerMap` (defined in `Generation/SamplerMap.cs`):
 
-| Swarm sampler name | SharpInference scheduler string |
+| Swarm sampler name | HartsyInference scheduler string |
 |--------------------|-------------------------------|
 | `euler` | `"euler"` |
-| `euler_ancestral` | `"euler_a"` (TBC — confirm SharpInference name) |
+| `euler_ancestral` | `"euler_a"` (TBC — confirm HartsyInference name) |
 | `dpmpp_2m` | `"dpm++_2m"` |
 | `ddim` | `"ddim"` |
 | `lcm` | `"lcm"` |

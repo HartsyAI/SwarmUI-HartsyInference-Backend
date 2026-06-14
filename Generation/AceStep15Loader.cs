@@ -1,20 +1,21 @@
 using System.IO;
 using SwarmUI.Text2Image;
 using SwarmUI.Utils;
-using SharpInference.Audio.Models.Codecs.Oobleck;
-using SharpInference.Core.Backends;
-using SharpInference.Core.Tensors;
-using SharpInference.Diffusion.Models.Denoisers;
-using SharpInference.Diffusion.Models.Music;
-using SharpInference.Diffusion.Models.TextEncoders;
-using SharpInference.Diffusion.Pipelines;
-using SharpInference.Diffusion.Utilities;
-using SharpInference.ModelHandler.CheckpointConverters;
-using SharpInference.ModelHandler.SafeTensors;
-using SharpInference.Tokenizers;
+using HartsyInference.Audio.Models.Codecs.Oobleck;
+using HartsyInference.Core.Backends;
+using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Models.Denoisers;
+using HartsyInference.Diffusion.Models.Music;
+using HartsyInference.Diffusion.Models.TextEncoders;
+using HartsyInference.Diffusion.Pipelines;
+using HartsyInference.Diffusion.Requests;
+using HartsyInference.Diffusion.Utilities;
+using HartsyInference.ModelHandler.CheckpointConverters;
+using HartsyInference.ModelHandler.SafeTensors;
+using HartsyInference.Tokenizers;
 using Image = SwarmUI.Utils.Image;
 
-namespace Hartsy.Extensions.SharpInferenceBackend.Generation;
+namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
 /// <summary>
 /// Loads ACE-Step v1.5 (2B turbo flow-matching music DiT over 25 Hz Oobleck latents). This is the
@@ -122,10 +123,12 @@ public static class AceStep15Loader
         backend.FreeWeights(entry.Qwen.EnumerateWeights());
 
         long start = Environment.TickCount64;
-        Action<GenerationProgress> bridge = p =>
+        // AceStepPipeline15 reports progress via the newer Core.Pipelines.GenerationProgress;
+        // the backend's bridge speaks Diffusion.Requests.GenerationProgress — convert per call.
+        Action<HartsyInference.Core.Pipelines.GenerationProgress> bridge = p =>
         {
             cancel.ThrowIfCancellationRequested();
-            onProgress(p);
+            onProgress(new GenerationProgress(p.Step, p.TotalSteps, p.ElapsedMs));
         };
 
         try
@@ -134,7 +137,7 @@ public static class AceStep15Loader
                 textHidden, lyricHidden, duration,
                 seed: seedLong < 0 ? null : (int?)(int)(seedLong & 0x7FFFFFFF),
                 onProgress: bridge);
-            Logs.Verbose($"[SharpInference][ACE15] {left.Length} samples/channel @ {sampleRate} Hz " +
+            Logs.Verbose($"[HartsyInference][ACE15] {left.Length} samples/channel @ {sampleRate} Hz " +
                 $"({duration:0}s requested) in {Environment.TickCount64 - start}ms.");
             return [AudioOutputEncoder.EncodeMp3(left, right, sampleRate, cancel)];
         }
@@ -158,7 +161,7 @@ public static class AceStep15Loader
         }
         tokens[^1] = QwenEosId;
         Tensor batch = entry.Qwen.Encode(backend, [tokens]);
-        Tensor sliced = CfgHelper.SliceBatchElement(batch, 0, tokens.Length, entry.Config.TextInDim);
+        Tensor sliced = CfgHelper.SliceBatchElement(batch, 0, tokens.Length, entry.Config.TextHiddenDim);
         batch.Dispose();
         return sliced;
     }

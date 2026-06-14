@@ -2,14 +2,14 @@ using System.IO;
 using SwarmUI.Core;
 using SwarmUI.Text2Image;
 using SwarmUI.Utils;
-using SharpInference.Core.Backends;
-using SharpInference.Diffusion.Models.Denoisers;
-using SharpInference.Diffusion.Pipelines;
-using SharpInference.Diffusion.Requests;
-using SharpInference.Tokenizers;
+using HartsyInference.Core.Backends;
+using HartsyInference.Diffusion.Models.Denoisers;
+using HartsyInference.Diffusion.Pipelines;
+using HartsyInference.Diffusion.Requests;
+using HartsyInference.Tokenizers;
 using Image = SwarmUI.Utils.Image;
 
-namespace Hartsy.Extensions.SharpInferenceBackend.Generation;
+namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
 /// <summary>
 /// Loads Microsoft Lens (3.8B dual-stream MMDiT; SwarmUI compat class <c>lens</c>) from the
@@ -111,7 +111,7 @@ public static class LensLoader
         var (rgbBytes, outW, outH, _) = entry.Bundle.Pipeline.GenerateFromTokens(
             posTokens, negTokens, request, bridge);
 
-        Logs.Verbose($"[SharpInference][Lens] Pipeline returned {outW}x{outH} in {Environment.TickCount64 - start}ms.");
+        Logs.Verbose($"[HartsyInference][Lens] Pipeline returned {outW}x{outH} in {Environment.TickCount64 - start}ms.");
         return new[] { RgbToImage.FromHwcRgb(rgbBytes, outW, outH) };
     }
 }

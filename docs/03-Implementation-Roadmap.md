@@ -6,19 +6,19 @@ common path." Each phase has a concrete acceptance test (it's runnable, not
 
 ## Phase 0 — Compatibility unblock (PREREQUISITE)
 
-**Cannot start phase 1 until this is resolved.** SharpInference targets `net10.0`;
-SwarmUI extensions target `net8.0`. The extension cannot reference SharpInference at
+**Cannot start phase 1 until this is resolved.** HartsyInference targets `net10.0`;
+SwarmUI extensions target `net8.0`. The extension cannot reference HartsyInference at
 compile time without resolving this.
 
 **Options (pick one before phase 1):**
 
-1. **Multi-target SharpInference.** PR upstream `<TargetFrameworks>net8.0;net10.0</TargetFrameworks>`. Lowest risk to Swarm; requires SharpInference to verify it doesn't use net10-only APIs (likely it does — `nuint` semantics, ref struct improvements, etc.).
+1. **Multi-target HartsyInference.** PR upstream `<TargetFrameworks>net8.0;net10.0</TargetFrameworks>`. Lowest risk to Swarm; requires HartsyInference to verify it doesn't use net10-only APIs (likely it does — `nuint` semantics, ref struct improvements, etc.).
 2. **Bump SwarmUI to net10.** Upstream PR to mcmonkey4eva. Coordinated risk; affects all extensions. Realistic timeline once .NET 10 is GA but probably not the path for this milestone.
-3. **Out-of-process bridge.** Run SharpInference as a separate `dotnet` process (net10) and talk to it over a local Unix socket / named pipe / loopback HTTP. Defeats the "in-process" goal but unblocks immediately.
+3. **Out-of-process bridge.** Run HartsyInference as a separate `dotnet` process (net10) and talk to it over a local Unix socket / named pipe / loopback HTTP. Defeats the "in-process" goal but unblocks immediately.
 
 **Decision needed.** Default plan in this roadmap is **option 1 (multi-target)**.
 
-**Acceptance:** This extension's `.csproj` can `dotnet build` referencing SharpInference projects from a net8.0 host.
+**Acceptance:** This extension's `.csproj` can `dotnet build` referencing HartsyInference projects from a net8.0 host.
 
 ---
 
@@ -29,22 +29,22 @@ no live previews, no cancel.
 
 **Tasks:**
 
-1. Wire up the extension class — register backend type, register a minimal "use SharpInference" permission, register the SharpInference param group.
-2. Implement `SharpInferenceBackend.Init()` — instantiate `CpuBackend`, set `Status=IDLE`.
-3. Implement `SharpInferenceBackend.LoadModel()` — for SD15, load tokenizer + CLIP text encoder + UNet + VAE decoder via `SafeTensorsLoader`, store in `PipelineCache`.
-4. Implement `SharpInferenceBackend.Generate()` — for SD15:
+1. Wire up the extension class — register backend type, register a minimal "use HartsyInference" permission, register the HartsyInference param group.
+2. Implement `HartsyInferenceBackend.Init()` — instantiate `CpuBackend`, set `Status=IDLE`.
+3. Implement `HartsyInferenceBackend.LoadModel()` — for SD15, load tokenizer + CLIP text encoder + UNet + VAE decoder via `SafeTensorsLoader`, store in `PipelineCache`.
+4. Implement `HartsyInferenceBackend.Generate()` — for SD15:
    - Resolve checkpoint via `T2IParamInput`
    - Load via `LoadModel` if not cached
    - Tokenize prompt + negative prompt
    - Call `pipeline.GenerateFromTokens(...)` synchronously
    - Convert returned `byte[] rgbData` → `SwarmUI.Image`
    - Return `Image[]` with one image
-5. Implement `SupportedFeatures` — yield `"sharpinference"`, `"comfyui"` (for parameter compatibility — see [`07-Parameters-And-Feature-Flags.md`](./07-Parameters-And-Feature-Flags.md) for why).
+5. Implement `SupportedFeatures` — yield `"hartsyinference"`, `"comfyui"` (for parameter compatibility — see [`07-Parameters-And-Feature-Flags.md`](./07-Parameters-And-Feature-Flags.md) for why).
 
 **Acceptance test:**
 
 - Launch Swarm with the extension installed
-- Configure a SharpInference backend in Server → Backends
+- Configure a HartsyInference backend in Server → Backends
 - Pick an SD 1.5 .safetensors model from `Models/`
 - Type a prompt, click Generate
 - A 512×512 image appears in the gallery within a sane time (CPU, so minutes are fine)
@@ -89,7 +89,7 @@ no live previews, no cancel.
 
 1. Live progress: in `GenerateLive`, build a `Action<GenerationProgress>` that calls `takeOutput(JObject {batch_index, overall_percent, current_percent})`.
 2. Cancellation: until upstream adds `CancellationToken`, set a volatile `_cancelRequested` flag in the backend; check it inside the progress callback and throw `OperationCanceledException` from there. Upstream PR for `CancellationToken` parameter on `GenerateFromTokens` is the right long-term fix.
-3. Per-step preview: every N steps (configurable), run `VaeDecoder` on the current latent, encode as JPEG, push as preview JObject. (Latent has to be exposed by SharpInference's pipeline progress callback — currently the progress only carries (Step, Total, Elapsed). **Upstream change needed:** expose the in-flight latent.)
+3. Per-step preview: every N steps (configurable), run `VaeDecoder` on the current latent, encode as JPEG, push as preview JObject. (Latent has to be exposed by HartsyInference's pipeline progress callback — currently the progress only carries (Step, Total, Elapsed). **Upstream change needed:** expose the in-flight latent.)
 4. SDXL refiner: chain SdxlPipeline with `refiner_strength` cutoff → second SdxlPipeline-with-refiner-UNet runs the remainder.
 5. End-step early-out (`endstepsearly` feature flag).
 
@@ -108,7 +108,7 @@ no live previews, no cancel.
 
 **Tasks:**
 
-1. **Upstream:** add `VaeEncoder` to SharpInference. Without this, no img2img path exists. This is a substantial chunk of work.
+1. **Upstream:** add `VaeEncoder` to HartsyInference. Without this, no img2img path exists. This is a substantial chunk of work.
 2. Once `VaeEncoder` lands, add img2img path: encode init image → noise to denoise-strength → continue from there.
 3. Inpaint: same plus mask handling. `SdxlInpaintPipeline` already exists; just feed it the encoded source + mask.
 4. SD3 / Flux.2 / AuraFlow / Chroma / Z-Image / Hunyuan-Image — wire each pipeline class into the architecture handler. Mostly boilerplate once SDXL/Flux are working.
@@ -129,7 +129,7 @@ no live previews, no cancel.
 **Tasks:**
 
 1. ControlNet: pipeline integration — pipelines need to accept a `ControlNet` argument. **Upstream:** wire `ControlNet` into at least `StableDiffusion15Pipeline`, `SdxlPipeline`, `FluxPipeline`. Plus a way to pass control-image conditioning per-step.
-2. ControlNet preprocessors: at minimum canny + depth (depth needs a small ZoeDepth or DepthAnything model). **Upstream:** preprocessor module in SharpInference.Vision.
+2. ControlNet preprocessors: at minimum canny + depth (depth needs a small ZoeDepth or DepthAnything model). **Upstream:** preprocessor module in HartsyInference.Vision.
 3. IP-Adapter beyond the stub: face / plus / style variants.
 4. Hi-res fix: 2-pass with VAE upscale.
 5. Textual inversion embeddings: wire into the tokenizer and text encoder. **Upstream:** new token API.
@@ -173,7 +173,7 @@ Things we'd like but aren't blocking the "replace Comfy" goal:
 - Vision tools (YOLO bounding boxes, SAM segmentation) as Swarm post-processing
 - Video pipelines (LTX-Video, Wan)
 - Quantized model loading (GGUF) for low-VRAM users
-- Hosted SharpInference.Server as an optional remote backend type (`sharpinference_remote`)
+- Hosted HartsyInference.Server as an optional remote backend type (`hartsyinference_remote`)
 
 ## Critical-path summary
 
@@ -212,4 +212,4 @@ Things we'd like but aren't blocking the "replace Comfy" goal:
 ```
 
 The two upstream blockers (VaeEncoder, pipeline ControlNet integration) should be filed
-as SharpInference issues during phase 1 so they're in flight before we need them.
+as HartsyInference issues during phase 1 so they're in flight before we need them.

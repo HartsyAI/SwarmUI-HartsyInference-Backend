@@ -2,18 +2,18 @@ using SixLabors.ImageSharp.PixelFormats;
 using SixLabors.ImageSharp.Processing;
 using SwarmUI.Text2Image;
 using SwarmUI.Utils;
-using SharpInference.Core.Tensors;
-using SharpInference.Diffusion.Utilities;
+using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Utilities;
 using ISImage = SixLabors.ImageSharp.Image;
 
-namespace Hartsy.Extensions.SharpInferenceBackend.Generation;
+namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
 /// <summary>
 /// Resolves Swarm's <see cref="T2IParamTypes.InitImage"/> +
 /// <see cref="T2IParamTypes.InitImageCreativity"/> (and, when present, the
 /// mask params via <see cref="MaskResolver"/>) into the
 /// <see cref="Tensor"/> + strength + optional mask inputs that
-/// SharpInference's pipelines need to build an
+/// HartsyInference's pipelines need to build an
 /// <c>ImageToImageRequest</c>. Also resizes the init image to match the
 /// request resolution (the upstream pipelines require source dims == request dims).
 ///
@@ -72,7 +72,7 @@ public static class Img2ImgResolver
         Tensor mask = MaskResolver.Resolve(input, targetWidth, targetHeight);
 
         string label = mask is null ? "img2img" : "inpaint";
-        Logs.Verbose($"[SharpInference][Img2img] Enabled: target={targetWidth}x{targetHeight}, strength={strength:F2}, mode={label}.");
+        Logs.Verbose($"[HartsyInference][Img2img] Enabled: target={targetWidth}x{targetHeight}, strength={strength:F2}, mode={label}.");
         return new Img2ImgSpec
         {
             SourceTensor = tensor,

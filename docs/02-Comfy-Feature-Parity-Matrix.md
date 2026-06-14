@@ -1,8 +1,8 @@
 # 02 — Comfy Feature Parity Matrix
 
 This is the canonical comparison between what the ComfyUI backend extension
-provides to SwarmUI users and what the SharpInference backend provides today.
-Each row is something the SharpInference backend has to either match, defer,
+provides to SwarmUI users and what the HartsyInference backend provides today.
+Each row is something the HartsyInference backend has to either match, defer,
 or explicitly not support.
 
 **Last full refresh: 2026-06-10** (code-level survey of both extensions —
@@ -16,8 +16,8 @@ this doc is the status map, that doc is the work queue.
 |--------|---------|
 | ✅ Shipped | Wired end-to-end in the extension and serviced at generation time |
 | 🟢 Partial | Works for some architectures / modes; the rest are refused cleanly at validation |
-| 🟡 Planned | SharpInference has the pieces (or they're cheap); extension wiring not started |
-| 🔴 Blocked | Needs upstream SharpInference work first |
+| 🟡 Planned | HartsyInference has the pieces (or they're cheap); extension wiring not started |
+| 🔴 Blocked | Needs upstream HartsyInference work first |
 | ⚫ Out of scope | Explicitly not pursuing |
 
 ## A. Core text-to-image
@@ -51,7 +51,7 @@ this doc is the status map, that doc is the work queue.
 | F-Lite | ✅ | Diffusers-folder layout; wired-untested E2E |
 | Z-Image (Turbo, Base) | ✅ | img2img ✅ |
 | Anima (Cosmos-Predict2 2B) | ✅ | t2i only |
-| HiDream-I1 | ✅ | 4 encoders incl. Llama-3.1-8B; needs Llama tokenizer assets in the SharpInference build |
+| HiDream-I1 | ✅ | 4 encoders incl. Llama-3.1-8B; needs Llama tokenizer assets in the HartsyInference build |
 | Qwen-Image | ✅ | t2i only; Qwen2.5-VL-7B MLLM encoder |
 | **Ideogram 4** | ✅ | Wired 2026-06-11 (t2i; Steps→official presets; ≥22 GB VRAM gate; non-commercial license). E2E verify pending on a ≥24 GB host. |
 
@@ -64,7 +64,7 @@ this doc is the status map, that doc is the work queue.
 | Chroma Radiance / Zeta-Chroma | `ChromaConfig` presets missing upstream |
 | Flux.2 Klein 9B / Dev | FP4 GEMM missing upstream |
 
-### Image — Comfy runs, SharpInference has nothing (architecture long-tail)
+### Image — Comfy runs, HartsyInference has nothing (architecture long-tail)
 
 SD2, Stable Cascade, PixArt α/Σ, Sana, Lumina 2 (pipeline exists upstream,
 loader unwired), Ovis, Longcat, OmniGen 2 (pipeline exists upstream, loader
@@ -159,7 +159,7 @@ highest-demand item here (punchlist P6).
 
 ## J. Permissions and multi-user
 
-All inherited from Swarm core — ✅ (`use_sharpinference` / `admin_sharpinference` registered).
+All inherited from Swarm core — ✅ (`use_hartsyinference` / `admin_hartsyinference` registered).
 
 ## K. Out of scope (Comfy-specific by nature)
 
@@ -169,7 +169,7 @@ interop, HTTP/WebSocket bridge internals, `ComfyUser` session management.
 
 ## L. WebAPI
 
-`SharpInferenceWebAPI` is still a stub (probe-model / list-pipelines /
+`HartsyInferenceWebAPI` is still a stub (probe-model / list-pipelines /
 clear-cache / device-info / supported-archs routes planned, commented out).
 Comfy's workflow-management routes are N/A; LoRA extraction may come later.
 

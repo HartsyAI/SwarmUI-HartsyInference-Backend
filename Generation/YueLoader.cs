@@ -2,16 +2,18 @@ using System.IO;
 using FreneticUtilities.FreneticExtensions;
 using SwarmUI.Text2Image;
 using SwarmUI.Utils;
-using SharpInference.Core.Backends;
-using SharpInference.Core.Tensors;
-using SharpInference.Audio.Models.Codecs;
-using SharpInference.Audio.Models.Music;
-using SharpInference.Audio.Pipelines;
-using SharpInference.ModelHandler.CheckpointConverters;
-using SharpInference.Tokenizers;
+using HartsyInference.Core.Backends;
+using HartsyInference.Core.Tensors;
+using HartsyInference.Audio.Models.Codecs;
+using HartsyInference.Audio.Models.Codecs.XCodec;
+using HartsyInference.Audio.Models.Music;
+using HartsyInference.Audio.Pipelines;
+using HartsyInference.Diffusion.Requests;
+using HartsyInference.ModelHandler.CheckpointConverters;
+using HartsyInference.Tokenizers;
 using Image = SwarmUI.Utils.Image;
 
-namespace Hartsy.Extensions.SharpInferenceBackend.Generation;
+namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
 /// <summary>
 /// Loads YuE (m-a-p's full-song lyrics-to-music model; HF <c>m-a-p/YuE-s1-7B-anneal-*</c>).
@@ -67,6 +69,13 @@ public static class YueLoader
             ?? throw new InvalidOperationException(
                 $"YuE needs the mm tokenizer: place 'tokenizer.model' (from m-a-p/xcodec_mini_infer, mm_tokenizer_v0.2_hf/) "
                 + $"inside the checkpoint folder '{model.RawFilePath}'.");
+
+        // TODO(engine-blocked): HartsyInference has no YueTokenizer yet (the mm SentencePiece wrapper
+        // with EncodeStage1Prompt). Fail fast here — before the 7B stage-1 load — until it ships.
+        // When it lands: delete this throw and uncomment the tokenizer lines below + in YueCacheEntry.
+        EngineGap.Throw(
+            "YuE: HartsyInference doesn't ship the YuE mm tokenizer (YueTokenizer) yet, so lyrics can't be encoded. "
+            + "The extension wiring is ready; this lifts when the engine adds the tokenizer.");
         string xcodecPath = FindSibling(model.RawFilePath, "xcodec.safetensors")
             ?? throw new InvalidOperationException(
                 $"YuE needs the X-Codec weights: convert m-a-p/xcodec_mini_infer's codec checkpoint to safetensors and place "
@@ -92,7 +101,8 @@ public static class YueLoader
 
         // ── 3. mm tokenizer ──
         log("Loading YuE mm tokenizer...");
-        YueTokenizer tokenizer = new YueTokenizer(tokenizerPath);
+        // TODO(engine-blocked): YueTokenizer tokenizer = new YueTokenizer(tokenizerPath);
+        _ = tokenizerPath; // kept for the re-enable; the throw above makes this path unreachable today
 
         log("Building YuE pipeline...");
         YuePipeline pipeline = new YuePipeline(config, stage1, xcodec);
@@ -106,7 +116,7 @@ public static class YueLoader
             Config = config,
             Stage1 = stage1,
             Codec = xcodec,
-            Tokenizer = tokenizer,
+            // TODO(engine-blocked): Tokenizer = tokenizer,
             Stage1Loader = stage1Loader,
             CodecLoader = codecLoader,
         };
@@ -126,16 +136,22 @@ public static class YueLoader
         int seed = seedLong < 0 ? Random.Shared.Next() : (int)(seedLong & 0x7FFFFFFF);
         int maxFrames = (int)(duration * entry.Config.FrameRateHz);
 
-        int[] promptIds = entry.Tokenizer.EncodeStage1Prompt(genre, lyrics);
+        int[] promptIds = NoTokenizerYet(genre, lyrics); // TODO(engine-blocked): entry.Tokenizer.EncodeStage1Prompt(genre, lyrics)
 
         long start = Environment.TickCount64;
         cancel.ThrowIfCancellationRequested();
         float[] samples = entry.Pipeline.Synthesize(backend, promptIds, maxFrames: maxFrames, seed: seed);
         cancel.ThrowIfCancellationRequested();
-        Logs.Verbose($"[SharpInference][YuE] {samples.Length} samples @ {entry.Config.SampleRate} Hz " +
+        Logs.Verbose($"[HartsyInference][YuE] {samples.Length} samples @ {entry.Config.SampleRate} Hz " +
             $"({duration:0}s requested, {promptIds.Length} prompt tokens) in {Environment.TickCount64 - start}ms.");
         return [AudioOutputEncoder.EncodeMp3(samples, samples, entry.Config.SampleRate, cancel)];
     }
+
+    /// <summary>Placeholder until HartsyInference ships YueTokenizer — Load() refuses upfront, so
+    /// this never actually runs; it exists to keep Generate() compiling against the final shape.</summary>
+    private static int[] NoTokenizerYet(string genre, string lyrics) =>
+        throw new InvalidOperationException(
+            "YuE: HartsyInference doesn't ship the YuE mm tokenizer yet — lyrics can't be encoded.");
 
     /// <summary>Looks for a file inside the checkpoint folder, then one directory up (so several
     /// YuE variants can share one tokenizer/codec copy).</summary>
@@ -160,7 +176,7 @@ public sealed class YueCacheEntry : IDisposable
     public required YueConfig Config { get; init; }
     public required YueStage1Lm Stage1 { get; init; }
     public required XCodec Codec { get; init; }
-    public required YueTokenizer Tokenizer { get; init; }
+    // TODO(engine-blocked): public required YueTokenizer Tokenizer { get; init; }
     public required IDisposable Stage1Loader { get; init; }
     public required IDisposable CodecLoader { get; init; }
 
@@ -171,7 +187,7 @@ public sealed class YueCacheEntry : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
-        Tokenizer?.Dispose();
+        // TODO(engine-blocked): Tokenizer?.Dispose();
         Stage1Loader?.Dispose();
         CodecLoader?.Dispose();
     }

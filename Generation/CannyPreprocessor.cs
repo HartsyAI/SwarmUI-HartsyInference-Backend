@@ -1,12 +1,12 @@
 using SixLabors.ImageSharp.PixelFormats;
 using SixLabors.ImageSharp.Processing;
 using SwarmUI.Utils;
-using SharpInference.Core.Tensors;
-using SharpInference.Diffusion.Utilities;
+using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Utilities;
 using ISImage = SixLabors.ImageSharp.Image;
 using ISSize = SixLabors.ImageSharp.Size;
 
-namespace Hartsy.Extensions.SharpInferenceBackend.Generation;
+namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
 /// <summary>
 /// Pure-C# Canny edge preprocessor for ControlNet conditioning.
@@ -32,7 +32,7 @@ namespace Hartsy.Extensions.SharpInferenceBackend.Generation;
 /// </summary>
 public static unsafe class CannyPreprocessor
 {
-    /// <summary>Run Canny on a Swarm <see cref="Image"/>, resize to (<paramref name="targetW"/>, <paramref name="targetH"/>) before processing, and return a <c>[1, 3, H, W]</c> F32 tensor in <c>[0, 1]</c> ready to hand to <see cref="SharpInference.Diffusion.Adapters.ControlNet"/>. Caller owns the returned tensor.</summary>
+    /// <summary>Run Canny on a Swarm <see cref="Image"/>, resize to (<paramref name="targetW"/>, <paramref name="targetH"/>) before processing, and return a <c>[1, 3, H, W]</c> F32 tensor in <c>[0, 1]</c> ready to hand to <see cref="HartsyInference.Diffusion.Adapters.ControlNet"/>. Caller owns the returned tensor.</summary>
     public static Tensor Process(Image inputImage, int targetW, int targetH, int lowThreshold = 100, int highThreshold = 200)
     {
         if (lowThreshold < 0 || highThreshold <= lowThreshold || highThreshold > 255)
@@ -55,7 +55,7 @@ public static unsafe class CannyPreprocessor
         // Double threshold + hysteresis: connect weak edges to strong ones via 8-connectivity flood.
         byte[] edges = HysteresisThreshold(mag, targetW, targetH, lowThreshold, highThreshold);
 
-        Logs.Verbose($"[SharpInference][Canny] {targetW}x{targetH}, low={lowThreshold}, high={highThreshold} -> tensor [1, 3, {targetH}, {targetW}].");
+        Logs.Verbose($"[HartsyInference][Canny] {targetW}x{targetH}, low={lowThreshold}, high={highThreshold} -> tensor [1, 3, {targetH}, {targetW}].");
         return EdgesToRgbTensor(edges, targetW, targetH);
     }
 

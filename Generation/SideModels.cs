@@ -1,6 +1,6 @@
 using SwarmUI.Text2Image;
 
-namespace Hartsy.Extensions.SharpInferenceBackend.Generation;
+namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
 /// <summary>
 /// Central registry of every text-encoder / VAE / shared component that the per-architecture
@@ -91,7 +91,7 @@ public static class SideModels
 
     /// <summary>Llama-3.1-8B-Instruct (fp8 scaled) — HiDream's fourth text encoder. Run as a feature
     /// extractor; HiDream harvests hidden states from every layer. Pairs with the embedded Llama-3.1
-    /// tokenizer in SharpInference.Tokenizers.</summary>
+    /// tokenizer in HartsyInference.Tokenizers.</summary>
     public static readonly Entry Llama31_8B = new(
         CanonicalName: "llama_3.1_8b_instruct_fp8_scaled.safetensors",
         FolderType: "Clip",
@@ -128,8 +128,8 @@ public static class SideModels
         DisplayName: "Qwen3-4B (fp8 mixed)");
 
     /// <summary>Qwen3-8B for Flux.2 Klein 9B. NOTE: Comfy's canonical URL points at an fp4-mixed
-    /// quant (`qwen_3_8b_fp4mixed.safetensors`). SharpInference doesn't yet have FP4 GEMM
-    /// support — Flux2Loader refuses Klein 9B at runtime regardless. Once SharpInference
+    /// quant (`qwen_3_8b_fp4mixed.safetensors`). HartsyInference doesn't yet have FP4 GEMM
+    /// support — Flux2Loader refuses Klein 9B at runtime regardless. Once HartsyInference
     /// either (a) supports FP4 cuBLAS / Vulkan, or (b) we point this entry at a fp16/fp8
     /// alternative, Klein 9B will work end-to-end.</summary>
     public static readonly Entry Qwen3_8B_Fp4Mixed = new(
@@ -147,7 +147,7 @@ public static class SideModels
         Hash: "1ee1ff334d78228d73049ef0ee4fcd21c1700536b5a45c06547af057f92463a7",
         DisplayName: "Mistral 3 Small (fp4 mixed) — Flux.2 Dev");
 
-    /// <summary>Ministral 3.3B for Ernie Image. SharpInference has the encoder preset
+    /// <summary>Ministral 3.3B for Ernie Image. HartsyInference has the encoder preset
     /// (LlamaStyleEncoderConfig.Ministral3B), but no Ernie tokenizer — see
     /// <see cref="ModelSupport"/> notes.</summary>
     public static readonly Entry Ministral_3_3B = new(
@@ -181,7 +181,7 @@ public static class SideModels
     /// hash match SwarmUI ComfyUI's <c>GetUniMaxT5XXLModel()</c> exactly so the file is shared with a
     /// Comfy install. The fp8 scale_weight tensors are folded at load time via
     /// <c>CheckpointConvertUtils.ApplyFp8ScaledDequant</c>. Pairs with the embedded umT5 SentencePiece
-    /// in SharpInference.Tokenizers (the base T5 spiece is NOT compatible — 32k vs 256k vocab).</summary>
+    /// in HartsyInference.Tokenizers (the base T5 spiece is NOT compatible — 32k vs 256k vocab).</summary>
     public static readonly Entry Umt5Xxl = new(
         CanonicalName: "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
         FolderType: "Clip",

@@ -1,19 +1,19 @@
 using System.IO;
 using SwarmUI.Text2Image;
 using SwarmUI.Utils;
-using SharpInference.Core.Backends;
-using SharpInference.Core.Tensors;
-using SharpInference.Diffusion.Models.Denoisers;
-using SharpInference.Diffusion.Models.TextEncoders;
-using SharpInference.Diffusion.Models.Vae;
-using SharpInference.Diffusion.Pipelines;
-using SharpInference.Diffusion.Requests;
-using SharpInference.ModelHandler.CheckpointConverters;
-using SharpInference.ModelHandler.Lora;
-using SharpInference.ModelHandler.SafeTensors;
-using SharpInference.Tokenizers;
+using HartsyInference.Core.Backends;
+using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Models.Denoisers;
+using HartsyInference.Diffusion.Models.TextEncoders;
+using HartsyInference.Diffusion.Models.Vae;
+using HartsyInference.Diffusion.Pipelines;
+using HartsyInference.Diffusion.Requests;
+using HartsyInference.ModelHandler.CheckpointConverters;
+using HartsyInference.ModelHandler.Lora;
+using HartsyInference.ModelHandler.SafeTensors;
+using HartsyInference.Tokenizers;
 
-namespace Hartsy.Extensions.SharpInferenceBackend.Generation;
+namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
 /// <summary>
 /// Loads Stable Diffusion 1.5 from a single all-in-one .safetensors (the standard
@@ -99,7 +99,7 @@ public static class Sd15Loader
         T2IParamInput input,
         Action<GenerationProgress> onProgress,
         CancellationToken cancel,
-        IReadOnlyList<SharpInference.Diffusion.Adapters.IpAdapterConditioning> ipAdapters = null)
+        IReadOnlyList<HartsyInference.Diffusion.Adapters.IpAdapterConditioning> ipAdapters = null)
     {
         Dictionary<string, Tensor> unetWeights = LoraApplier.ShallowClone(entry.UnetWeights);
         Dictionary<string, Tensor> clipLWeights = LoraApplier.ShallowClone(entry.ClipLWeights);
@@ -139,7 +139,7 @@ public static class Sd15Loader
         T2IParamInput input,
         Action<GenerationProgress> onProgress,
         CancellationToken cancel,
-        IReadOnlyList<SharpInference.Diffusion.Adapters.IpAdapterConditioning> ipAdapters = null)
+        IReadOnlyList<HartsyInference.Diffusion.Adapters.IpAdapterConditioning> ipAdapters = null)
     {
         return RunSd15Pipeline(entry.Pipeline, entry.Tokenizer, input, onProgress, cancel, ipAdapters);
     }
@@ -152,7 +152,7 @@ public static class Sd15Loader
         T2IParamInput input,
         Action<GenerationProgress> onProgress,
         CancellationToken cancel,
-        IReadOnlyList<SharpInference.Diffusion.Adapters.IpAdapterConditioning> ipAdapters = null)
+        IReadOnlyList<HartsyInference.Diffusion.Adapters.IpAdapterConditioning> ipAdapters = null)
     {
         string prompt = input.Get(T2IParamTypes.Prompt) ?? "";
         string negative = input.Get(T2IParamTypes.NegativePrompt) ?? "";
@@ -172,7 +172,7 @@ public static class Sd15Loader
         int? clipSkip = SamplingParamResolver.ResolveClipSkip(input);
         int? seed = seedLong < 0 ? null : (int?)(int)(seedLong & 0x7FFFFFFF);
         // Variation seed: pre-blend the initial noise (pipeline takes ownership of the tensor).
-        SharpInference.Core.Tensors.Tensor variationNoise = VariationSeedResolver.Resolve(input, width, height, seed);
+        HartsyInference.Core.Tensors.Tensor variationNoise = VariationSeedResolver.Resolve(input, width, height, seed);
         TextToImageRequest request;
         if (img2img is not null)
         {
@@ -221,7 +221,7 @@ public static class Sd15Loader
             var (rgbBytes, outW, outH, _) = pipeline.GenerateFromTokens(
                 promptTokens, negativeTokens, request, bridge, ipAdapters);
 
-            Logs.Verbose($"[SharpInference][SD15] Pipeline returned {outW}x{outH} in {Environment.TickCount64 - start}ms.");
+            Logs.Verbose($"[HartsyInference][SD15] Pipeline returned {outW}x{outH} in {Environment.TickCount64 - start}ms.");
             return new[] { RgbToImage.FromHwcRgb(rgbBytes, outW, outH) };
         }
         finally

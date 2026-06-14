@@ -4,10 +4,10 @@ using SwarmUI.Media;
 using SwarmUI.Utils;
 using Image = SwarmUI.Utils.Image;
 
-namespace Hartsy.Extensions.SharpInferenceBackend.Generation;
+namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
 /// <summary>
-/// Muxes raw stereo PCM from a SharpInference audio pipeline into an MP3, returned as a SwarmUI
+/// Muxes raw stereo PCM from a HartsyInference audio pipeline into an MP3, returned as a SwarmUI
 /// <see cref="Image"/> with <see cref="MediaType.AudioMp3"/> (audio outputs are Image objects keyed by
 /// MediaType, same as video). Mirrors ComfyUI's audio save path (<c>SaveAudioMP3</c>, LAME V0 quality);
 /// ffmpeg comes from Swarm's own resolver (<see cref="Utilities.FfmegLocation"/>) — never bundled.
@@ -25,10 +25,10 @@ public static class AudioOutputEncoder
         if (string.IsNullOrWhiteSpace(ffmpeg))
         {
             throw new SwarmUserErrorException(
-                "SharpInference audio output requires ffmpeg, but no ffmpeg was found. "
+                "HartsyInference audio output requires ffmpeg, but no ffmpeg was found. "
                 + "Install ffmpeg on your system PATH (or install the ComfyUI self-start backend, whose bundled copy Swarm reuses).");
         }
-        string tmpFile = Path.Combine(Path.GetTempPath(), $"sharpinference_audio_{Guid.NewGuid():N}.mp3");
+        string tmpFile = Path.Combine(Path.GetTempPath(), $"hartsyinference_audio_{Guid.NewGuid():N}.mp3");
         string args = $"-v error -f f32le -ar {sampleRate} -ac 2 -i - -c:a libmp3lame -q:a 0 -y \"{tmpFile}\"";
         ProcessStartInfo psi = new()
         {
@@ -39,7 +39,7 @@ public static class AudioOutputEncoder
             UseShellExecute = false,
             CreateNoWindow = true,
         };
-        Logs.Verbose($"[SharpInference] Encoding {left.Length} samples/channel @ {sampleRate} Hz to mp3 via ffmpeg {args}");
+        Logs.Verbose($"[HartsyInference] Encoding {left.Length} samples/channel @ {sampleRate} Hz to mp3 via ffmpeg {args}");
         Process proc = Process.Start(psi) ?? throw new InvalidOperationException("Failed to launch ffmpeg.");
         try
         {
@@ -68,11 +68,11 @@ public static class AudioOutputEncoder
         {
             if (!proc.HasExited)
             {
-                try { proc.Kill(); } catch (Exception ex) { Logs.Error($"[SharpInference] Failed to kill ffmpeg: {ex.Message}"); }
+                try { proc.Kill(); } catch (Exception ex) { Logs.Error($"[HartsyInference] Failed to kill ffmpeg: {ex.Message}"); }
             }
             proc.Dispose();
             try { if (File.Exists(tmpFile)) File.Delete(tmpFile); }
-            catch (Exception ex) { Logs.Warning($"[SharpInference] Failed to delete temp audio file '{tmpFile}': {ex.Message}"); }
+            catch (Exception ex) { Logs.Warning($"[HartsyInference] Failed to delete temp audio file '{tmpFile}': {ex.Message}"); }
         }
     }
 }

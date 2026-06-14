@@ -1,15 +1,15 @@
 using SwarmUI.Text2Image;
 using SwarmUI.Utils;
-using SharpInference.Core.Tensors;
-using SharpInference.Diffusion.Adapters;
-using SharpInference.Diffusion.Models.Denoisers;
+using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Adapters;
+using HartsyInference.Diffusion.Models.Denoisers;
 
-namespace Hartsy.Extensions.SharpInferenceBackend.Generation;
+namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
 /// <summary>
 /// Resolves Swarm's ControlNet params (registered by the ComfyUI extension under
 /// the <c>controlnet</c> feature flag) into a list of
-/// <see cref="ControlNetConditioning"/>s ready to hand to a SharpInference
+/// <see cref="ControlNetConditioning"/>s ready to hand to a HartsyInference
 /// pipeline. Loads each selected ControlNet checkpoint, runs the appropriate
 /// preprocessor on the input image, and bundles everything into a disposable
 /// <see cref="ResolvedSpec"/>.
@@ -147,7 +147,7 @@ public sealed class ControlNetCacheEntry : IDisposable
     }
 }
 
-/// <summary>Wraps SharpInference's <see cref="ControlNetLoader"/> + <see cref="ControlNet"/>
+/// <summary>Wraps HartsyInference's <see cref="ControlNetLoader"/> + <see cref="ControlNet"/>
 /// construction into a single Swarm-side helper. Keeps the cache-entry shape
 /// consistent with other side-model loaders in this extension.</summary>
 public static class ControlNetWeightLoader
@@ -160,7 +160,7 @@ public static class ControlNetWeightLoader
         ControlNetFile file = ControlNetLoader.Load(model.RawFilePath);
         try
         {
-            // v1: SDXL-only. SharpInference's ControlNet adapter handles SD15
+            // v1: SDXL-only. HartsyInference's ControlNet adapter handles SD15
             // architecturally but the Swarm side hasn't wired SD15 + pipeline
             // through yet — refuse with a clear message instead of silently
             // running with a mismatched base UNet config.

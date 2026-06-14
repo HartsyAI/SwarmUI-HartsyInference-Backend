@@ -2,12 +2,12 @@
 
 ## What we're building
 
-A SwarmUI extension that registers a backend type (`sharpinference_selfstart`) which
+A SwarmUI extension that registers a backend type (`hartsyinference_selfstart`) which
 performs Stable Diffusion / SDXL / Flux / SD3 / etc. inference **in-process, in pure C#**
-by calling the [SharpInference](https://github.com/Hartsy/SharpInference) library.
+by calling the [HartsyInference](https://github.com/Hartsy/HartsyInference) library.
 
 The user clicks **Generate** in Swarm. The request flows from Swarm's `T2IAPI` →
-`BackendHandler` → our `SharpInferenceBackend.GenerateLive()` → SharpInference pipeline
+`BackendHandler` → our `HartsyInferenceBackend.GenerateLive()` → HartsyInference pipeline
 → image bytes → back to the browser. **No subprocess. No HTTP. No Python. No ComfyUI.**
 
 ## Why we're building it
@@ -24,17 +24,17 @@ out to via HTTP + WebSocket. That works, but it carries:
 
 A pure-C# backend collapses all of that into one process: Swarm and inference share
 the same heap, the same model cache, the same image objects. Swarm's `T2IParamInput`
-becomes a SharpInference `TextToImageRequest` directly, with no JSON in the middle.
+becomes a HartsyInference `TextToImageRequest` directly, with no JSON in the middle.
 
 ## Goals
 
 1. **Functional parity with the ComfyUI backend** for the common path: text-to-image,
    img2img, inpaint, LoRA, ControlNet, refiners — across SD1.5, SDXL, SD3, Flux on
-   models the SharpInference team has already brought up.
+   models the HartsyInference team has already brought up.
 2. **In-process execution** — no Python, no subprocess, no IPC.
 3. **Match Swarm's existing UX** — the user sees the same parameters, the same
    `Generate` button, the same image gallery. The backend swap should be invisible.
-4. **Multi-backend coexistence** — users can run SharpInference and ComfyUI side-by-side
+4. **Multi-backend coexistence** — users can run HartsyInference and ComfyUI side-by-side
    on the same Swarm instance and pick per-generation. (Same way the API Backends
    extension coexists with Comfy today.)
 5. **Capability advertisement via feature flags** so Swarm's existing UI param-gating
@@ -48,10 +48,10 @@ becomes a SharpInference `TextToImageRequest` directly, with no JSON in the midd
 - **Replacing every esoteric Comfy feature.** TensorRT compilation, custom node
   packs, the `Stored Custom Workflows` system — all out of scope until parity on the
   common path lands.
-- **Building SharpInference itself.** This extension consumes it; it doesn't extend it.
-  Bugs and missing primitives in SharpInference are upstream issues, not extension
+- **Building HartsyInference itself.** This extension consumes it; it doesn't extend it.
+  Bugs and missing primitives in HartsyInference are upstream issues, not extension
   issues.
-- **Audio / video / vision modalities.** SharpInference supports these (Whisper, Kokoro,
+- **Audio / video / vision modalities.** HartsyInference supports these (Whisper, Kokoro,
   YOLO, LTX-Video) but Swarm's backend abstraction is `AbstractT2IBackend` — image
   generation. Audio/video can be a separate extension later.
 
@@ -59,7 +59,7 @@ becomes a SharpInference `TextToImageRequest` directly, with no JSON in the midd
 
 The extension is "done" enough to ship when:
 
-- [ ] A user with a clean Swarm install can pick "SharpInference" as their backend
+- [ ] A user with a clean Swarm install can pick "HartsyInference" as their backend
 - [ ] Pick an SDXL .safetensors checkpoint from their `Models/` folder
 - [ ] Type a prompt, hit Generate, and get an image
 - [ ] LoRAs from `Models/Lora/` apply correctly
@@ -74,14 +74,14 @@ Everything past that is incremental milestones — see
 
 ## Out-of-scope but adjacent
 
-- **Audio/video extensions.** Separate extension repos that mount SharpInference's
+- **Audio/video extensions.** Separate extension repos that mount HartsyInference's
   Audio/Vision/Video pipelines onto Swarm's eventual audio/video tabs. Not this repo.
-- **Hosted SharpInference.Server backend.** SharpInference will ship an
+- **Hosted HartsyInference.Server backend.** HartsyInference will ship an
   OpenAI-compatible HTTP server eventually. When that lands, we *could* add a second
-  backend type (`sharpinference_remote`) that talks to it over HTTP — useful for
-  someone running SharpInference on a separate inference box. Not v1.
-- **Quantized / GGUF support.** SharpInference has a GGUF loader; routing GGUF
-  checkpoints into Flux / SDXL pipelines is a SharpInference milestone, not a
+  backend type (`hartsyinference_remote`) that talks to it over HTTP — useful for
+  someone running HartsyInference on a separate inference box. Not v1.
+- **Quantized / GGUF support.** HartsyInference has a GGUF loader; routing GGUF
+  checkpoints into Flux / SDXL pipelines is a HartsyInference milestone, not a
   Swarm-side concern.
 
 ## How to read these docs
@@ -91,7 +91,7 @@ Everything past that is incremental milestones — see
   see the feature surface we're targeting.
 - [`03-Implementation-Roadmap.md`](./03-Implementation-Roadmap.md) is the milestone
   plan.
-- [`04-SharpInference-Integration.md`](./04-SharpInference-Integration.md) is the
+- [`04-HartsyInference-Integration.md`](./04-HartsyInference-Integration.md) is the
   contract with the upstream library — read this before writing any consumption code.
 - [`10-Risks-And-Open-Questions.md`](./10-Risks-And-Open-Questions.md) is the list of
   known unknowns. The .NET 10 vs .NET 8 TFM issue is the biggest one.

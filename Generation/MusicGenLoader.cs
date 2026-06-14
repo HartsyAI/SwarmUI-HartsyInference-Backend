@@ -1,19 +1,21 @@
 using System.IO;
 using SwarmUI.Text2Image;
 using SwarmUI.Utils;
-using SharpInference.Core.Backends;
-using SharpInference.Core.Tensors;
-using SharpInference.Audio.Models.Codecs;
-using SharpInference.Audio.Models.Music;
-using SharpInference.Audio.Pipelines;
-using SharpInference.Diffusion.Models.TextEncoders;
-using SharpInference.Diffusion.Utilities;
-using SharpInference.ModelHandler.CheckpointConverters;
-using SharpInference.ModelHandler.SafeTensors;
-using SharpInference.Tokenizers;
+using HartsyInference.Core.Backends;
+using HartsyInference.Core.Tensors;
+using HartsyInference.Audio.Models.Codecs;
+using HartsyInference.Audio.Models.Codecs.EnCodec;
+using HartsyInference.Audio.Models.Music;
+using HartsyInference.Audio.Pipelines;
+using HartsyInference.Diffusion.Models.TextEncoders;
+using HartsyInference.Diffusion.Requests;
+using HartsyInference.Diffusion.Utilities;
+using HartsyInference.ModelHandler.CheckpointConverters;
+using HartsyInference.ModelHandler.SafeTensors;
+using HartsyInference.Tokenizers;
 using Image = SwarmUI.Utils.Image;
 
-namespace Hartsy.Extensions.SharpInferenceBackend.Generation;
+namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
 /// <summary>
 /// Loads MusicGen (Meta's text-to-music autoregressive LM over EnCodec tokens; HF
@@ -58,6 +60,16 @@ public static class MusicGenLoader
         if (!File.Exists(model.RawFilePath))
             throw new FileNotFoundException($"MusicGen checkpoint not found: {model.RawFilePath}");
 
+        // TODO(engine-blocked): three engine pieces are missing for MusicGen —
+        //   1. EnCodecConfig.EnCodec32kHz preset (only EnCodec24kHz exists; MusicGen's codec is 32 kHz)
+        //   2. MusicGenCheckpointConverter.LoadTextEncoder (text_encoder.* extraction from the HF file)
+        //   3. T5TextEncoderConfig.T5Base preset (v1.0 non-gated ReLU T5-base)
+        // Fail fast before the decoder load; the EngineGap.Value placeholders below keep the
+        // final wiring shape compiling. Lift by deleting this throw + restoring the three lines.
+        EngineGap.Throw(
+            "MusicGen: HartsyInference is missing the EnCodec-32kHz preset, the bundled-T5 converter path, "
+            + "and the T5-Base encoder preset. The extension wiring is ready; this lifts when the engine adds them.");
+
         // ── 1. Decoder LM (size preset from the final layer-norm width) ──
         log($"Loading MusicGen decoder: {model.Name}");
         var (decoderWeights, decoderLoader) = MusicGenCheckpointConverter.LoadDecoder(model.RawFilePath, castToF32: true);
@@ -73,13 +85,17 @@ public static class MusicGenLoader
         // ── 2. EnCodec 32 kHz (bundled under audio_encoder.*) ──
         log("Loading bundled EnCodec (32 kHz)...");
         var (codecWeights, codecLoader) = MusicGenCheckpointConverter.LoadEnCodec(model.RawFilePath, castToF32: true);
-        EnCodec codec = new EnCodec(EnCodecConfig.EnCodec32kHz);
+        // TODO(engine-blocked): EnCodec codec = new EnCodec(EnCodecConfig.EnCodec32kHz);
+        EnCodec codec = EngineGap.Value<EnCodec>("MusicGen: EnCodecConfig.EnCodec32kHz preset missing upstream.");
         codec.LoadWeights(codecWeights);
 
         // ── 3. T5-base text encoder (bundled under text_encoder.*; v1.0 non-gated ReLU) ──
         log("Loading bundled T5-base text encoder...");
-        var (t5Weights, t5Loader) = MusicGenCheckpointConverter.LoadTextEncoder(model.RawFilePath, castToF32: true);
-        T5TextEncoder t5 = new T5TextEncoder(T5TextEncoderConfig.T5Base);
+        // TODO(engine-blocked): var (t5Weights, t5Loader) = MusicGenCheckpointConverter.LoadTextEncoder(model.RawFilePath, castToF32: true);
+        var (t5Weights, t5Loader) = EngineGap.Value<(Dictionary<string, Tensor> Weights, SafeTensorsLoader Loader)>(
+            "MusicGen: MusicGenCheckpointConverter.LoadTextEncoder missing upstream.");
+        // TODO(engine-blocked): T5TextEncoder t5 = new T5TextEncoder(T5TextEncoderConfig.T5Base);
+        T5TextEncoder t5 = EngineGap.Value<T5TextEncoder>("MusicGen: T5TextEncoderConfig.T5Base preset missing upstream.");
         t5.LoadWeights(t5Weights);
         T5Tokenizer tokenizer = new T5Tokenizer(maxLength: TextTokenLength);
 
@@ -130,7 +146,7 @@ public static class MusicGenLoader
         {
             float[] samples = entry.Pipeline.Synthesize(backend, t5States, seconds: (float)duration, seed: seed);
             cancel.ThrowIfCancellationRequested();
-            Logs.Verbose($"[SharpInference][MusicGen] {samples.Length} samples @ {entry.Config.CodecSampleRate} Hz " +
+            Logs.Verbose($"[HartsyInference][MusicGen] {samples.Length} samples @ {entry.Config.CodecSampleRate} Hz " +
                 $"({duration:0}s requested) in {Environment.TickCount64 - start}ms.");
             // Mono source → duplicate the channel for the MP3 encoder.
             return [AudioOutputEncoder.EncodeMp3(samples, samples, entry.Config.CodecSampleRate, cancel)];

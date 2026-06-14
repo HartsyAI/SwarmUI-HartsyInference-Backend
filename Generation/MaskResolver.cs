@@ -2,17 +2,17 @@ using SixLabors.ImageSharp.PixelFormats;
 using SixLabors.ImageSharp.Processing;
 using SwarmUI.Text2Image;
 using SwarmUI.Utils;
-using SharpInference.Core.Tensors;
+using HartsyInference.Core.Tensors;
 using ISImage = SixLabors.ImageSharp.Image;
 using ISSize = SixLabors.ImageSharp.Size;
 
-namespace Hartsy.Extensions.SharpInferenceBackend.Generation;
+namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
 /// <summary>
 /// Resolves Swarm's mask params (<see cref="T2IParamTypes.MaskImage"/>,
 /// <see cref="T2IParamTypes.MaskGrow"/>, <see cref="T2IParamTypes.MaskBlur"/>)
 /// into a pixel-space mask Tensor <c>[1, 1, H, W]</c> F32 in <c>[0, 1]</c>
-/// that SharpInference's inpaint pipelines consume. Mask convention matches
+/// that HartsyInference's inpaint pipelines consume. Mask convention matches
 /// Swarm's UX: white pixels (1.0) get inpainted, black pixels (0.0) are
 /// preserved, gray pixels blend proportionally.
 ///
@@ -56,7 +56,7 @@ public static unsafe class MaskResolver
         }
 
         Tensor mask = MaskBytesToTensor(maskBytes, targetWidth, targetHeight);
-        Logs.Verbose($"[SharpInference][Mask] enabled: {targetWidth}x{targetHeight}, grow={grow}px, blur={blur}px");
+        Logs.Verbose($"[HartsyInference][Mask] enabled: {targetWidth}x{targetHeight}, grow={grow}px, blur={blur}px");
         return mask;
     }
 
