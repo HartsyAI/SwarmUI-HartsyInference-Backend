@@ -59,10 +59,7 @@ public static class AnimaLoader
             userPick: input?.Get(T2IParamTypes.QwenModel),
             entry: SideModels.Qwen3_0_6B,
             log: log);
-        T2IModel vaeModel = ModelAutoDownloader.EnsureSideModel(
-            userPick: input?.Get(T2IParamTypes.VAE),
-            entry: SideModels.QwenImageVae,
-            log: log);
+        T2IModel vaeModel = ResolveQwenImageVae(input?.Get(T2IParamTypes.VAE), log);
 
         // 1. Load the single-file Anima checkpoint → DiT trunk + LlmAdapter buckets.
         log($"Loading Anima checkpoint: {model.Name}");
@@ -228,28 +225,51 @@ public static class AnimaLoader
         return new[] { RgbToImage.FromHwcRgb(rgbBytes, outW, outH) };
     }
 
-    /// <summary>Normalizes standalone Qwen-Image VAE keys into diffusers naming. Same strategy as
-    /// <c>ZImageLoader.LoadVaeWeights</c>: strip optional Comfy prefix (<c>vae.</c> / <c>first_stage_model.</c>),
-    /// then route through <see cref="CheckpointConvertUtils.ConvertVaeKey"/> which maps LDM names to diffusers
-    /// names AND passes already-diffusers names through unchanged.</summary>
-    private static Dictionary<string, Tensor> LoadVaeWeights(Dictionary<string, Tensor> raw)
-    {
-        Dictionary<string, Tensor> result = new(raw.Count);
-        foreach (var (key, tensor) in raw)
-        {
-            string ldmKey = key;
-            if (ldmKey.StartsWith("first_stage_model.", StringComparison.Ordinal))
-                ldmKey = ldmKey["first_stage_model.".Length..];
-            else if (ldmKey.StartsWith("vae.", StringComparison.Ordinal))
-                ldmKey = ldmKey["vae.".Length..];
+    /// <summary>Top-level keys unique to the Qwen-Image / WAN-family VAE that <see cref="QwenImageVaeDecoder"/>
+    /// requires verbatim. A Flux/SD-style VAE (diffusers naming) has neither, so probing for these cheaply
+    /// distinguishes a compatible pick from an incompatible one.</summary>
+    private static readonly string[] QwenImageVaeSignatureKeys = ["conv2.weight", "decoder.conv1.weight"];
 
-            string diffusersKey = CheckpointConvertUtils.ConvertVaeKey(ldmKey);
-            if (diffusersKey is not null)
-            {
-                result[diffusersKey] = tensor;
-            }
+    /// <summary>Resolves the Qwen-Image VAE for Anima. Anima's decoder is architecturally fixed to the
+    /// Qwen-Image (WAN 2.1 family) VAE, so an incompatible user VAE pick (e.g. a Flux/SD ae left selected
+    /// from another model) must NOT be honored — otherwise <see cref="QwenImageVaeDecoder.LoadWeights"/>
+    /// throws on the missing <c>conv2.weight</c>. A compatible custom pick is still honored; otherwise we
+    /// drop the pick and let <see cref="ModelAutoDownloader.EnsureSideModel"/> auto-resolve (and download
+    /// if needed) the canonical <see cref="SideModels.QwenImageVae"/>.</summary>
+    private static T2IModel ResolveQwenImageVae(T2IModel userPick, Action<string> log)
+    {
+        if (userPick is not null && !IsQwenImageVae(userPick))
+        {
+            log($"Selected VAE '{userPick.Name}' is not a Qwen-Image VAE (missing {string.Join(" / ", QwenImageVaeSignatureKeys)}); " +
+                "ignoring it and auto-resolving the Qwen-Image VAE that Anima requires.");
+            userPick = null;
         }
-        return result;
+        return ModelAutoDownloader.EnsureSideModel(userPick, SideModels.QwenImageVae, log);
+    }
+
+    /// <summary>Header-only probe: true iff the file carries every <see cref="QwenImageVaeSignatureKeys"/>
+    /// entry. Reads just the safetensors JSON header (no tensor data materialized).</summary>
+    private static bool IsQwenImageVae(T2IModel model)
+    {
+        if (string.IsNullOrWhiteSpace(model?.RawFilePath) || !File.Exists(model.RawFilePath))
+        {
+            return false;
+        }
+        try
+        {
+            using SafeTensorsLoader probe = new SafeTensorsLoader();
+            probe.Load(model.RawFilePath);
+            foreach (string key in QwenImageVaeSignatureKeys)
+            {
+                if (!probe.Descriptors.ContainsKey(key)) return false;
+            }
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Logs.Warning($"[HartsyInference][Anima] Could not probe VAE '{model.Name}' ({ex.Message}); treating as incompatible.");
+            return false;
+        }
     }
 
     /// <summary>Produces Anima's T5 main-stream token IDs: raw SentencePiece tokens + a single EOS,

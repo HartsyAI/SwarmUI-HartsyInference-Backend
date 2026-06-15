@@ -28,8 +28,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         [ConfigComment("Compute backend to use. 'auto' tries CUDA, then Vulkan, then CPU.")]
         public string ComputeBackend = "auto";
 
-        [ConfigComment("Which GPU to use, if multiple are available (0 = first GPU, 1 = second, etc.).\nIgnored for the CPU compute backend. HartsyInference uses a single GPU per backend — to use multiple GPUs, add one backend per GPU.")]
-        public int DeviceOrdinal = 0;
+        [ConfigComment("Which GPU to use, if multiple are available.\nShould be a single number, like '0' (first GPU), '1' (second GPU), etc.\nIgnored for the CPU compute backend.\nHartsyInference uses a single GPU per backend — to run on multiple GPUs, add one backend per GPU (each with its own GPU_ID). A '0,1'-style list is accepted but only the first number is used.")]
+        public string GPU_ID = "0";
 
         [ConfigComment("Maximum number of model pipelines to keep cached in VRAM/RAM at once.\nHigher values avoid reloading when switching between models, at the cost of memory. 1 is recommended for a single GPU.")]
         public int MaxCachedPipelines = 1;
@@ -37,8 +37,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         [ConfigComment("Path to PTX kernel directory (CUDA only). Empty = use bundled Ptx/ folder next to the extension DLL.")]
         public string PtxDirectory = "";
 
-        [ConfigComment("How many extra requests may queue up on this backend while one is generating.\n0 means a single live generation with nothing waiting (the scheduler routes further requests to other backends).\n1 means a live generation plus one extra waiting in line.\n-1 makes this a UI-only instance that cannot do actual generations.\nGenerations always run one at a time on this backend (the queue just lets requests wait here instead of being sent elsewhere).")]
-        public int OverQueue = 0;
+        [ConfigComment("How many extra requests may queue up on this backend while one is generating.\n0 means a single live generation with nothing waiting (the scheduler routes further requests to other backends/GPUs immediately).\n1 (default) means a live generation plus one extra waiting in line before further requests route elsewhere.\n-1 makes this a UI-only instance that cannot do actual generations.\nGenerations always run one at a time on this backend (the queue just lets requests wait here instead of being sent elsewhere).")]
+        public int OverQueue = 1;
 
         [ConfigComment("Per-step progress previews. 'off' disables them; 'latent2rgb' (default) uses a fast model-free latent→RGB approximation (blurry but instant); 'taesd' uses a tiny per-architecture autoencoder for higher-fidelity previews when the TAESD weights ship.")]
         public string PreviewMethod = "latent2rgb";
@@ -132,7 +132,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         try
         {
             string requested = Settings?.ComputeBackend?.ToLowerInvariant() ?? "auto";
-            int ordinal = Settings?.DeviceOrdinal ?? 0;
+            int ordinal = ParseGpuId(Settings?.GPU_ID);
 
             // Kernels ship in our extension's own output dir, NOT Swarm's main runtime
             // dir (which is what AppContext.BaseDirectory returns when running inside
@@ -195,6 +195,26 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         "taesd" => PreviewEncoder.Method.Taesd,
         _ => PreviewEncoder.Method.Latent2Rgb,
     };
+
+    /// <summary>Parse the <c>GPU_ID</c> setting (mirrors Comfy's GPU_ID field) into a device ordinal.
+    /// Accepts a single number ("0", "1", …). A Comfy-style "0,1" list is tolerated but only the
+    /// first ordinal is used — HartsyInference runs one GPU per backend (add a backend per GPU for
+    /// multi-GPU). Falls back to 0 on empty/garbage.</summary>
+    private static int ParseGpuId(string gpuId)
+    {
+        if (string.IsNullOrWhiteSpace(gpuId)) return 0;
+        string first = gpuId.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).FirstOrDefault() ?? "0";
+        if (int.TryParse(first, out int ordinal) && ordinal >= 0)
+        {
+            if (gpuId.Contains(','))
+            {
+                Logs.Warning($"[HartsyInference] GPU_ID='{gpuId}' lists multiple GPUs, but HartsyInference uses one GPU per backend — using GPU {ordinal}. Add a separate backend per GPU for multi-GPU.");
+            }
+            return ordinal;
+        }
+        Logs.Warning($"[HartsyInference] GPU_ID='{gpuId}' isn't a valid GPU number — defaulting to GPU 0.");
+        return 0;
+    }
 
     private static IBackend ConstructBackend(string choice, int ordinal, string ptxDir, string spvDir)
     {

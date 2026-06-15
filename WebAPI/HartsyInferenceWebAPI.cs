@@ -113,7 +113,7 @@ public static class HartsyInferenceWebAPI
                 ["status"] = backend.Status.ToString(),
                 ["current_model"] = backend.CurrentModelName ?? "",
                 ["compute_backend"] = backend.Settings?.ComputeBackend ?? "auto",
-                ["device_ordinal"] = backend.Settings?.DeviceOrdinal ?? 0,
+                ["gpu_id"] = backend.Settings?.GPU_ID ?? "0",
                 ["max_cached_pipelines"] = backend.Settings?.MaxCachedPipelines ?? 1,
                 ["usages"] = data.Usages,
             });
@@ -134,7 +134,7 @@ public static class HartsyInferenceWebAPI
             {
                 ["backend_id"] = data.ID,
                 ["compute_backend"] = backend.Settings?.ComputeBackend ?? "auto",
-                ["device_ordinal"] = backend.Settings?.DeviceOrdinal ?? 0,
+                ["gpu_id"] = backend.Settings?.GPU_ID ?? "0",
                 ["status"] = backend.Status.ToString(),
             });
         }
