@@ -122,8 +122,8 @@ public static class RefinerLoader
 
         try
         {
-            string prompt = input.Get(T2IParamTypes.Prompt) ?? "";
-            string negative = input.Get(T2IParamTypes.NegativePrompt) ?? "";
+            string prompt = PromptConditioningResolver.BaseText(input.Get(T2IParamTypes.Prompt));
+            string negative = PromptConditioningResolver.BaseText(input.Get(T2IParamTypes.NegativePrompt));
             long seedLong = input.Get(T2IParamTypes.Seed);
 
             // CLIP-G tokenization (refiner uses ONLY CLIP-G).

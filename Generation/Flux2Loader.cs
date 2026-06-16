@@ -193,7 +193,7 @@ public static class Flux2Loader
         Action<GenerationProgress> onProgress,
         CancellationToken cancel)
     {
-        string prompt = input.Get(T2IParamTypes.Prompt) ?? "";
+        string prompt = PromptConditioningResolver.BaseText(input.Get(T2IParamTypes.Prompt));
         int steps = SamplingParamResolver.ResolveSteps(input, fallback: entry.Flux2Config.GuidanceEmbed ? 28 : 10);
         // Flux.2 rounds image dims down to a multiple of 16 (VAE 8× × 2×2 patch). Resolve img2img
         // against those rounded dims so the source tensor matches the pipeline's shape check.

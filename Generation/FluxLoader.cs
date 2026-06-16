@@ -270,7 +270,7 @@ public static class FluxLoader
         Action<GenerationProgress> onProgress,
         CancellationToken cancel)
     {
-        string prompt = input.Get(T2IParamTypes.Prompt) ?? "";
+        string prompt = PromptConditioningResolver.BaseText(input.Get(T2IParamTypes.Prompt));
         int steps = SamplingParamResolver.ResolveSteps(input, fallback: entry.IsDev ? 20 : 4);
         int width = input.Get(T2IParamTypes.Width);
         int height = input.Get(T2IParamTypes.Height);

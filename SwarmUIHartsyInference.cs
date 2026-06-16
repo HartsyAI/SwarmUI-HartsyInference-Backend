@@ -53,6 +53,11 @@ public class SwarmUIHartsyInference : Extension
     public static T2IRegisteredParam<int> TileVaeThresholdParam;
     public static T2IRegisteredParam<string> SamplerParam;
 
+    // Ideogram 4 magic-prompt params (see Generation.Ideogram4MagicPrompt).
+    public static T2IParamGroup Ideogram4ParamGroup;
+    public static T2IRegisteredParam<bool> Ideogram4MagicPromptParam;
+    public static T2IRegisteredParam<string> Ideogram4MagicPromptModelParam;
+
     public override void OnPreInit()
     {
         Logs.Init("HartsyInference extension pre-init");
@@ -108,6 +113,26 @@ public class SwarmUIHartsyInference : Extension
             Group: HartsyInferenceParamGroup,
             FeatureFlag: "hartsyinference",
             GetValues: _ => new List<string> { "euler", "ddim", "dpm++2m", "lcm" }));
+
+        // Ideogram 4 magic prompt: optional LLM rewrite of a plain prompt into Ideogram's structured JSON
+        // caption (Generation.Ideogram4MagicPrompt). Ideogram 4 is trained on structured captions; plain
+        // text also works, so this is opt-in and only fires for Ideogram 4 generations.
+        Ideogram4ParamGroup = new("Ideogram 4", Toggles: false, Open: false, IsAdvanced: false);
+
+        Ideogram4MagicPromptParam = T2IParamTypes.Register<bool>(new(
+            "Ideogram 4 Magic Prompt",
+            "Rewrite your plain prompt into Ideogram 4's structured JSON caption using a running LLM backend, the way Ideogram's own stack does.\nRequires an LLM backend (Server > Backends — LlamaSharp, Anthropic, or remote). When off (default), your prompt is sent to the model as-is (which also works).",
+            "false",
+            Group: Ideogram4ParamGroup,
+            FeatureFlag: "hartsyinference"));
+
+        Ideogram4MagicPromptModelParam = T2IParamTypes.Register<string>(new(
+            "Ideogram 4 Magic Prompt LLM",
+            "Optional: which LLM model the magic prompt should use (must be available on a running LLM backend).\nLeave unset to use the running LLM backend's default model. Only used when 'Ideogram 4 Magic Prompt' is on.",
+            "",
+            Toggleable: true,
+            Group: Ideogram4ParamGroup,
+            FeatureFlag: "hartsyinference"));
 
         // 2. Register the backend type (single type — no _selfstart vs _api split,
         //    we always run in-process).

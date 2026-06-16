@@ -170,8 +170,8 @@ public static class LanceLoader
         Action<GenerationProgress> onProgress,
         CancellationToken cancel)
     {
-        string prompt = input.Get(T2IParamTypes.Prompt) ?? "";
-        string negative = input.Get(T2IParamTypes.NegativePrompt) ?? "";
+        string prompt = PromptConditioningResolver.BaseText(input.Get(T2IParamTypes.Prompt));
+        string negative = PromptConditioningResolver.BaseText(input.Get(T2IParamTypes.NegativePrompt));
         int steps = SamplingParamResolver.ResolveSteps(input, fallback: entry.Config.NumTimesteps);
         long seedLong = input.Get(T2IParamTypes.Seed);
         double cfgRaw = input.Get(T2IParamTypes.CFGScale);

@@ -26,6 +26,14 @@
         <PackageReference Include="HartsyInference" Version="1.0.0-alpha.3" />
     </ItemGroup>
 
+    <!-- Ideogram 4's magic-prompt system prompt, ported verbatim from upstream
+         ideogram-oss/ideogram4 (src/ideogram4/magic_prompt_system_prompts/v1.txt). Embedded into the
+         extension DLL so the magic-prompt expander has it with no runtime download. Loaded by
+         Generation.Ideogram4MagicPrompt via GetManifestResourceNames(). -->
+    <ItemGroup>
+        <EmbeddedResource Include="Assets/ideogram4_magic_prompt_v1.txt" />
+    </ItemGroup>
+
     <!-- Don't ship duplicates of packages the SwarmUI host already loads. SwarmUI.deps.props makes
          the extension COMPILE against the same SixLabors / Newtonsoft / LiteDB / LLamaSharp / etc.
          the host provides at runtime; ExcludeAssets="runtime" keeps the compile references but stops

@@ -139,8 +139,8 @@ public static class ZImageLoader
         Action<GenerationProgress> onProgress,
         CancellationToken cancel)
     {
-        string prompt = input.Get(T2IParamTypes.Prompt) ?? "";
-        string negative = input.Get(T2IParamTypes.NegativePrompt) ?? "";
+        string prompt = PromptConditioningResolver.BaseText(input.Get(T2IParamTypes.Prompt));
+        string negative = PromptConditioningResolver.BaseText(input.Get(T2IParamTypes.NegativePrompt));
         int steps = SamplingParamResolver.ResolveSteps(input, fallback: 8);
         int width = input.Get(T2IParamTypes.Width);
         int height = input.Get(T2IParamTypes.Height);

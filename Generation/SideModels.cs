@@ -139,6 +139,20 @@ public static class SideModels
         Hash: "bbf16f981d98e16d080c566134814c4e9f6aadd0d0e1383c60bc44ba939d760d",
         DisplayName: "Qwen3-8B (fp4 mixed) — Klein 9B");
 
+    /// <summary>Qwen3-VL-8B-Instruct (language tower) — Ideogram 4's sole text encoder. Ideogram 4 taps
+    /// 13 of its decoder layers' hidden states (see <c>Ideogram4Config.QwenActivationLayers</c>) and uses
+    /// rope θ=5e6 (<c>LlamaStyleEncoderConfig.Qwen3_VL_8B</c>). This is a DIFFERENT model from the base
+    /// Qwen3-8B (<see cref="Qwen3_8B_Fp4Mixed"/>) that Flux.2 Klein uses — Ideogram needs the VL-8B weights.
+    /// fp8_scaled variant from <c>Comfy-Org/Ideogram-4</c> (the engine folds the scale_weight companions at
+    /// load via <c>CheckpointConvertUtils.ApplyFp8ScaledDequant</c>). Saved under <c>Ideogram4/</c> so it sits
+    /// apart from the base-8B file of the same family.</summary>
+    public static readonly Entry Qwen3VL_8B = new(
+        CanonicalName: "Ideogram4/qwen3vl_8b_fp8_scaled.safetensors",
+        FolderType: "Clip",
+        Url: "https://huggingface.co/Comfy-Org/Ideogram-4/resolve/main/text_encoders/qwen3vl_8b_fp8_scaled.safetensors",
+        Hash: "4ba424cf62e51392e4d1a39933e803706f4e823c1065f36aaf149c6453f66bcd",
+        DisplayName: "Qwen3-VL-8B (Ideogram 4)");
+
     /// <summary>Mistral 3 Small for Flux.2 Dev. Same FP4 caveat as Qwen3-8B above.</summary>
     public static readonly Entry MistralSmallFlux2 = new(
         CanonicalName: "mistral_3_small_flux2.safetensors",
@@ -227,6 +241,20 @@ public static class SideModels
         Url: "https://huggingface.co/Comfy-Org/Qwen-Image_ComfyUI/resolve/main/split_files/vae/qwen_image_vae.safetensors",
         Hash: "a70580f0213e67967ee9c95f05bb400e8fb08307e017a924bf3441223e023d1f",
         DisplayName: "Qwen-Image VAE");
+
+    // ── Diffusion transformers (folder = "Stable-Diffusion" — companion DiT weights) ──
+
+    /// <summary>Ideogram 4's UNCONDITIONAL transformer — the second 9.3B DiT (identical architecture to the
+    /// conditional one the user picks) used for the asymmetric-CFG negative pass. Ideogram 4 ships it as a
+    /// separate file alongside the conditional DiT; the user only picks the conditional one, so this auto-
+    /// resolves the companion. fp8_scaled from <c>Comfy-Org/Ideogram-4</c>. Saved under <c>Ideogram4/</c> in
+    /// the main model folder.</summary>
+    public static readonly Entry Ideogram4Unconditional = new(
+        CanonicalName: "Ideogram4/ideogram4_unconditional_fp8_scaled.safetensors",
+        FolderType: "Stable-Diffusion",
+        Url: "https://huggingface.co/Comfy-Org/Ideogram-4/resolve/main/diffusion_models/ideogram4_unconditional_fp8_scaled.safetensors",
+        Hash: "9b359007dae162cca7591d00868feea733eb7c56e56e3a214a4d5a9a2a07cd60",
+        DisplayName: "Ideogram 4 Unconditional Transformer");
 
     /// <summary>ACE-Step v1 Music-DCAE (Sana-style mel autoencoder, decode side used at inference).
     /// SHA-256 from the HF LFS metadata. Saved under <c>VAE/AceStep/</c> — it's the audio analog of a VAE.</summary>

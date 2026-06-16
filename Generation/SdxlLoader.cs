@@ -171,8 +171,8 @@ public static class SdxlLoader
         RefinerSwapConfig refinerSwap = null,
         IReadOnlyList<HartsyInference.Diffusion.Adapters.IpAdapterConditioning> ipAdapters = null)
     {
-        string prompt = input.Get(T2IParamTypes.Prompt) ?? "";
-        string negative = input.Get(T2IParamTypes.NegativePrompt) ?? "";
+        string prompt = PromptConditioningResolver.BaseText(input.Get(T2IParamTypes.Prompt));
+        string negative = PromptConditioningResolver.BaseText(input.Get(T2IParamTypes.NegativePrompt));
         int steps = SamplingParamResolver.ResolveSteps(input, fallback: 30);
         int width = input.Get(T2IParamTypes.Width);
         int height = input.Get(T2IParamTypes.Height);
