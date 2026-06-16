@@ -646,7 +646,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                         ?? throw new InvalidOperationException("SD 1.5 model loaded but not in cache.");
                     return loras.Count > 0
                         ? Sd15Loader.GenerateWithLoras(entry, loras, _backend, input, progressBridge, cancel, ipaSpec?.Conditionings)
-                        : Sd15Loader.Generate(entry, input, progressBridge, cancel, ipaSpec?.Conditionings);
+                        : Sd15Loader.Generate(entry, _backend, input, progressBridge, cancel, ipaSpec?.Conditionings);
                 }
                 if (compat == SdxlLoader.SdxlCompatClassId)
                 {

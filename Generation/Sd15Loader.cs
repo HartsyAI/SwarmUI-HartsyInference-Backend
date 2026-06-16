@@ -7,6 +7,7 @@ using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines;
+using HartsyInference.Diffusion.Prompting;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.ModelHandler.CheckpointConverters;
 using HartsyInference.ModelHandler.Lora;
@@ -122,7 +123,7 @@ public static class Sd15Loader
             using StableDiffusion15Pipeline pipeline = new StableDiffusion15Pipeline(
                 backend, textEncoder, unet, entry.Vae, entry.VaeEncoder);
 
-            return RunSd15Pipeline(pipeline, entry.Tokenizer, input, onProgress, cancel, ipAdapters);
+            return RunSd15Pipeline(pipeline, backend, textEncoder, entry.Tokenizer, input, onProgress, cancel, ipAdapters);
         }
         finally
         {
@@ -136,18 +137,21 @@ public static class Sd15Loader
 
     public static Image[] Generate(
         Sd15CacheEntry entry,
+        IBackend backend,
         T2IParamInput input,
         Action<GenerationProgress> onProgress,
         CancellationToken cancel,
         IReadOnlyList<HartsyInference.Diffusion.Adapters.IpAdapterConditioning> ipAdapters = null)
     {
-        return RunSd15Pipeline(entry.Pipeline, entry.Tokenizer, input, onProgress, cancel, ipAdapters);
+        return RunSd15Pipeline(entry.Pipeline, backend, entry.TextEncoder, entry.Tokenizer, input, onProgress, cancel, ipAdapters);
     }
 
     /// <summary>Shared per-pipeline driver — same logic whether the pipeline is the
     /// cached one (no-LoRA) or a freshly-built per-gen one (LoRA).</summary>
     private static Image[] RunSd15Pipeline(
         StableDiffusion15Pipeline pipeline,
+        IBackend backend,
+        ClipTextEncoder encoder,
         ClipTokenizer tokenizer,
         T2IParamInput input,
         Action<GenerationProgress> onProgress,
@@ -218,8 +222,14 @@ public static class Sd15Loader
                 onProgress(p);
             };
 
+            // ComfyUI-style weighting + <break>: when the prompt carries that syntax, build the
+            // weighted [2,S,H] conditioning and pass it as a single-variant schedule (the pipeline
+            // overrides its token-encoded conditioning with it). Null for plain prompts → unchanged path.
+            ConditioningSchedule weightedSchedule = WeightedConditioning.BuildSingleClip(
+                backend, encoder, tokenizer, prompt, negative, clipSkip ?? 1);
+
             var (rgbBytes, outW, outH, _) = pipeline.GenerateFromTokens(
-                promptTokens, negativeTokens, request, bridge, ipAdapters);
+                promptTokens, negativeTokens, request, bridge, ipAdapters, weightedSchedule);
 
             Logs.Verbose($"[HartsyInference][SD15] Pipeline returned {outW}x{outH} in {Environment.TickCount64 - start}ms.");
             return new[] { RgbToImage.FromHwcRgb(rgbBytes, outW, outH) };
