@@ -42,6 +42,9 @@ public class HartsyInferenceBackend : AbstractT2IBackend
 
         [ConfigComment("Per-step progress previews. 'off' disables them; 'latent2rgb' (default) uses a fast model-free latent→RGB approximation (blurry but instant); 'taesd' uses a tiny per-architecture autoencoder for higher-fidelity previews when the TAESD weights ship.")]
         public string PreviewMethod = "latent2rgb";
+
+        [ConfigComment("Native FP8 GEMM for fp8 checkpoints (Ada/Hopper, SM 8.9+). When on, fp8 weights are matrix-multiplied directly in fp8 (via cuBLASLt) instead of being upcast to fp16 — roughly half the transformer VRAM and faster on supported GPUs. 'auto' (default) enables it on SM 8.9+ GPUs; 'on' forces it; 'off' always upcasts to fp16. On older GPUs (Ampere and below) the engine falls back to fp16 automatically regardless of this setting.")]
+        public string NativeFp8Gemm = "auto";
     }
 
     public HartsyInferenceBackendSettings Settings => SettingsRaw as HartsyInferenceBackendSettings;
@@ -147,6 +150,25 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             AddLoadStatus($"Kernel paths: PTX={ptxDir} (exists={Directory.Exists(ptxDir)}), SPIR-V={spvDir} (exists={Directory.Exists(spvDir)})");
             _backend = ConstructBackend(requested, ordinal, ptxDir, spvDir);
             AddLoadStatus($"IBackend ready: {_backend.Capabilities.Name} (device={_backend.Device})");
+
+            // Native FP8 GEMM (Ada/Hopper): compute fp8 checkpoints directly in fp8 instead of upcasting to
+            // fp16 — ~half the transformer VRAM + faster. Opt-in on the engine (default off); we enable it
+            // here per the backend setting. The engine still hard-gates the actual dispatch on Fp8Executor
+            // .IsSupported (SM 8.9+) and the operands being fp8, so enabling on unsupported HW is a safe no-op.
+            if (_backend is CudaBackend cudaBackend)
+            {
+                int sm = cudaBackend.Context.ComputeCapabilityMajor * 10 + cudaBackend.Context.ComputeCapabilityMinor;
+                string fp8Mode = (Settings?.NativeFp8Gemm ?? "auto").Trim().ToLowerInvariant();
+                bool enableFp8 = fp8Mode switch
+                {
+                    "on" => true,
+                    "off" => false,
+                    _ => sm >= 89, // auto: Ada (8.9) / Hopper (9.0) / Blackwell (10.0+)
+                };
+                cudaBackend.EnableNativeFp8Gemm = enableFp8;
+                AddLoadStatus($"Native FP8 GEMM: {(enableFp8 ? "enabled" : "disabled")} " +
+                    $"(mode={fp8Mode}, SM {cudaBackend.Context.ComputeCapabilityMajor}.{cudaBackend.Context.ComputeCapabilityMinor}).");
+            }
 
             _cache = new PipelineCache(_backend, Settings?.MaxCachedPipelines ?? 1);
             // MaxUsages is what the scheduler checks to decide when to route a request to a different
