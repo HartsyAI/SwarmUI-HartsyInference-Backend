@@ -23,7 +23,10 @@
          (→ Ptx/) and Vulkan SPIR-V (→ Spirv/) kernels into our output, exactly where the backend
          resolves them next to the extension DLL. https://www.nuget.org/packages/HartsyInference -->
     <ItemGroup>
-        <PackageReference Include="HartsyInference" Version="1.0.0-alpha.4-dev" />
+        <!-- Floating prerelease: each restore pulls the latest published 1.0.0-alpha.N from nuget.org
+             (the publish-nuget.yml workflow ships 1.0.0-alpha.<run_number> on each push to main). Pin to a
+             specific alpha.N here if you need a reproducible build. -->
+        <PackageReference Include="HartsyInference" Version="1.0.0-alpha.*" />
     </ItemGroup>
 
     <!-- Ideogram 4's magic-prompt system prompt, ported verbatim from upstream
