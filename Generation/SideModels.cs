@@ -224,12 +224,16 @@ public static class SideModels
         Hash: "afc8e28272cd15db3919bacdb6918ce9c1ed22e96cb12c4d5ed0fba823529e38",
         DisplayName: "Flux.1 ae");
 
-    /// <summary>Flux.2 VAE — distinct from Flux.1's ae (32-channel latent + BatchNorm stats).</summary>
+    /// <summary>Flux.2 VAE — distinct from Flux.1's ae (32-channel latent + BatchNorm stats). Shared by Flux.2
+    /// and Ideogram 4 (both use <c>VaeConfig.Flux2</c>). Canonical name/URL/hash match SwarmUI core's
+    /// <c>CommonModels["flux2-vae"]</c> (Comfy-Org/flux2-dev) so a copy downloaded by the ComfyUI backend is
+    /// reused (and vice versa). The old <c>Comfy-Org/Flux2_repackaged/.../flux2_vae.safetensors</c> URL was
+    /// removed — it 401s (gated/inaccessible) and had no hash.</summary>
     public static readonly Entry Flux2Vae = new(
-        CanonicalName: "Flux2/flux2-vae.safetensors",
+        CanonicalName: "Flux/flux2-vae.safetensors",
         FolderType: "VAE",
-        Url: "https://huggingface.co/Comfy-Org/Flux2_repackaged/resolve/main/split_files/vae/flux2_vae.safetensors",
-        Hash: "",  // NOTE: hash not yet captured from Comfy registry — verify on first download
+        Url: "https://huggingface.co/Comfy-Org/flux2-dev/resolve/main/split_files/vae/flux2-vae.safetensors",
+        Hash: "d64f3a68e1cc4f9f4e29b6e0da38a0204fe9a49f2d4053f0ec1fa1ca02f9c4b5",
         DisplayName: "Flux.2 VAE");
 
     /// <summary>Qwen-Image VAE — 16-channel autoencoder used by Anima and Qwen Image. Matches the
