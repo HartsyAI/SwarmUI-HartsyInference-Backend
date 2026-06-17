@@ -1,12 +1,33 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// TODO(LLM-core): Ideogram 4 magic prompt is TEMPORARILY GATED OFF.
+//
+// The full implementation below needs SwarmUI core's expanded LLM API:
+//   LLMParamInput.SystemPrompt / Temperature / MaxTokens / Stream / RequestSession
+//   AbstractLLMBackend.ListModels()
+// Those members currently live ONLY on the `temp-LLM-impl` core branch and are NOT in the
+// SwarmUI core this extension is built against on other machines (e.g. the H200 box), so they
+// break the extension build (CS0117 / CS1061).
+//
+// Everything LLM-dependent is excluded via `#if HARTSY_LLM_CORE` (kept, not deleted, for easy
+// restore). Without the symbol, Expand() is a no-op stub that returns the prompt unchanged, so
+// the extension builds clean and Ideogram 4 generation still works (magic prompt is opt-in/off
+// by default anyway).
+//
+// TO RE-ENABLE once the core LLM API is merged into the target core:
+//   add  <DefineConstants>$(DefineConstants);HARTSY_LLM_CORE</DefineConstants>  to the csproj
+//   (or build with -p:DefineConstants=HARTSY_LLM_CORE).
+// ─────────────────────────────────────────────────────────────────────────────
+#if HARTSY_LLM_CORE
 using System.IO;
 using System.Reflection;
-using SwarmUI.Accounts;
 using SwarmUI.Backends;
 using SwarmUI.Core;
 using SwarmUI.LLMs;
-using SwarmUI.Utils;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+#endif
+using SwarmUI.Accounts;
+using SwarmUI.Utils;
 
 namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
@@ -14,30 +35,13 @@ namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 /// Ideogram 4 "magic prompt": rewrites a plain user prompt into the structured JSON caption Ideogram 4
 /// was trained on, using a SwarmUI LLM backend (LlamaSharp / Anthropic / remote — whichever is running).
 ///
-/// <para>Faithful port of upstream <c>ideogram-oss/ideogram4</c>'s <c>magic_prompt.py</c> +
-/// <c>ClaudeOpusMagicPromptV1</c> flow (Ideogram's own hosted API is not reproduced — we use the user's
-/// configured LLM instead):</para>
-/// <list type="number">
-///   <item>Parse the embedded <c>v1.txt</c> system-prompt file into its <c>[SYSTEM]</c> / <c>[USER]</c> blocks.</item>
-///   <item>Build a 2-message chat: system = <c>[SYSTEM]</c>; user = <c>[USER]</c> template with
-///         <c>{{aspect_ratio}}</c> (reduced W:H) and <c>{{original_prompt}}</c> substituted.</item>
-///   <item>Run one non-streaming completion (temperature 1.0, like upstream) and strip any ```json fence.</item>
-///   <item>Round-trip through <see cref="Ideogram4Dialect"/> (Parse → Serialize) to validate and emit the
-///         exact canonical key order the model expects.</item>
-/// </list>
-/// The returned string is the canonical JSON caption, ready to tokenize and feed to the pipeline.
+/// <para><b>Currently gated off</b> behind <c>#if HARTSY_LLM_CORE</c> — see the file-top TODO. Without that
+/// symbol, <see cref="Expand"/> returns the prompt unchanged so the extension builds against any SwarmUI
+/// core. The full flow (a faithful port of upstream <c>ideogram-oss/ideogram4</c>'s <c>magic_prompt.py</c>
+/// + <c>ClaudeOpusMagicPromptV1</c>) is preserved below for restore.</para>
 /// </summary>
 public static class Ideogram4MagicPrompt
 {
-    /// <summary>Upstream uses temperature 1.0 for the Claude-based expanders (<c>magic_prompt.py</c>).</summary>
-    private const double ExpandTemperature = 1.0;
-
-    /// <summary>Upstream <c>openrouter_chat</c> default; the structured caption can be long.</summary>
-    private const int ExpandMaxTokens = 16384;
-
-    private static readonly object _sectionsLock = new();
-    private static (string System, string UserTemplate)? _sections;
-
     /// <summary>True if <paramref name="prompt"/> is already an Ideogram 4 structured JSON caption (e.g. authored
     /// by a prompt-builder UI like SwarmUI-IdeogramPromptBuilder, or pasted by hand). Such a prompt must NOT be
     /// re-expanded through the LLM — that would double-process it and strip its user-drawn bboxes. Cheap shape
@@ -53,10 +57,9 @@ public static class Ideogram4MagicPrompt
             && (prompt.Contains("compositional_deconstruction") || prompt.Contains("high_level_description"));
     }
 
-    /// <summary>Expands <paramref name="plainPrompt"/> into the canonical Ideogram 4 JSON caption via a
-    /// running LLM backend. Throws <see cref="SwarmReadableErrorException"/> if no LLM backend is available.
-    /// If the LLM returns something that won't parse as an Ideogram caption, logs a warning and returns the
-    /// original plain prompt (Ideogram 4 also accepts plain text), so a flaky LLM degrades rather than fails.</summary>
+    /// <summary>Expands <paramref name="plainPrompt"/> into the canonical Ideogram 4 JSON caption via a running
+    /// LLM backend. <b>Gated:</b> when built without <c>HARTSY_LLM_CORE</c> this is a no-op that returns the
+    /// prompt unchanged (Ideogram 4 accepts plain text), pending SwarmUI core's expanded LLM API.</summary>
     public static string Expand(
         string plainPrompt,
         int width,
@@ -65,6 +68,7 @@ public static class Ideogram4MagicPrompt
         Session session,
         Action<string> log)
     {
+#if HARTSY_LLM_CORE
         (string systemPrompt, string userTemplate) = LoadSections();
         string aspectRatio = AspectRatioFromSize(width, height);
         string userMessage = BuildUserMessage(userTemplate, aspectRatio, plainPrompt);
@@ -109,7 +113,23 @@ public static class Ideogram4MagicPrompt
                 $"({ex.Message}); falling back to the plain prompt.");
             return plainPrompt;
         }
+#else
+        // TODO(LLM-core): no-op until SwarmUI core ships the expanded LLM API (see file-top TODO).
+        Logs.Warning("[HartsyInference][Ideogram4] Magic prompt is temporarily disabled (pending the SwarmUI core "
+            + "LLM API); using your prompt as-is. Rebuild with HARTSY_LLM_CORE defined to re-enable.");
+        return plainPrompt;
+#endif
     }
+
+#if HARTSY_LLM_CORE
+    /// <summary>Upstream uses temperature 1.0 for the Claude-based expanders (<c>magic_prompt.py</c>).</summary>
+    private const double ExpandTemperature = 1.0;
+
+    /// <summary>Upstream <c>openrouter_chat</c> default; the structured caption can be long.</summary>
+    private const int ExpandMaxTokens = 16384;
+
+    private static readonly object _sectionsLock = new();
+    private static (string System, string UserTemplate)? _sections;
 
     /// <summary>Mirrors upstream <c>strip_aspect_ratio_and_bboxes(strip_bboxes=True)</c> — the post-step the
     /// Claude-based (i.e. LLM, not hosted-API) expanders run: drop the top-level <c>aspect_ratio</c> key and
@@ -281,4 +301,5 @@ public static class Ideogram4MagicPrompt
         using StreamReader reader = new(stream);
         return reader.ReadToEnd();
     }
+#endif
 }
