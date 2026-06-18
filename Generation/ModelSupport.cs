@@ -27,6 +27,7 @@ public static class ModelSupport
         AuraFlowLoader.AuraFlowCompatClassId,     // "auraflow-v1"
         FLiteLoader.FLiteCompatClassId,           // "f-lite" — wired-untested (no E2E test in HartsyInference yet)
         Ideogram4Loader.Ideogram4CompatClassId,   // "ideogram-4" — dual 9.3B DiT; ≥22 GB VRAM gate at load time; non-commercial license
+        ErnieImageLoader.ErnieImageCompatClassId, // "ernie-image" — Baidu ~8B single-stream DiT + Ministral-3-3B TE + Flux.2 VAE (Apache-2.0)
         ZImageLoader.ZImageCompatClassId,         // "z-image"
         AnimaLoader.AnimaCompatClassId,           // "anima" — Cosmos-Predict2-2B family + LlmAdapter
         HiDreamLoader.HiDreamI1CompatClassId,     // "hidream-i1" — MMDiT + 4 text encoders (CLIP-L/G, T5-XXL, Llama-3.1)
@@ -60,11 +61,8 @@ public static class ModelSupport
         ["kandinsky5-imglite"] = "Kandinsky 5 Image Lite (engine pipeline needs pre-computed Qwen2.5-VL + CLIP-L embeddings — live encode path unverified)",
         ["omnigen-2"] = "OmniGen 2 (engine pipeline needs pre-computed Qwen2.5-VL embeddings — live encode path unverified)",
         ["lumina-2"] = "Lumina-Image-2.0 (no Gemma-2 tokenizer/encoder path in HartsyInference yet)",
-        // ErnieImage: pipeline + Ministral3B encoder preset both exist, but the HartsyInference
-        // upstream test uses HARDCODED token IDs ([1,2,3,...]) — there is no real Ernie tokenizer
-        // implementation. Wiring a loader without a tokenizer means the user's prompt would
-        // never reach the model. Refuse cleanly until HartsyInference ships an Ernie tokenizer.
-        ["ernie-image"] = "ErnieImage (no tokenizer in HartsyInference yet — prompts can't be encoded)",
+        // ErnieImage: WIRED 2026-06-17 (ErnieImageLoader) — engine shipped ErnieTokenizer in alpha.8, so it
+        // moved to _supportedArchs above. (Was blocked on the missing real Ernie tokenizer.)
         // YuE: the extension loader (YueLoader.cs) is fully written, but HartsyInference has no
         // YueTokenizer (the mm SentencePiece wrapper) — lyrics can't be encoded. Same class of
         // blocker as Ernie. Lift by restoring the TODO(engine-blocked) lines in YueLoader.cs and

@@ -391,6 +391,14 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                     _cache.PutIdeogram4(entry);
                 });
             }
+            else if (compat == ErnieImageLoader.ErnieImageCompatClassId)
+            {
+                await Task.Run(() =>
+                {
+                    ErnieImageCacheEntry entry = ErnieImageLoader.Load(_backend, model, input, msg => AddLoadStatus(msg));
+                    _cache.PutErnieImage(entry);
+                });
+            }
             else if (compat == ZImageLoader.ZImageCompatClassId)
             {
                 await Task.Run(() =>
@@ -737,6 +745,12 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                     // LoRA / img2img / inpaint / IPA / ControlNet not implemented for Ideogram 4 —
                     // refused upfront in IsValidForThisBackend (not in any per-feature allow list).
                     return Ideogram4Loader.Generate(entry, input, progressBridge, cancel);
+                }
+                if (compat == ErnieImageLoader.ErnieImageCompatClassId)
+                {
+                    ErnieImageCacheEntry entry = _cache.TryGetErnieImage(model.Name)
+                        ?? throw new InvalidOperationException("ERNIE-Image model loaded but not in cache.");
+                    return ErnieImageLoader.Generate(entry, input, progressBridge, cancel);
                 }
                 if (compat == ZImageLoader.ZImageCompatClassId)
                 {
@@ -1336,6 +1350,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             AuraFlowLoader.AuraFlowCompatClassId => _cache.TryGetAuraFlow(modelName) is not null,
             FLiteLoader.FLiteCompatClassId => _cache.TryGetFLite(modelName) is not null,
             Ideogram4Loader.Ideogram4CompatClassId => _cache.TryGetIdeogram4(modelName) is not null,
+            ErnieImageLoader.ErnieImageCompatClassId => _cache.TryGetErnieImage(modelName) is not null,
             ZImageLoader.ZImageCompatClassId => _cache.TryGetZImage(modelName) is not null,
             AnimaLoader.AnimaCompatClassId => _cache.TryGetAnima(modelName) is not null,
             HiDreamLoader.HiDreamI1CompatClassId => _cache.TryGetHiDream(modelName) is not null,

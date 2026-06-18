@@ -18,6 +18,7 @@ public sealed class PipelineCache
     private readonly Dictionary<string, AuraFlowCacheEntry> _auraFlow = new();
     private readonly Dictionary<string, FLiteCacheEntry> _fLite = new();
     private readonly Dictionary<string, Ideogram4CacheEntry> _ideogram4 = new();
+    private readonly Dictionary<string, ErnieImageCacheEntry> _ernieImage = new();
     private readonly Dictionary<string, ChromaRadianceCacheEntry> _chromaRadiance = new();
     private readonly Dictionary<string, ZetaChromaCacheEntry> _zetaChroma = new();
     private readonly Dictionary<string, ZImageCacheEntry> _zImage = new();
@@ -51,6 +52,7 @@ public sealed class PipelineCache
     public AuraFlowCacheEntry TryGetAuraFlow(string modelName) => Touch(_auraFlow, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
     public FLiteCacheEntry TryGetFLite(string modelName) => Touch(_fLite, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
     public Ideogram4CacheEntry TryGetIdeogram4(string modelName) => Touch(_ideogram4, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
+    public ErnieImageCacheEntry TryGetErnieImage(string modelName) => Touch(_ernieImage, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
     public ChromaRadianceCacheEntry TryGetChromaRadiance(string modelName) => Touch(_chromaRadiance, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
     public ZetaChromaCacheEntry TryGetZetaChroma(string modelName) => Touch(_zetaChroma, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
     public ZImageCacheEntry TryGetZImage(string modelName) => Touch(_zImage, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
@@ -77,6 +79,7 @@ public sealed class PipelineCache
     public void PutAuraFlow(AuraFlowCacheEntry entry) => Put(_auraFlow, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
     public void PutFLite(FLiteCacheEntry entry) => Put(_fLite, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
     public void PutIdeogram4(Ideogram4CacheEntry entry) => Put(_ideogram4, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
+    public void PutErnieImage(ErnieImageCacheEntry entry) => Put(_ernieImage, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
     public void PutChromaRadiance(ChromaRadianceCacheEntry entry) => Put(_chromaRadiance, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
     public void PutZetaChroma(ZetaChromaCacheEntry entry) => Put(_zetaChroma, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
     public void PutZImage(ZImageCacheEntry entry) => Put(_zImage, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
@@ -102,7 +105,7 @@ public sealed class PipelineCache
     {
         lock (_lock)
         {
-            if (map.TryGetValue(key, out var entry))
+            if (map.TryGetValue(key, out TEntry entry))
             {
                 setTime(entry, DateTime.UtcNow);
                 return entry;
@@ -119,7 +122,7 @@ public sealed class PipelineCache
             // If an old entry with the same name lives in this map, dispose it first
             // (replacement). Cross-map collisions (same name in two arch maps) are
             // unlikely; we leave them.
-            if (map.TryGetValue(key, out var old) && old is IDisposable oldDisp)
+            if (map.TryGetValue(key, out TEntry old) && old is IDisposable oldDisp)
             {
                 oldDisp.Dispose();
             }
@@ -129,7 +132,7 @@ public sealed class PipelineCache
         }
     }
 
-    private int TotalCount => _flux.Count + _flux2.Count + _chroma.Count + _chromaRadiance.Count + _zetaChroma.Count + _auraFlow.Count + _fLite.Count + _ideogram4.Count + _zImage.Count + _anima.Count + _hiDream.Count + _qwenImage.Count + _sd15.Count + _sdxl.Count + _sd3.Count + _wanVideo.Count + _ltxVideo.Count + _aceStep.Count + _aceStep15.Count + _musicGen.Count + _yue.Count + _lance.Count + _lens.Count + _refiner.Count + _ipAdapter.Count;
+    private int TotalCount => _flux.Count + _flux2.Count + _chroma.Count + _chromaRadiance.Count + _zetaChroma.Count + _auraFlow.Count + _fLite.Count + _ideogram4.Count + _ernieImage.Count + _zImage.Count + _anima.Count + _hiDream.Count + _qwenImage.Count + _sd15.Count + _sdxl.Count + _sd3.Count + _wanVideo.Count + _ltxVideo.Count + _aceStep.Count + _aceStep15.Count + _musicGen.Count + _yue.Count + _lance.Count + _lens.Count + _refiner.Count + _ipAdapter.Count;
 
     /// <summary>Evict the globally-oldest entry across all architecture maps until we're
     /// at or under <see cref="_maxEntries"/>.</summary>
@@ -140,7 +143,7 @@ public sealed class PipelineCache
             DateTime oldestTime = DateTime.MaxValue;
             Action evictAction = null;
 
-            foreach (var kv in _flux)
+            foreach (KeyValuePair<string, FluxCacheEntry> kv in _flux)
             {
                 if (kv.Value.LastUsedUtc < oldestTime)
                 {
@@ -149,7 +152,7 @@ public sealed class PipelineCache
                     evictAction = () => { _flux[key].Dispose(); _flux.Remove(key); };
                 }
             }
-            foreach (var kv in _flux2)
+            foreach (KeyValuePair<string, Flux2CacheEntry> kv in _flux2)
             {
                 if (kv.Value.LastUsedUtc < oldestTime)
                 {
@@ -158,7 +161,7 @@ public sealed class PipelineCache
                     evictAction = () => { _flux2[key].Dispose(); _flux2.Remove(key); };
                 }
             }
-            foreach (var kv in _chroma)
+            foreach (KeyValuePair<string, ChromaCacheEntry> kv in _chroma)
             {
                 if (kv.Value.LastUsedUtc < oldestTime)
                 {
@@ -167,7 +170,7 @@ public sealed class PipelineCache
                     evictAction = () => { _chroma[key].Dispose(); _chroma.Remove(key); };
                 }
             }
-            foreach (var kv in _auraFlow)
+            foreach (KeyValuePair<string, AuraFlowCacheEntry> kv in _auraFlow)
             {
                 if (kv.Value.LastUsedUtc < oldestTime)
                 {
@@ -176,7 +179,7 @@ public sealed class PipelineCache
                     evictAction = () => { _auraFlow[key].Dispose(); _auraFlow.Remove(key); };
                 }
             }
-            foreach (var kv in _fLite)
+            foreach (KeyValuePair<string, FLiteCacheEntry> kv in _fLite)
             {
                 if (kv.Value.LastUsedUtc < oldestTime)
                 {
@@ -185,7 +188,7 @@ public sealed class PipelineCache
                     evictAction = () => { _fLite[key].Dispose(); _fLite.Remove(key); };
                 }
             }
-            foreach (var kv in _ideogram4)
+            foreach (KeyValuePair<string, Ideogram4CacheEntry> kv in _ideogram4)
             {
                 if (kv.Value.LastUsedUtc < oldestTime)
                 {
@@ -194,7 +197,16 @@ public sealed class PipelineCache
                     evictAction = () => { _ideogram4[key].Dispose(); _ideogram4.Remove(key); };
                 }
             }
-            foreach (var kv in _chromaRadiance)
+            foreach (KeyValuePair<string, ErnieImageCacheEntry> kv in _ernieImage)
+            {
+                if (kv.Value.LastUsedUtc < oldestTime)
+                {
+                    oldestTime = kv.Value.LastUsedUtc;
+                    string key = kv.Key;
+                    evictAction = () => { _ernieImage[key].Dispose(); _ernieImage.Remove(key); };
+                }
+            }
+            foreach (KeyValuePair<string, ChromaRadianceCacheEntry> kv in _chromaRadiance)
             {
                 if (kv.Value.LastUsedUtc < oldestTime)
                 {
@@ -203,7 +215,7 @@ public sealed class PipelineCache
                     evictAction = () => { _chromaRadiance[key].Dispose(); _chromaRadiance.Remove(key); };
                 }
             }
-            foreach (var kv in _zetaChroma)
+            foreach (KeyValuePair<string, ZetaChromaCacheEntry> kv in _zetaChroma)
             {
                 if (kv.Value.LastUsedUtc < oldestTime)
                 {
@@ -212,7 +224,7 @@ public sealed class PipelineCache
                     evictAction = () => { _zetaChroma[key].Dispose(); _zetaChroma.Remove(key); };
                 }
             }
-            foreach (var kv in _zImage)
+            foreach (KeyValuePair<string, ZImageCacheEntry> kv in _zImage)
             {
                 if (kv.Value.LastUsedUtc < oldestTime)
                 {
@@ -221,7 +233,7 @@ public sealed class PipelineCache
                     evictAction = () => { _zImage[key].Dispose(); _zImage.Remove(key); };
                 }
             }
-            foreach (var kv in _anima)
+            foreach (KeyValuePair<string, AnimaCacheEntry> kv in _anima)
             {
                 if (kv.Value.LastUsedUtc < oldestTime)
                 {
@@ -230,7 +242,7 @@ public sealed class PipelineCache
                     evictAction = () => { _anima[key].Dispose(); _anima.Remove(key); };
                 }
             }
-            foreach (var kv in _hiDream)
+            foreach (KeyValuePair<string, HiDreamCacheEntry> kv in _hiDream)
             {
                 if (kv.Value.LastUsedUtc < oldestTime)
                 {
@@ -239,7 +251,7 @@ public sealed class PipelineCache
                     evictAction = () => { _hiDream[key].Dispose(); _hiDream.Remove(key); };
                 }
             }
-            foreach (var kv in _qwenImage)
+            foreach (KeyValuePair<string, QwenImageCacheEntry> kv in _qwenImage)
             {
                 if (kv.Value.LastUsedUtc < oldestTime)
                 {
@@ -248,7 +260,7 @@ public sealed class PipelineCache
                     evictAction = () => { _qwenImage[key].Dispose(); _qwenImage.Remove(key); };
                 }
             }
-            foreach (var kv in _sd15)
+            foreach (KeyValuePair<string, Sd15CacheEntry> kv in _sd15)
             {
                 if (kv.Value.LastUsedUtc < oldestTime)
                 {
@@ -257,7 +269,7 @@ public sealed class PipelineCache
                     evictAction = () => { _sd15[key].Dispose(); _sd15.Remove(key); };
                 }
             }
-            foreach (var kv in _sdxl)
+            foreach (KeyValuePair<string, SdxlCacheEntry> kv in _sdxl)
             {
                 if (kv.Value.LastUsedUtc < oldestTime)
                 {
@@ -266,7 +278,7 @@ public sealed class PipelineCache
                     evictAction = () => { _sdxl[key].Dispose(); _sdxl.Remove(key); };
                 }
             }
-            foreach (var kv in _sd3)
+            foreach (KeyValuePair<string, Sd3CacheEntry> kv in _sd3)
             {
                 if (kv.Value.LastUsedUtc < oldestTime)
                 {
@@ -275,7 +287,7 @@ public sealed class PipelineCache
                     evictAction = () => { _sd3[key].Dispose(); _sd3.Remove(key); };
                 }
             }
-            foreach (var kv in _wanVideo)
+            foreach (KeyValuePair<string, WanVideoCacheEntry> kv in _wanVideo)
             {
                 if (kv.Value.LastUsedUtc < oldestTime)
                 {
@@ -284,7 +296,7 @@ public sealed class PipelineCache
                     evictAction = () => { _wanVideo[key].Dispose(); _wanVideo.Remove(key); };
                 }
             }
-            foreach (var kv in _ltxVideo)
+            foreach (KeyValuePair<string, LtxVideoCacheEntry> kv in _ltxVideo)
             {
                 if (kv.Value.LastUsedUtc < oldestTime)
                 {
@@ -293,7 +305,7 @@ public sealed class PipelineCache
                     evictAction = () => { _ltxVideo[key].Dispose(); _ltxVideo.Remove(key); };
                 }
             }
-            foreach (var kv in _aceStep)
+            foreach (KeyValuePair<string, AceStepCacheEntry> kv in _aceStep)
             {
                 if (kv.Value.LastUsedUtc < oldestTime)
                 {
@@ -302,7 +314,7 @@ public sealed class PipelineCache
                     evictAction = () => { _aceStep[key].Dispose(); _aceStep.Remove(key); };
                 }
             }
-            foreach (var kv in _aceStep15)
+            foreach (KeyValuePair<string, AceStep15CacheEntry> kv in _aceStep15)
             {
                 if (kv.Value.LastUsedUtc < oldestTime)
                 {
@@ -311,7 +323,7 @@ public sealed class PipelineCache
                     evictAction = () => { _aceStep15[key].Dispose(); _aceStep15.Remove(key); };
                 }
             }
-            foreach (var kv in _musicGen)
+            foreach (KeyValuePair<string, MusicGenCacheEntry> kv in _musicGen)
             {
                 if (kv.Value.LastUsedUtc < oldestTime)
                 {
@@ -320,7 +332,7 @@ public sealed class PipelineCache
                     evictAction = () => { _musicGen[key].Dispose(); _musicGen.Remove(key); };
                 }
             }
-            foreach (var kv in _yue)
+            foreach (KeyValuePair<string, YueCacheEntry> kv in _yue)
             {
                 if (kv.Value.LastUsedUtc < oldestTime)
                 {
@@ -329,7 +341,7 @@ public sealed class PipelineCache
                     evictAction = () => { _yue[key].Dispose(); _yue.Remove(key); };
                 }
             }
-            foreach (var kv in _lance)
+            foreach (KeyValuePair<string, LanceCacheEntry> kv in _lance)
             {
                 if (kv.Value.LastUsedUtc < oldestTime)
                 {
@@ -338,7 +350,7 @@ public sealed class PipelineCache
                     evictAction = () => { _lance[key].Dispose(); _lance.Remove(key); };
                 }
             }
-            foreach (var kv in _lens)
+            foreach (KeyValuePair<string, LensCacheEntry> kv in _lens)
             {
                 if (kv.Value.LastUsedUtc < oldestTime)
                 {
@@ -347,7 +359,7 @@ public sealed class PipelineCache
                     evictAction = () => { _lens[key].Dispose(); _lens.Remove(key); };
                 }
             }
-            foreach (var kv in _refiner)
+            foreach (KeyValuePair<string, RefinerCacheEntry> kv in _refiner)
             {
                 if (kv.Value.LastUsedUtc < oldestTime)
                 {
@@ -356,7 +368,7 @@ public sealed class PipelineCache
                     evictAction = () => { _refiner[key].Dispose(); _refiner.Remove(key); };
                 }
             }
-            foreach (var kv in _ipAdapter)
+            foreach (KeyValuePair<string, IpAdapterCacheEntry> kv in _ipAdapter)
             {
                 if (kv.Value.LastUsedUtc < oldestTime)
                 {
@@ -376,37 +388,39 @@ public sealed class PipelineCache
         lock (_lock)
         {
             if (TotalCount == 0) return false;
-            foreach (var entry in _flux.Values) entry.Dispose();
-            foreach (var entry in _flux2.Values) entry.Dispose();
-            foreach (var entry in _chroma.Values) entry.Dispose();
-            foreach (var entry in _auraFlow.Values) entry.Dispose();
-            foreach (var entry in _fLite.Values) entry.Dispose();
-            foreach (var entry in _ideogram4.Values) entry.Dispose();
-            foreach (var entry in _chromaRadiance.Values) entry.Dispose();
-            foreach (var entry in _zetaChroma.Values) entry.Dispose();
-            foreach (var entry in _zImage.Values) entry.Dispose();
-            foreach (var entry in _anima.Values) entry.Dispose();
-            foreach (var entry in _hiDream.Values) entry.Dispose();
-            foreach (var entry in _qwenImage.Values) entry.Dispose();
-            foreach (var entry in _sd15.Values) entry.Dispose();
-            foreach (var entry in _sdxl.Values) entry.Dispose();
-            foreach (var entry in _sd3.Values) entry.Dispose();
-            foreach (var entry in _wanVideo.Values) entry.Dispose();
-            foreach (var entry in _ltxVideo.Values) entry.Dispose();
-            foreach (var entry in _aceStep.Values) entry.Dispose();
-            foreach (var entry in _aceStep15.Values) entry.Dispose();
-            foreach (var entry in _musicGen.Values) entry.Dispose();
-            foreach (var entry in _yue.Values) entry.Dispose();
-            foreach (var entry in _lance.Values) entry.Dispose();
-            foreach (var entry in _lens.Values) entry.Dispose();
-            foreach (var entry in _refiner.Values) entry.Dispose();
-            foreach (var entry in _ipAdapter.Values) entry.Dispose();
+            foreach (FluxCacheEntry entry in _flux.Values) entry.Dispose();
+            foreach (Flux2CacheEntry entry in _flux2.Values) entry.Dispose();
+            foreach (ChromaCacheEntry entry in _chroma.Values) entry.Dispose();
+            foreach (AuraFlowCacheEntry entry in _auraFlow.Values) entry.Dispose();
+            foreach (FLiteCacheEntry entry in _fLite.Values) entry.Dispose();
+            foreach (Ideogram4CacheEntry entry in _ideogram4.Values) entry.Dispose();
+            foreach (ErnieImageCacheEntry entry in _ernieImage.Values) entry.Dispose();
+            foreach (ChromaRadianceCacheEntry entry in _chromaRadiance.Values) entry.Dispose();
+            foreach (ZetaChromaCacheEntry entry in _zetaChroma.Values) entry.Dispose();
+            foreach (ZImageCacheEntry entry in _zImage.Values) entry.Dispose();
+            foreach (AnimaCacheEntry entry in _anima.Values) entry.Dispose();
+            foreach (HiDreamCacheEntry entry in _hiDream.Values) entry.Dispose();
+            foreach (QwenImageCacheEntry entry in _qwenImage.Values) entry.Dispose();
+            foreach (Sd15CacheEntry entry in _sd15.Values) entry.Dispose();
+            foreach (SdxlCacheEntry entry in _sdxl.Values) entry.Dispose();
+            foreach (Sd3CacheEntry entry in _sd3.Values) entry.Dispose();
+            foreach (WanVideoCacheEntry entry in _wanVideo.Values) entry.Dispose();
+            foreach (LtxVideoCacheEntry entry in _ltxVideo.Values) entry.Dispose();
+            foreach (AceStepCacheEntry entry in _aceStep.Values) entry.Dispose();
+            foreach (AceStep15CacheEntry entry in _aceStep15.Values) entry.Dispose();
+            foreach (MusicGenCacheEntry entry in _musicGen.Values) entry.Dispose();
+            foreach (YueCacheEntry entry in _yue.Values) entry.Dispose();
+            foreach (LanceCacheEntry entry in _lance.Values) entry.Dispose();
+            foreach (LensCacheEntry entry in _lens.Values) entry.Dispose();
+            foreach (RefinerCacheEntry entry in _refiner.Values) entry.Dispose();
+            foreach (IpAdapterCacheEntry entry in _ipAdapter.Values) entry.Dispose();
             _flux.Clear();
             _flux2.Clear();
             _chroma.Clear();
             _auraFlow.Clear();
             _fLite.Clear();
             _ideogram4.Clear();
+            _ernieImage.Clear();
             _chromaRadiance.Clear();
             _zetaChroma.Clear();
             _zImage.Clear();
