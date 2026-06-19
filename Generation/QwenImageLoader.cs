@@ -6,6 +6,7 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
+using HartsyInference.Diffusion.Models.Vae.QwenImage;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.ModelHandler.CheckpointConverters;
@@ -90,7 +91,7 @@ public static class QwenImageLoader
 
         // 3. Resolve + load the Qwen-Image VAE (shared with Anima).
         log("Building Qwen-Image VAE decoder (16-channel)...");
-        VaeDecoder vae = new VaeDecoder(VaeConfig.QwenImage);
+        QwenImageVaeDecoder vae = new QwenImageVaeDecoder(VaeConfig.QwenImage);
         if (converted.Vae.Count > 0)
         {
             vae.LoadWeights(CastToF32(converted.Vae));
@@ -234,7 +235,7 @@ public sealed class QwenImageCacheEntry : IDisposable
     public required Qwen3Tokenizer Tokenizer { get; init; }
     public required LlamaStyleEncoder TextEncoder { get; init; }
     public required QwenImageTransformer Transformer { get; init; }
-    public required VaeDecoder Vae { get; init; }
+    public required QwenImageVaeDecoder Vae { get; init; }
     public required SafeTensorsLoader CheckpointLoader { get; init; }
     public SafeTensorsLoader EncoderLoader { get; init; }
     public SafeTensorsLoader VaeLoader { get; init; }
