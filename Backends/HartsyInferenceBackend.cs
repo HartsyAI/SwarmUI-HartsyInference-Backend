@@ -693,7 +693,11 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         // current generation releases the lock. Acquire BEFORE touching _cancelCts so the per-gen token
         // belongs to the job that actually holds the GPU.
         await _genLock.WaitAsync();
-        _cancelCts = new CancellationTokenSource();
+        // Link to the input's InterruptToken (session.SessInterrupt) so the gen-page "stop"
+        // button actually cancels us — that's the token Swarm trips on stop, exactly like the
+        // ComfyUI backend passes user_input.InterruptToken into its job loop. Without the link
+        // _cancelCts only ever fired from Shutdown(), so stop did nothing mid-generation.
+        _cancelCts = CancellationTokenSource.CreateLinkedTokenSource(input.InterruptToken);
         long startMs = Environment.TickCount64;
 
         try
