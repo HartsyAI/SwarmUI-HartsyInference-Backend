@@ -1,7 +1,10 @@
 using System.IO;
+using System.Net.Http;
+using System.Reflection;
 using FreneticUtilities.FreneticDataSyntax;
 using Newtonsoft.Json.Linq;
 using SwarmUI.Backends;
+using SwarmUI.Core;
 using SwarmUI.Text2Image;
 using SwarmUI.Utils;
 using Hartsy.Extensions.HartsyInferenceBackend.Generation;
@@ -45,6 +48,9 @@ public class HartsyInferenceBackend : AbstractT2IBackend
 
         [ConfigComment("Native FP8 GEMM for fp8 checkpoints (Ada/Hopper, SM 8.9+). When on, fp8 weights are matrix-multiplied directly in fp8 (via cuBLASLt) instead of being upcast to fp16 — roughly half the transformer VRAM and faster on supported GPUs. 'auto' (default) enables it on SM 8.9+ GPUs; 'on' forces it; 'off' always upcasts to fp16. On older GPUs (Ampere and below) the engine falls back to fp16 automatically regardless of this setting.")]
         public string NativeFp8Gemm = "auto";
+
+        [ConfigComment("Whether to auto-update the HartsyInference engine (the in-process NuGet library) when this backend starts.\n'false' (default): never check.\n'true': on start, check NuGet for a newer engine build and, if found, download + rebuild the extension against it.\n'aggressive': same as 'true' but also clears the NuGet caches first (fixes a stuck floating-version restore) and automatically restarts SwarmUI to load the new build.\nThe engine is loaded in-process, so a staged update applies on the NEXT SwarmUI restart (a loaded DLL can't hot-swap). With 'true' you'll get a log line telling you to restart; 'aggressive' restarts for you.")]
+        public string AutoUpdate = "false";
     }
 
     public HartsyInferenceBackendSettings Settings => SettingsRaw as HartsyInferenceBackendSettings;
@@ -132,6 +138,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     public override async Task Init()
     {
         EnsureLoggerWired();
+        await MaybeAutoUpdateEngine();
         try
         {
             string requested = Settings?.ComputeBackend?.ToLowerInvariant() ?? "auto";
@@ -217,6 +224,148 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         "taesd" => PreviewEncoder.Method.Taesd,
         _ => PreviewEncoder.Method.Latent2Rgb,
     };
+
+    /// <summary>Checks NuGet for a newer HartsyInference engine and, when the <c>AutoUpdate</c> setting opts in,
+    /// rebuilds this extension against it. Mirrors the ComfyUI backend's "update on launch" toggle — but because the
+    /// engine is an <b>in-process</b> library (not an external process Swarm can relaunch), a fetched update is
+    /// <i>staged</i> into the extension's build output and only takes effect on the next SwarmUI start. 'aggressive'
+    /// clears NuGet caches and calls <see cref="Program.RequestRestart"/> so the new build loads automatically.
+    /// Best-effort: any failure is logged and the current engine keeps running.</summary>
+    private async Task MaybeAutoUpdateEngine()
+    {
+        string mode = (Settings?.AutoUpdate ?? "false").Trim().ToLowerInvariant();
+        if (mode is "false" or "" or "0" or "no" or "off") return;
+        bool aggressive = mode is "aggressive" or "force";
+        try
+        {
+            string loaded = LoadedEngineVersion();
+            string latest = await LatestEnginePackageVersion();
+            AddLoadStatus($"Auto-update: loaded engine={loaded ?? "unknown"}, latest published={latest ?? "unknown"}.");
+            if (latest is null) { AddLoadStatus("Auto-update: could not query NuGet; skipping."); return; }
+            if (loaded is not null && !IsNewerAlpha(latest, loaded))
+            {
+                AddLoadStatus("Auto-update: engine is already up to date.");
+                return;
+            }
+
+            string csproj = ExtensionProjectPath();
+            if (csproj is null)
+            {
+                Logs.Warning("[HartsyInference] Auto-update: extension .csproj not found next to the assembly; cannot rebuild.");
+                return;
+            }
+            AddLoadStatus($"Auto-update: rebuilding extension against engine {latest} (this can take a minute)...");
+            string dir = Path.GetDirectoryName(csproj);
+            if (aggressive)
+            {
+                await RunDotnet("nuget locals http-cache --clear", dir);
+            }
+            // Force-evaluate so the floating "1.0.0-alpha.*" reference re-resolves to the newest published build.
+            (int code, string output) = await RunDotnet(
+                $"build \"{csproj}\" -c Release /p:RestoreForceEvaluate=true", dir);
+            if (code != 0)
+            {
+                Logs.Error($"[HartsyInference] Auto-update build failed (exit {code}):\n{output}");
+                AddLoadStatus("Auto-update: rebuild failed — continuing on the current engine.");
+                return;
+            }
+            Logs.Warning($"[HartsyInference] Engine updated to {latest}. The new DLLs are staged; a SwarmUI RESTART is required to load them (an in-process library can't hot-swap).");
+            AddLoadStatus($"Auto-update: engine {latest} staged — restart SwarmUI to apply.");
+            if (aggressive)
+            {
+                Logs.Warning("[HartsyInference] AutoUpdate=aggressive — requesting a SwarmUI restart to load the new engine.");
+                Program.RequestRestart();
+            }
+        }
+        catch (Exception ex)
+        {
+            Logs.Error($"[HartsyInference] Auto-update failed: {ex.ReadableString()}");
+            AddLoadStatus("Auto-update: failed (continuing with the current engine).");
+        }
+    }
+
+    /// <summary>The NuGet version baked into the loaded engine assembly (e.g. "1.0.0-alpha.11"), or null.</summary>
+    private static string LoadedEngineVersion()
+    {
+        System.Reflection.Assembly asm = typeof(IBackend).Assembly;
+        string info = asm.GetCustomAttribute<System.Reflection.AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+        // Informational version may carry a build-metadata suffix ("1.0.0-alpha.11+abc123"); trim it.
+        if (info is not null) { int plus = info.IndexOf('+'); if (plus >= 0) info = info[..plus]; }
+        return info;
+    }
+
+    /// <summary>Queries NuGet's flat-container index for the highest published HartsyInference version.</summary>
+    private static async Task<string> LatestEnginePackageVersion()
+    {
+        try
+        {
+            using HttpClient http = new() { Timeout = TimeSpan.FromSeconds(20) };
+            string json = await http.GetStringAsync("https://api.nuget.org/v3-flatcontainer/hartsyinference/index.json");
+            JObject parsed = JObject.Parse(json);
+            JArray versions = parsed["versions"] as JArray;
+            if (versions is null) return null;
+            string best = null;
+            foreach (JToken v in versions)
+            {
+                string s = v.ToString();
+                if (best is null || IsNewerAlpha(s, best)) best = s;
+            }
+            return best;
+        }
+        catch (Exception ex)
+        {
+            Logs.Warning($"[HartsyInference] Auto-update: NuGet version query failed: {ex.ReadableString()}");
+            return null;
+        }
+    }
+
+    /// <summary>True if <paramref name="candidate"/> is a newer "1.0.0-alpha.N" than <paramref name="current"/>
+    /// (compares the trailing alpha number; non-alpha or unparseable forms fall back to ordinal string compare).</summary>
+    private static bool IsNewerAlpha(string candidate, string current)
+    {
+        int Num(string v)
+        {
+            int dash = v.LastIndexOf("alpha.", StringComparison.OrdinalIgnoreCase);
+            if (dash < 0) return -1;
+            string tail = v[(dash + "alpha.".Length)..];
+            int dot = tail.IndexOfAny(['.', '-', '+']);
+            if (dot >= 0) tail = tail[..dot];
+            return int.TryParse(tail, out int n) ? n : -1;
+        }
+        int a = Num(candidate), b = Num(current);
+        if (a >= 0 && b >= 0) return a > b;
+        return string.CompareOrdinal(candidate, current) > 0;
+    }
+
+    /// <summary>Locates this extension's <c>.csproj</c> by walking up from the loaded assembly's directory.</summary>
+    private static string ExtensionProjectPath()
+    {
+        string dir = Path.GetDirectoryName(typeof(HartsyInferenceBackend).Assembly.Location);
+        for (int i = 0; i < 8 && dir is not null; i++)
+        {
+            string[] found = Directory.GetFiles(dir, "*.csproj", SearchOption.TopDirectoryOnly);
+            if (found.Length > 0) return found[0];
+            dir = Path.GetDirectoryName(dir);
+        }
+        return null;
+    }
+
+    /// <summary>Runs <c>dotnet &lt;args&gt;</c> in <paramref name="workDir"/> and returns (exitCode, combined output).</summary>
+    private static async Task<(int Code, string Output)> RunDotnet(string args, string workDir)
+    {
+        System.Diagnostics.ProcessStartInfo psi = new("dotnet", args)
+        {
+            WorkingDirectory = workDir,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+        using System.Diagnostics.Process proc = System.Diagnostics.Process.Start(psi);
+        string stdout = await proc.StandardOutput.ReadToEndAsync();
+        string stderr = await proc.StandardError.ReadToEndAsync();
+        await proc.WaitForExitAsync();
+        return (proc.ExitCode, (stdout + "\n" + stderr).Trim());
+    }
 
     /// <summary>Parse the <c>GPU_ID</c> setting (mirrors Comfy's GPU_ID field) into a device ordinal.
     /// Accepts a single number ("0", "1", …). A Comfy-style "0,1" list is tolerated but only the
