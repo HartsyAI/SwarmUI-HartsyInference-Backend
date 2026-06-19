@@ -34,6 +34,7 @@ public static class ModelSupport
         QwenImageLoader.QwenImageCompatClassId,   // "qwen-image" — 20B MMDiT + Qwen2.5-VL-7B encoder
         WanVideoLoader.Wan22_5BCompatClassId,     // "wan-22-5b" — Wan2.2 TI2V-5B text-to-video (I2V pending VAE encoder)
         LtxVideoLoader.LtxVideoCompatClassId,     // "lightricks-ltx-video" — LTX-Video 0.9 single-file text-to-video
+        LtxVideo2Loader.LtxVideo2CompatClassId,   // "lightricks-ltx-video-2" — LTX-2.3 22B dual-stream text-to-video+audio (validation-pending)
         AceStepLoader.AceStepCompatClassId,       // "ace-step-1_5" — v1 checkpoints route to AceStepLoader, real v1.5
                                                   // checkpoints to AceStep15Loader (2B turbo, validation-pending numerics)
         // MusicGenLoader.MusicGenCompatClassId — moved to _pendingArchs until the engine ships

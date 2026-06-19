@@ -447,6 +447,14 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                     _cache.PutLtxVideo(entry);
                 });
             }
+            else if (compat == LtxVideo2Loader.LtxVideo2CompatClassId)
+            {
+                await Task.Run(() =>
+                {
+                    LtxVideo2CacheEntry entry = LtxVideo2Loader.Load(_backend, model, input, msg => AddLoadStatus(msg));
+                    _cache.PutLtxVideo2(entry);
+                });
+            }
             else if (compat == AceStepLoader.AceStepCompatClassId)
             {
                 await Task.Run(() =>
@@ -795,6 +803,12 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                         ?? throw new InvalidOperationException("LTX-Video model loaded but not in cache.");
                     // I2V / LoRA / audio not implemented for LTX — refused upfront in IsValidForThisBackend.
                     return LtxVideoLoader.Generate(entry, _backend, input, progressBridge, cancel);
+                }
+                if (compat == LtxVideo2Loader.LtxVideo2CompatClassId)
+                {
+                    LtxVideo2CacheEntry entry = _cache.TryGetLtxVideo2(model.Name)
+                        ?? throw new InvalidOperationException("LTX-2 model loaded but not in cache.");
+                    return LtxVideo2Loader.Generate(entry, _backend, input, progressBridge, cancel);
                 }
                 if (compat == AceStepLoader.AceStepCompatClassId)
                 {

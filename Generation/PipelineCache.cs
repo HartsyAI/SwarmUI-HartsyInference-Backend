@@ -30,6 +30,7 @@ public sealed class PipelineCache
     private readonly Dictionary<string, Sd3CacheEntry> _sd3 = new();
     private readonly Dictionary<string, WanVideoCacheEntry> _wanVideo = new();
     private readonly Dictionary<string, LtxVideoCacheEntry> _ltxVideo = new();
+    private readonly Dictionary<string, LtxVideo2CacheEntry> _ltxVideo2 = new();
     private readonly Dictionary<string, AceStepCacheEntry> _aceStep = new();
     private readonly Dictionary<string, AceStep15CacheEntry> _aceStep15 = new();
     private readonly Dictionary<string, MusicGenCacheEntry> _musicGen = new();
@@ -64,6 +65,7 @@ public sealed class PipelineCache
     public Sd3CacheEntry TryGetSd3(string modelName) => Touch(_sd3, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
     public WanVideoCacheEntry TryGetWanVideo(string modelName) => Touch(_wanVideo, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
     public LtxVideoCacheEntry TryGetLtxVideo(string modelName) => Touch(_ltxVideo, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
+    public LtxVideo2CacheEntry TryGetLtxVideo2(string modelName) => Touch(_ltxVideo2, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
     public AceStepCacheEntry TryGetAceStep(string modelName) => Touch(_aceStep, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
     public AceStep15CacheEntry TryGetAceStep15(string modelName) => Touch(_aceStep15, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
     public MusicGenCacheEntry TryGetMusicGen(string modelName) => Touch(_musicGen, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
@@ -91,6 +93,7 @@ public sealed class PipelineCache
     public void PutSd3(Sd3CacheEntry entry) => Put(_sd3, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
     public void PutWanVideo(WanVideoCacheEntry entry) => Put(_wanVideo, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
     public void PutLtxVideo(LtxVideoCacheEntry entry) => Put(_ltxVideo, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
+    public void PutLtxVideo2(LtxVideo2CacheEntry entry) => Put(_ltxVideo2, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
     public void PutAceStep(AceStepCacheEntry entry) => Put(_aceStep, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
     public void PutAceStep15(AceStep15CacheEntry entry) => Put(_aceStep15, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
     public void PutMusicGen(MusicGenCacheEntry entry) => Put(_musicGen, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
@@ -132,7 +135,7 @@ public sealed class PipelineCache
         }
     }
 
-    private int TotalCount => _flux.Count + _flux2.Count + _chroma.Count + _chromaRadiance.Count + _zetaChroma.Count + _auraFlow.Count + _fLite.Count + _ideogram4.Count + _ernieImage.Count + _zImage.Count + _anima.Count + _hiDream.Count + _qwenImage.Count + _sd15.Count + _sdxl.Count + _sd3.Count + _wanVideo.Count + _ltxVideo.Count + _aceStep.Count + _aceStep15.Count + _musicGen.Count + _yue.Count + _lance.Count + _lens.Count + _refiner.Count + _ipAdapter.Count;
+    private int TotalCount => _flux.Count + _flux2.Count + _chroma.Count + _chromaRadiance.Count + _zetaChroma.Count + _auraFlow.Count + _fLite.Count + _ideogram4.Count + _ernieImage.Count + _zImage.Count + _anima.Count + _hiDream.Count + _qwenImage.Count + _sd15.Count + _sdxl.Count + _sd3.Count + _wanVideo.Count + _ltxVideo.Count + _ltxVideo2.Count + _aceStep.Count + _aceStep15.Count + _musicGen.Count + _yue.Count + _lance.Count + _lens.Count + _refiner.Count + _ipAdapter.Count;
 
     /// <summary>Evict the globally-oldest entry across all architecture maps until we're
     /// at or under <see cref="_maxEntries"/>.</summary>
@@ -305,6 +308,15 @@ public sealed class PipelineCache
                     evictAction = () => { _ltxVideo[key].Dispose(); _ltxVideo.Remove(key); };
                 }
             }
+            foreach (KeyValuePair<string, LtxVideo2CacheEntry> kv in _ltxVideo2)
+            {
+                if (kv.Value.LastUsedUtc < oldestTime)
+                {
+                    oldestTime = kv.Value.LastUsedUtc;
+                    string key = kv.Key;
+                    evictAction = () => { _ltxVideo2[key].Dispose(); _ltxVideo2.Remove(key); };
+                }
+            }
             foreach (KeyValuePair<string, AceStepCacheEntry> kv in _aceStep)
             {
                 if (kv.Value.LastUsedUtc < oldestTime)
@@ -406,6 +418,7 @@ public sealed class PipelineCache
             foreach (Sd3CacheEntry entry in _sd3.Values) entry.Dispose();
             foreach (WanVideoCacheEntry entry in _wanVideo.Values) entry.Dispose();
             foreach (LtxVideoCacheEntry entry in _ltxVideo.Values) entry.Dispose();
+            foreach (LtxVideo2CacheEntry entry in _ltxVideo2.Values) entry.Dispose();
             foreach (AceStepCacheEntry entry in _aceStep.Values) entry.Dispose();
             foreach (AceStep15CacheEntry entry in _aceStep15.Values) entry.Dispose();
             foreach (MusicGenCacheEntry entry in _musicGen.Values) entry.Dispose();
@@ -432,6 +445,7 @@ public sealed class PipelineCache
             _sd3.Clear();
             _wanVideo.Clear();
             _ltxVideo.Clear();
+            _ltxVideo2.Clear();
             _aceStep.Clear();
             _aceStep15.Clear();
             _musicGen.Clear();
