@@ -33,8 +33,9 @@ public static class ModelSupport
         HiDreamLoader.HiDreamI1CompatClassId,     // "hidream-i1" — MMDiT + 4 text encoders (CLIP-L/G, T5-XXL, Llama-3.1)
         QwenImageLoader.QwenImageCompatClassId,   // "qwen-image" — 20B MMDiT + Qwen2.5-VL-7B encoder
         WanVideoLoader.Wan22_5BCompatClassId,     // "wan-22-5b" — Wan2.2 TI2V-5B text/image-to-video
-        WanVideoLoader.Wan21_1_3BCompatClassId,   // "wan-21-1_3b" — Wan2.1 1.3B T2V + VACE-1.3B (model-class ID routes VACE → WanVaceLoader)
-        WanVideoLoader.Wan21_14BCompatClassId,    // "wan-21-14b" — Wan2.1 14B (T2V + CLIP-I2V) + VACE-14B + Wan2.2 A14B (single-expert); VACE routes via WanModelVariants.IsVace
+        WanVideoLoader.Wan21_1_3BCompatClassId,   // "wan-21-1_3b" — Wan2.1 1.3B T2V + VACE-1.3B (variant routed by WanModelVariants.Detect)
+        WanVideoLoader.Wan21_14BCompatClassId,     // "wan-21-14b" — Wan2.1 14B (T2V + CLIP-I2V) + VACE / Animate / S2V variants + Wan2.2 A14B; all
+                                                  // share this compat and are split to WanVace/WanAnimate/WanS2V/WanVideo loaders by WanModelVariants.Detect
         LtxVideoLoader.LtxVideoCompatClassId,     // "lightricks-ltx-video" — LTX-Video 0.9 single-file text-to-video
         LtxVideo2Loader.LtxVideo2CompatClassId,   // "lightricks-ltx-video-2" — LTX-2.3 22B dual-stream text-to-video+audio (validation-pending)
         AceStepLoader.AceStepCompatClassId,       // "ace-step-1_5" — v1 checkpoints route to AceStepLoader, real v1.5

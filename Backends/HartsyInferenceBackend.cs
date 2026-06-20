@@ -1309,9 +1309,11 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             || compat == LanceLoader.LanceVideoCompatClassId;
         if (isVideoArch)
         {
-            // Wan VACE (control-video mode): the Init Image slot is the control clip and is REQUIRED;
-            // LoRA on the VACE control branch isn't wired yet.
-            if (WanModelVariants.IsVace(model.ModelClass?.ID))
+            WanModelVariants.Variant wanVariant = WanModelVariants.Detect(model);
+            bool hasWanLoras = input.TryGet(T2IParamTypes.Loras, out List<string> wanLoras) && wanLoras is not null && wanLoras.Count > 0;
+
+            // Wan VACE (control-video): the Init Image slot is the control clip and is REQUIRED; LoRA not wired.
+            if (wanVariant == WanModelVariants.Variant.Vace)
             {
                 if (input.Get(T2IParamTypes.InitImage) is null)
                 {
@@ -1320,9 +1322,40 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                         + "that's the pose/depth/edge/sketch sequence the generation follows.");
                     return false;
                 }
-                if (input.TryGet(T2IParamTypes.Loras, out List<string> vaceLoras) && vaceLoras is not null && vaceLoras.Count > 0)
+                if (hasWanLoras)
                 {
                     input.RefusalReasons.Add("HartsyInference: LoRAs aren't supported for Wan VACE yet. Remove the LoRA selection.");
+                    return false;
+                }
+            }
+            // Wan Animate (driving-video): the Init Image slot is the driving/pose video and is REQUIRED; LoRA not wired.
+            if (wanVariant == WanModelVariants.Variant.Animate)
+            {
+                if (input.Get(T2IParamTypes.InitImage) is null)
+                {
+                    input.RefusalReasons.Add(
+                        "HartsyInference: Wan Animate needs a driving video in the Init Image slot (the pose/motion "
+                        + "sequence to animate). For faithful results supply an already pose-rendered video.");
+                    return false;
+                }
+                if (hasWanLoras)
+                {
+                    input.RefusalReasons.Add("HartsyInference: LoRAs aren't supported for Wan Animate yet. Remove the LoRA selection.");
+                    return false;
+                }
+            }
+            // Wan S2V (speech-to-video): the Video Audio Input param is the driving speech and is REQUIRED.
+            if (wanVariant == WanModelVariants.Variant.S2V)
+            {
+                if (input.Get(T2IParamTypes.VideoAudioInput) is null)
+                {
+                    input.RefusalReasons.Add(
+                        "HartsyInference: Wan S2V needs speech in the Video Audio Input param — that's what drives the video.");
+                    return false;
+                }
+                if (hasWanLoras)
+                {
+                    input.RefusalReasons.Add("HartsyInference: LoRAs aren't supported for Wan S2V yet. Remove the LoRA selection.");
                     return false;
                 }
             }
@@ -1351,9 +1384,12 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 input.RefusalReasons.Add("HartsyInference: video extending isn't supported yet. Remove the Video Extend Model selection.");
                 return false;
             }
-            if (input.Get(T2IParamTypes.VideoAudioInput) is not null || input.Get(T2IParamTypes.VideoAudioReference) is not null)
+            // Only Wan S2V consumes a driving audio input; every other video arch refuses it. Reference audio
+            // (LTX-2 IC-LoRA) isn't supported by any wired model.
+            if ((input.Get(T2IParamTypes.VideoAudioInput) is not null && wanVariant != WanModelVariants.Variant.S2V)
+                || input.Get(T2IParamTypes.VideoAudioReference) is not null)
             {
-                input.RefusalReasons.Add("HartsyInference: audio-conditioned video isn't supported (no supported model uses it). Remove the audio input.");
+                input.RefusalReasons.Add("HartsyInference: audio-conditioned video isn't supported here (use a Wan S2V model for audio-driven video). Remove the audio input.");
                 return false;
             }
             if (input.Get(T2IParamTypes.RefinerModel) is not null)

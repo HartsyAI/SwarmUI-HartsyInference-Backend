@@ -157,7 +157,7 @@ public static class WanS2VLoader
             ditLoader.Dispose();
             umt5Loader?.Dispose();
             wav2vec2Loader?.Dispose();
-            (wav2vec2 as IDisposable)?.Dispose();
+            (wav2vec2 as object as IDisposable)?.Dispose();
             throw;
         }
     }
@@ -278,7 +278,7 @@ public sealed class WanS2VCacheEntry : IDisposable
         Tokenizer?.Dispose();
         Umt5?.Dispose();
         Transformer?.Dispose();
-        (Wav2Vec2 as IDisposable)?.Dispose();
+        (Wav2Vec2 as object as IDisposable)?.Dispose();
         CheckpointLoader?.Dispose();
         Umt5Loader?.Dispose();
         Wav2Vec2Loader?.Dispose();

@@ -1,7 +1,7 @@
 # SwarmUI HartsyInference Backend
 
-> **Status:** Working beta. 14 image architectures + 3 video architectures (Wan TI2V,
-> Wan VACE control-video, LTX) dispatch
+> **Status:** Working beta. 14 image architectures + 5 video architectures (Wan TI2V,
+> Wan VACE control-video, Wan Animate, Wan S2V speech-to-video, LTX) dispatch
 > end-to-end, with Flux and Z-Image verified at 1024×1024 on a 12 GB consumer GPU
 > (RTX 3060). Img2img, inpaint, LoRA, refiner, ControlNet (SDXL+Canny), IP-Adapter
 > (SD1.5/SDXL), live previews, and cancellation all work. There are still rough edges
@@ -50,18 +50,19 @@ and direct access to Swarm's image/parameter/cache types.
 | HiDream-I1 | `hidream-i1` | ⚠ Wired; needs Llama-3.1 tokenizer assets | t2i |
 | Qwen-Image | `qwen-image` | ⚠ Wired-untested | t2i |
 | **Wan 2.2 TI2V-5B (video)** | `wan-22-5b` | ⚠ Wired | T2V, I2V (init image), LoRA |
-| **Wan 2.1 VACE (14B / 1.3B, video)** | `wan-2_1-vace-14b`, `wan-2_1-vace-1_3b` | ⚠ Wired; needs engine repack + numerics validation | **Control-video → video** (pose/depth/edge/sketch clip via Init Image), FPS/format/boomerang/trim. More capable than Comfy's reference-image-only VACE wiring. |
+| **Wan 2.1 VACE (14B / 1.3B, video)** | `wan-2_1-vace-14b`, `wan-2_1-vace-1_3b` | ⚠ Wired; numerics validation-pending | **Control-video → video** (pose/depth/edge/sketch clip via Init Image), FPS/format/boomerang/trim. More capable than Comfy's reference-image-only VACE wiring. |
+| **Wan Animate (14B, video)** | `wan-21-14b` (Animate weights) | ⚠ Wired; numerics validation-pending | **Driving-video → animation** (Init Image = pose/motion video; face clip derived at 512²). Reference/background conditioning not modeled; supply a pre-rendered pose video. |
+| **Wan 2.2 S2V (14B, video)** | `wan-21-14b` (S2V weights) | ⚠ Best-effort; engine converter + hyperparams validation-pending | **Speech → video** (Video Audio Input → Wav2Vec2 → frames). Refuses cleanly until the engine ships the S2V checkpoint-converter keys; Wav2Vec2 side-model + audio-inject layers are provisional. |
 | **LTX-Video 0.9 (video)** | `lightricks-ltx-video` | ⚠ Wired | T2V |
 | **Ideogram 4 (9.3B dual-DiT)** | `ideogram-4` | ⚠ Wired-untested; **needs ≥22 GB free VRAM** (gated at load) | t2i; Steps→official presets (12/20/48); negative prompt + CFG ignored by design (asymmetric CFG). **Non-commercial license.** |
 
 Refused with a clear in-UI message (blockers tracked in
 [the punchlist](./docs/11-Comfy-Parity-Punchlist.md)): Ernie Image (no tokenizer
 upstream), HunyuanImage 2.1 (encoder stand-in not faithful), Chroma Radiance /
-Zeta-Chroma (config presets), Flux.2 Klein 9B / Dev (FP4 GEMM), **Wan Animate**
-(engine ships only the motion-encoder component — no full pipeline) and **Wan S2V**
-(sound-to-video; no engine pipeline). Both carry base-Wan keys, so they're detected
-by their signature weights at load and refused rather than silently rendered as plain
-text-to-video.
+Zeta-Chroma (config presets), Flux.2 Klein 9B / Dev (FP4 GEMM). **Wan Animate** and
+**Wan S2V** are now wired (see the matrix above) — detected by their signature weights
+and routed to dedicated loaders; S2V refuses cleanly until the engine ships its
+checkpoint-converter keys.
 
 ### Cross-cutting features
 
@@ -72,7 +73,8 @@ skip (SD1.5), EndStepsEarly, img2img creativity (incl. Flux.2), inpaint masks
 any base, StepSwap SDXL), IP-Adapter standard/Plus/Plus-Face with weight types +
 step gating, ControlNet stacking (SDXL, Canny preprocessor), **GGUF Flux transformers**,
 Wan/LTX video with FPS/format/boomerang/trim, **Wan VACE control-video** (pose/depth/edge
-clip → guided video), ACE-Step music, TAESD or latent2rgb
+clip → guided video), **Wan Animate** (driving video → character animation), **Wan S2V**
+(speech audio → talking video), ACE-Step music, TAESD or latent2rgb
 live previews, mid-gen cancel, FreeMemory, multi-GPU via one backend per GPU,
 **admin WebAPI** (probe-model / list-pipelines / device-info / clear-cache).
 
