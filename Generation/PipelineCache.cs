@@ -454,6 +454,8 @@ public sealed class PipelineCache
             foreach (Sd3CacheEntry entry in _sd3.Values) entry.Dispose();
             foreach (WanVideoCacheEntry entry in _wanVideo.Values) entry.Dispose();
             foreach (WanVaceCacheEntry entry in _wanVace.Values) entry.Dispose();
+            foreach (WanAnimateCacheEntry entry in _wanAnimate.Values) entry.Dispose();
+            foreach (WanS2VCacheEntry entry in _wanS2V.Values) entry.Dispose();
             foreach (LtxVideoCacheEntry entry in _ltxVideo.Values) entry.Dispose();
             foreach (LtxVideo2CacheEntry entry in _ltxVideo2.Values) entry.Dispose();
             foreach (AceStepCacheEntry entry in _aceStep.Values) entry.Dispose();
@@ -482,6 +484,8 @@ public sealed class PipelineCache
             _sd3.Clear();
             _wanVideo.Clear();
             _wanVace.Clear();
+            _wanAnimate.Clear();
+            _wanS2V.Clear();
             _ltxVideo.Clear();
             _ltxVideo2.Clear();
             _aceStep.Clear();

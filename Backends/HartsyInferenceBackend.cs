@@ -586,17 +586,22 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             {
                 await Task.Run(() =>
                 {
-                    // VACE shares the plain-Wan compat class but needs its own control-branch loader;
-                    // route off the model-class ID (Animate/S2V are refused inside WanVideoLoader.Load).
-                    if (WanModelVariants.IsVace(model.ModelClass?.ID))
+                    // Every Wan conditioning variant shares the plain-Wan compat class but drives a different engine
+                    // pipeline; route off the detected variant (VACE control / Animate / S2V / plain T2V-I2V).
+                    switch (WanModelVariants.Detect(model))
                     {
-                        WanVaceCacheEntry entry = WanVaceLoader.Load(_backend, model, input, msg => AddLoadStatus(msg));
-                        _cache.PutWanVace(entry);
-                    }
-                    else
-                    {
-                        WanVideoCacheEntry entry = WanVideoLoader.Load(_backend, model, input, msg => AddLoadStatus(msg));
-                        _cache.PutWanVideo(entry);
+                        case WanModelVariants.Variant.Vace:
+                            _cache.PutWanVace(WanVaceLoader.Load(_backend, model, input, msg => AddLoadStatus(msg)));
+                            break;
+                        case WanModelVariants.Variant.Animate:
+                            _cache.PutWanAnimate(WanAnimateLoader.Load(_backend, model, input, msg => AddLoadStatus(msg)));
+                            break;
+                        case WanModelVariants.Variant.S2V:
+                            _cache.PutWanS2V(WanS2VLoader.Load(_backend, model, input, msg => AddLoadStatus(msg)));
+                            break;
+                        default:
+                            _cache.PutWanVideo(WanVideoLoader.Load(_backend, model, input, msg => AddLoadStatus(msg)));
+                            break;
                     }
                 });
             }
@@ -957,19 +962,37 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                     || compat == WanVideoLoader.Wan21_1_3BCompatClassId
                     || compat == WanVideoLoader.Wan21_14BCompatClassId)
                 {
-                    // VACE (control-video) routes to its own loader; LoRA on VACE refused in IsValidForThisBackend.
-                    if (WanModelVariants.IsVace(model.ModelClass?.ID))
+                    // Route to the loader matching the detected Wan conditioning variant (must match LoadModel).
+                    switch (WanModelVariants.Detect(model))
                     {
-                        WanVaceCacheEntry vaceEntry = _cache.TryGetWanVace(model.Name)
-                            ?? throw new InvalidOperationException("Wan VACE model loaded but not in cache.");
-                        return WanVaceLoader.Generate(vaceEntry, _backend, input, progressBridge, cancel);
+                        case WanModelVariants.Variant.Vace:
+                        {
+                            WanVaceCacheEntry vaceEntry = _cache.TryGetWanVace(model.Name)
+                                ?? throw new InvalidOperationException("Wan VACE model loaded but not in cache.");
+                            return WanVaceLoader.Generate(vaceEntry, _backend, input, progressBridge, cancel);
+                        }
+                        case WanModelVariants.Variant.Animate:
+                        {
+                            WanAnimateCacheEntry animEntry = _cache.TryGetWanAnimate(model.Name)
+                                ?? throw new InvalidOperationException("Wan Animate model loaded but not in cache.");
+                            return WanAnimateLoader.Generate(animEntry, _backend, input, progressBridge, cancel);
+                        }
+                        case WanModelVariants.Variant.S2V:
+                        {
+                            WanS2VCacheEntry s2vEntry = _cache.TryGetWanS2V(model.Name)
+                                ?? throw new InvalidOperationException("Wan S2V model loaded but not in cache.");
+                            return WanS2VLoader.Generate(s2vEntry, _backend, input, progressBridge, cancel);
+                        }
+                        default:
+                        {
+                            WanVideoCacheEntry entry = _cache.TryGetWanVideo(model.Name)
+                                ?? throw new InvalidOperationException("Wan video model loaded but not in cache.");
+                            // Video-extend / end-frame not implemented for Wan — refused upfront in IsValidForThisBackend.
+                            return loras.Count > 0
+                                ? WanVideoLoader.GenerateWithLoras(entry, loras, _backend, input, progressBridge, cancel)
+                                : WanVideoLoader.Generate(entry, _backend, input, progressBridge, cancel);
+                        }
                     }
-                    WanVideoCacheEntry entry = _cache.TryGetWanVideo(model.Name)
-                        ?? throw new InvalidOperationException("Wan video model loaded but not in cache.");
-                    // Video-extend / end-frame not implemented for Wan — refused upfront in IsValidForThisBackend.
-                    return loras.Count > 0
-                        ? WanVideoLoader.GenerateWithLoras(entry, loras, _backend, input, progressBridge, cancel)
-                        : WanVideoLoader.Generate(entry, _backend, input, progressBridge, cancel);
                 }
                 if (compat == LtxVideoLoader.LtxVideoCompatClassId)
                 {
