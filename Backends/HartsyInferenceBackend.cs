@@ -254,27 +254,56 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 Logs.Warning("[HartsyInference] Auto-update: extension .csproj not found next to the assembly; cannot rebuild.");
                 return;
             }
-            AddLoadStatus($"Auto-update: rebuilding extension against engine {latest} (this can take a minute)...");
+            AddLoadStatus($"Auto-update: verifying engine {latest} compiles against this extension (this can take a minute)...");
             string dir = Path.GetDirectoryName(csproj);
-            if (aggressive)
-            {
-                await RunDotnet("nuget locals http-cache --clear", dir);
-            }
-            // Force-evaluate so the floating "1.0.0-alpha.*" reference re-resolves to the newest published build.
+            // Verification build BEFORE we touch anything: a freshly-published engine can have breaking
+            // API changes (e.g. a type that stops implementing IDisposable). This build goes to the
+            // csproj's DEFAULT output — NOT Swarm's load folder — purely as a compile check, and Swarm
+            // deletes the stray bin/obj on next start anyway. RestoreForceEvaluate re-resolves the
+            // floating alpha.* (with RestoreNoHttpCache in the csproj it hits the live feed, not the
+            // stale HTTP cache), so this also pre-warms the global-packages folder with `latest`.
             (int code, string output) = await RunDotnet(
                 $"build \"{csproj}\" -c Release /p:RestoreForceEvaluate=true", dir);
             if (code != 0)
             {
-                Logs.Error($"[HartsyInference] Auto-update build failed (exit {code}):\n{output}");
-                AddLoadStatus("Auto-update: rebuild failed — continuing on the current engine.");
+                Logs.Error($"[HartsyInference] Auto-update: engine {latest} does NOT compile against this extension — staying on the current engine. Build output:\n{output}");
+                AddLoadStatus($"Auto-update: engine {latest} failed to compile — keeping the current engine (see logs).");
                 return;
             }
-            Logs.Warning($"[HartsyInference] Engine updated to {latest}. The new DLLs are staged; a SwarmUI RESTART is required to load them (an in-process library can't hot-swap).");
-            AddLoadStatus($"Auto-update: engine {latest} staged — restart SwarmUI to apply.");
+
+            // The engine is an IN-PROCESS library: it can't hot-swap, and SwarmUI's
+            // ExtensionsManager.BuildExtension keys its "already built, skip rebuild" decision on the
+            // extension's GIT COMMIT hash — NOT on the engine NuGet version. A new engine publish doesn't
+            // change our commit, so the cached `<dllName>-<hash>.dll` persists and Swarm skips the build
+            // forever (the new engine is never restored into the load folder). So to actually apply
+            // `latest` we must INVALIDATE that cached build: delete the hash-named DLL so File.Exists(target)
+            // is false on next start → Swarm does a clean rebuild (its restore pulls `latest` and copies the
+            // new engine DLLs into the load folder where it resolves them).
+            string selfDll = typeof(HartsyInferenceBackend).Assembly.Location;
+            try
+            {
+                // On Linux, unlinking the loaded/mmap'd assembly is allowed — the running process keeps its
+                // mapping so THIS session is unaffected; the file is simply gone from disk for next start.
+                // (On Windows the file is locked; the catch below tells the user to delete it manually.)
+                if (File.Exists(selfDll)) File.Delete(selfDll);
+            }
+            catch (Exception delEx)
+            {
+                Logs.Warning($"[HartsyInference] Auto-update: couldn't invalidate cached build '{selfDll}' ({delEx.Message}). " +
+                    $"Delete that file (or its folder under src/bin/extensions/) and restart to load engine {latest}.");
+                AddLoadStatus($"Auto-update: couldn't invalidate cached build — delete '{Path.GetFileName(selfDll)}' manually and restart.");
+                return;
+            }
+            Logs.Warning($"[HartsyInference] Engine {latest} verified + cached extension build invalidated. SwarmUI will REBUILD against the new engine on next start (an in-process library can't hot-swap).");
             if (aggressive)
             {
-                Logs.Warning("[HartsyInference] AutoUpdate=aggressive — requesting a SwarmUI restart to load the new engine.");
+                Logs.Warning("[HartsyInference] AutoUpdate=aggressive — requesting a SwarmUI restart to rebuild and load the new engine.");
+                AddLoadStatus($"Auto-update: engine {latest} verified — restarting SwarmUI to rebuild and apply.");
                 Program.RequestRestart();
+            }
+            else
+            {
+                AddLoadStatus($"Auto-update: engine {latest} verified — restart SwarmUI to rebuild and apply.");
             }
         }
         catch (Exception ex)
