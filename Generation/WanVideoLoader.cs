@@ -19,25 +19,26 @@ using Image = SwarmUI.Utils.Image;
 namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
 /// <summary>
-/// Loads Wan2.2 TI2V-5B (Wan-AI's text/image-to-video DiT; SwarmUI compat class
-/// <c>wan-22-5b</c>, detected from the Comfy-Org repackaged single file
-/// <c>wan2.2_ti2v_5B_fp16.safetensors</c>).
+/// Loads the Wan-Video DiT family (Wan-AI; umT5-conditioned text/image-to-video) for every SwarmUI Wan compat class:
+/// <c>wan-22-5b</c> (Wan2.2 TI2V-5B, z=48 VAE), <c>wan-21-1_3b</c> (Wan2.1 1.3B), and <c>wan-21-14b</c> (Wan2.1 14B
+/// and Wan2.2 A14B 14B, z=16 VAE). The variant (size, T2V vs CLIP-I2V) is resolved from the compat class plus the
+/// converted DiT keys (an <c>image_embedder</c>/36-channel patch embed ⇒ I2V).
 ///
-/// Required side models (auto-downloaded; user picks via SwarmUI parameters take priority):
-///   - <see cref="T2IParamTypes.T5XXLModel"/>: umT5-XXL (Comfy's canonical fp8-scaled file —
-///     <see cref="SideModels.Umt5Xxl"/>). NOT the same as plain T5-XXL: 256k multilingual vocab
-///     with per-layer relative attention bias. Pairs with the embedded umT5 tokenizer.
-///   - <see cref="T2IParamTypes.VAE"/>: the Wan2.2 48-channel video VAE (<see cref="SideModels.Wan22Vae"/>,
-///     shared with SwarmUI core's "wan22-vae" CommonModels entry).
+/// <para>Side models (auto-downloaded; user picks take priority): umT5-XXL (<see cref="SideModels.Umt5Xxl"/>); the
+/// z=48 Wan2.2 VAE (<see cref="SideModels.Wan22Vae"/>) or the z=16 Wan2.1 VAE (<see cref="SideModels.Wan21Vae"/>); and
+/// for Wan2.1 I2V, CLIP-ViT-H (<see cref="SideModels.ClipVisionH14"/>).</para>
 ///
-/// Supports text-to-video AND image-to-video: with an Init Image set, the frame is fitted to the
-/// <c>VideoResolution</c> target, VAE-encoded via <c>Wan22VaeEncoder</c>, and passed to the pipeline's
-/// TI2V first-frame conditioning path (diffusers <c>expand_timesteps</c> — frame 0 pinned at
-/// timestep 0 while the remaining frames denoise).
+/// <para><b>Conditioning paths:</b> TI2V-5B I2V pins the VAE-encoded first frame at timestep 0 (expand_timesteps);
+/// Wan2.1 I2V instead concatenates a 36-channel <c>[noise, mask, cond-latent]</c> input and cross-attends to the CLIP
+/// image context. <b>A14B MoE caveat:</b> SwarmUI selects a single model file, so an A14B expert runs as a single
+/// transformer here (no high/low-noise boundary switch — that needs both expert files; the engine's
+/// <see cref="WanVideoPipeline"/> supports the full MoE when given <c>transformer2</c>). Numerics validation-pending.</para>
 /// </summary>
 public static class WanVideoLoader
 {
     public const string Wan22_5BCompatClassId = "wan-22-5b";
+    public const string Wan21_1_3BCompatClassId = "wan-21-1_3b";
+    public const string Wan21_14BCompatClassId = "wan-21-14b";
 
     /// <summary>Wan's umT5 context length (matches diffusers' 512-token encode).</summary>
     private const int TokenLength = 512;
@@ -53,17 +54,18 @@ public static class WanVideoLoader
         if (!File.Exists(model.RawFilePath))
             throw new FileNotFoundException($"Wan video checkpoint not found: {model.RawFilePath}");
 
+        string compat = model.ModelClass?.CompatClass?.ID ?? Wan22_5BCompatClassId;
+        bool isWan21 = compat is Wan21_1_3BCompatClassId or Wan21_14BCompatClassId;
+
         T2IModel umt5Model = ModelAutoDownloader.EnsureSideModel(
             userPick: input?.Get(T2IParamTypes.T5XXLModel),
-            entry: SideModels.Umt5Xxl,
-            log: log);
+            entry: SideModels.Umt5Xxl, log: log);
         T2IModel vaeModel = ModelAutoDownloader.EnsureSideModel(
             userPick: input?.Get(T2IParamTypes.VAE),
-            entry: SideModels.Wan22Vae,
-            log: log);
+            entry: isWan21 ? SideModels.Wan21Vae : SideModels.Wan22Vae, log: log);
 
         // ── 1. Load + convert the Wan DiT (original naming → diffusers) ──
-        log($"Loading Wan2.2 DiT: {model.Name}");
+        log($"Loading Wan DiT: {model.Name} (compat {compat})");
         var (conv, ditLoader) = WanVideoCheckpointConverter.LoadAndConvert(model.RawFilePath);
         if (conv.Transformer.Count == 0)
         {
@@ -71,86 +73,112 @@ public static class WanVideoLoader
             throw new InvalidOperationException(
                 $"Wan checkpoint '{model.Name}' has no recognized transformer weights after conversion.");
         }
-        log($"  Converted: {conv.Transformer.Count} transformer keys");
+        bool isClipI2V = conv.Transformer.ContainsKey("condition_embedder.image_embedder.norm1.weight");
+        int inChannels = conv.Transformer.TryGetValue("patch_embedding.weight", out Tensor pe) ? (int)pe.Shape[1] : 0;
+        WanVideoConfig config = ResolveConfig(compat, isClipI2V, inChannels);
+        string mode = isClipI2V ? "CLIP-I2V" : config.InChannels > config.VaeLatentChannels ? "concat-I2V" : "T2V/TI2V";
+        log($"  Converted: {conv.Transformer.Count} transformer keys ({mode}, in {inChannels}, inner {config.InnerDim})");
 
-        WanVideoConfig config = WanVideoConfig.Ti2V5B;
         WanVideoTransformer transformer = new WanVideoTransformer(config);
         transformer.LoadWeights(conv.Transformer);
 
-        // ── 2. Load the Wan2.2 VAE — decoder + encoder share one weight dict (the Comfy-Org
-        // repackage ships F16; the Wan22 blocks compute in F32, so cast up front) ──
-        log($"Loading Wan2.2 VAE: {vaeModel.Name}");
-        var (vaeWeightsRaw, vaeLoaders) = LanceCheckpointConverter.LoadVae(vaeModel.RawFilePath);
-        Dictionary<string, Tensor> vaeWeights = VaePrecisionHelper.CastVaeWeights(vaeWeightsRaw, DType.F32);
-        Wan22VaeDecoder vae = new Wan22VaeDecoder();
-        vae.LoadWeights(vaeWeights);
-        Wan22VaeEncoder vaeEncoder = new Wan22VaeEncoder();
-        vaeEncoder.LoadWeights(vaeWeights);
-
-        // ── 3. Load umT5-XXL (fp8-scaled weights folded to plain dtype at load) ──
-        log($"Loading umT5-XXL: {umt5Model.Name}");
-        SafeTensorsLoader umt5Loader = new SafeTensorsLoader();
-        umt5Loader.Load(umt5Model.RawFilePath);
-        Dictionary<string, Tensor> umt5Weights = CheckpointConvertUtils.ApplyFp8ScaledDequant(umt5Loader.GetAllTensors());
-        if (umt5Weights.Count == 0)
+        try
         {
-            umt5Loader.Dispose();
-            foreach (var l in vaeLoaders) l.Dispose();
-            ditLoader.Dispose();
-            throw new InvalidOperationException($"umT5 model file '{umt5Model.Name}' has no usable tensors.");
+            // ── 2. VAE (decoder + encoder share one weight dict; cast to F32) ──
+            log($"Loading Wan VAE: {vaeModel.Name}");
+            var (vaeWeightsRaw, vaeLoaders) = LanceCheckpointConverter.LoadVae(vaeModel.RawFilePath);
+            Dictionary<string, Tensor> vaeWeights = VaePrecisionHelper.CastVaeWeights(vaeWeightsRaw, DType.F32);
+            IWanVaeDecoder vae;
+            IWanVaeEncoder vaeEncoder;
+            if (isWan21)
+            {
+                Wan21VaeDecoder d = new Wan21VaeDecoder(); d.LoadWeights(vaeWeights); vae = d;
+                Wan21VaeEncoder e = new Wan21VaeEncoder(); e.LoadWeights(vaeWeights); vaeEncoder = e;
+            }
+            else
+            {
+                Wan22VaeDecoder d = new Wan22VaeDecoder(); d.LoadWeights(vaeWeights); vae = d;
+                Wan22VaeEncoder e = new Wan22VaeEncoder(); e.LoadWeights(vaeWeights); vaeEncoder = e;
+            }
+
+            // ── 3. CLIP-ViT-H image encoder (Wan2.1 I2V only) ──
+            ClipVisionEncoder clipVision = null;
+            SafeTensorsLoader clipLoader = null;
+            if (isClipI2V)
+            {
+                T2IModel clipModel = ModelAutoDownloader.EnsureSideModel(
+                    userPick: input?.Get(T2IParamTypes.ClipVisionModel), entry: SideModels.ClipVisionH14, log: log);
+                log($"Loading CLIP-ViT-H image encoder: {clipModel.Name}");
+                clipLoader = new SafeTensorsLoader();
+                clipLoader.Load(clipModel.RawFilePath);
+                clipVision = new ClipVisionEncoder(ClipVisionEncoderConfig.ViTH14);
+                clipVision.LoadWeights(clipLoader.GetAllTensors());
+            }
+
+            // ── 4. umT5-XXL (fp8-scaled folded to plain dtype) ──
+            log($"Loading umT5-XXL: {umt5Model.Name}");
+            SafeTensorsLoader umt5Loader = new SafeTensorsLoader();
+            umt5Loader.Load(umt5Model.RawFilePath);
+            Dictionary<string, Tensor> umt5Weights = CheckpointConvertUtils.ApplyFp8ScaledDequant(umt5Loader.GetAllTensors());
+            T5TextEncoder umt5 = new T5TextEncoder(T5TextEncoderConfig.Umt5Xxl);
+            umt5.LoadWeights(umt5Weights);
+
+            // ── 5. Tokenizer (embedded umT5 256k SentencePiece) ──
+            T5Tokenizer tokenizer = T5Tokenizer.CreateUmt5(maxLength: TokenLength);
+
+            log("Building Wan video pipeline...");
+            WanVideoPipeline pipeline = new WanVideoPipeline(backend, transformer, vae, config, vaeEncoder);
+
+            log($"Wan ready ({compat}, {(isClipI2V ? "CLIP image-to-video" : "text/image-to-video")}).");
+            return new WanVideoCacheEntry
+            {
+                ModelName = model.Name,
+                CompatClass = compat,
+                Pipeline = pipeline,
+                Config = config,
+                IsClipI2V = isClipI2V,
+                Tokenizer = tokenizer,
+                Umt5 = umt5,
+                Transformer = transformer,
+                TransformerWeights = conv.Transformer,
+                Vae = vae,
+                VaeEncoder = vaeEncoder,
+                ClipVision = clipVision,
+                CheckpointLoader = ditLoader,
+                VaeLoaders = vaeLoaders,
+                Umt5Loader = umt5Loader,
+                ClipLoader = clipLoader,
+            };
         }
-        T5TextEncoder umt5 = new T5TextEncoder(T5TextEncoderConfig.Umt5Xxl);
-        umt5.LoadWeights(umt5Weights);
-
-        // ── 4. Tokenizer (embedded umT5 256k SentencePiece) ──
-        log("Loading umT5 tokenizer (embedded)...");
-        T5Tokenizer tokenizer = T5Tokenizer.CreateUmt5(maxLength: TokenLength);
-
-        log("Building Wan video pipeline...");
-        WanVideoPipeline pipeline = new WanVideoPipeline(backend, transformer, vae, config);
-
-        log("Wan2.2 TI2V-5B ready (text-to-video + image-to-video).");
-        return new WanVideoCacheEntry
+        catch
         {
-            ModelName = model.Name,
-            CompatClass = Wan22_5BCompatClassId,
-            Pipeline = pipeline,
-            Config = config,
-            Tokenizer = tokenizer,
-            Umt5 = umt5,
-            Transformer = transformer,
-            TransformerWeights = conv.Transformer,
-            Vae = vae,
-            VaeEncoder = vaeEncoder,
-            CheckpointLoader = ditLoader,
-            VaeLoaders = vaeLoaders,
-            Umt5Loader = umt5Loader,
-        };
+            transformer.Dispose();
+            ditLoader.Dispose();
+            throw;
+        }
     }
+
+    /// <summary>Maps a SwarmUI Wan compat class (+ the DiT's CLIP-image-embedder presence and patch-embed in_channels)
+    /// to the engine config preset. 14B with in_channels 36 is I2V: CLIP keys ⇒ Wan2.1 I2V-14B, otherwise the
+    /// Wan2.2 A14B I2V (concat-only); in_channels 16 ⇒ T2V (Wan2.1-14B or an A14B T2V expert).</summary>
+    private static WanVideoConfig ResolveConfig(string compat, bool isClipI2V, int inChannels) => compat switch
+    {
+        Wan21_1_3BCompatClassId => WanVideoConfig.T2V_1_3B,
+        Wan21_14BCompatClassId => inChannels == 36
+            ? (isClipI2V ? WanVideoConfig.I2V_14B_480p : WanVideoConfig.I2V_A14B)
+            : WanVideoConfig.T2V_14B,
+        _ => WanVideoConfig.Ti2V5B,
+    };
 
     public static Image[] Generate(
-        WanVideoCacheEntry entry,
-        IBackend backend,
-        T2IParamInput input,
-        Action<GenerationProgress> onProgress,
-        CancellationToken cancel)
-    {
-        return RunPipeline(entry.Pipeline, entry, backend, input, onProgress, cancel);
-    }
+        WanVideoCacheEntry entry, IBackend backend, T2IParamInput input,
+        Action<GenerationProgress> onProgress, CancellationToken cancel) =>
+        RunPipeline(entry.Pipeline, entry, backend, input, onProgress, cancel);
 
-    /// <summary>LoRA path: shallow-clone the cached DiT weight dict, merge the LoRA stack into it
-    /// (HartsyInference's LoraStack auto-detects kohya/musubi, Comfy diffusion_model., and
-    /// diffusers-PEFT key formats), and run a fresh transformer + pipeline for this generation.
-    /// The cached no-LoRA pipeline stays untouched; merged tensors die with the stack. Wan LoRAs
-    /// target the DiT only (the model class declares LorasTargetTextEnc=false), so umT5 and the
-    /// VAE are reused from the cache entry as-is.</summary>
+    /// <summary>LoRA path: clone the cached DiT weights, merge the stack, run a fresh transformer + pipeline.</summary>
     public static Image[] GenerateWithLoras(
-        WanVideoCacheEntry entry,
-        IReadOnlyList<LoraResolver.LoraSpec> loras,
-        IBackend backend,
-        T2IParamInput input,
-        Action<GenerationProgress> onProgress,
-        CancellationToken cancel)
+        WanVideoCacheEntry entry, IReadOnlyList<LoraResolver.LoraSpec> loras, IBackend backend, T2IParamInput input,
+        Action<GenerationProgress> onProgress, CancellationToken cancel)
     {
         Dictionary<string, Tensor> transformerWeights = LoraApplier.ShallowClone(entry.TransformerWeights);
         LoraStack stack = LoraApplier.BuildAndApply(loras, backend, transformerWeights: transformerWeights);
@@ -158,26 +186,19 @@ public static class WanVideoLoader
         try
         {
             transformer.LoadWeights(transformerWeights);
-            using WanVideoPipeline pipeline = new WanVideoPipeline(backend, transformer, entry.Vae, entry.Config);
+            using WanVideoPipeline pipeline = new WanVideoPipeline(backend, transformer, entry.Vae, entry.Config, entry.VaeEncoder);
             return RunPipeline(pipeline, entry, backend, input, onProgress, cancel);
         }
         finally
         {
-            // Stack last so merged tensors outlive the transformer that referenced them via LoadWeights.
             transformer?.Dispose();
             stack?.Dispose();
         }
     }
 
-    /// <summary>Shared per-pipeline driver — same logic whether the pipeline is the cached one
-    /// (no-LoRA) or a freshly-built per-gen one (LoRA).</summary>
     private static Image[] RunPipeline(
-        WanVideoPipeline pipeline,
-        WanVideoCacheEntry entry,
-        IBackend backend,
-        T2IParamInput input,
-        Action<GenerationProgress> onProgress,
-        CancellationToken cancel)
+        WanVideoPipeline pipeline, WanVideoCacheEntry entry, IBackend backend, T2IParamInput input,
+        Action<GenerationProgress> onProgress, CancellationToken cancel)
     {
         string prompt = input.Get(T2IParamTypes.Prompt) ?? "";
         string negative = input.Get(T2IParamTypes.NegativePrompt) ?? "";
@@ -187,9 +208,7 @@ public static class WanVideoLoader
         double cfgRaw = input.Get(T2IParamTypes.CFGScale);
         float cfgScale = cfgRaw <= 0 ? entry.Config.GuidanceScale : (float)cfgRaw;
 
-        // I2V: size the clip from the init image + VideoResolution mode; T2V: from the standard
-        // Width/Height params. Both snapped to the VAE's 16-multiple.
-        SwarmUI.Utils.Image initImage = input.Get(T2IParamTypes.InitImage);
+        Image initImage = input.Get(T2IParamTypes.InitImage);
         int width, height;
         if (initImage is not null)
         {
@@ -203,8 +222,7 @@ public static class WanVideoLoader
             (width, height) = VideoParamResolver.ResolveResolution(input, multiple: entry.Config.VaeSpatialCompression);
         }
 
-        // Encode the prompt pair, then drop the encoder's GPU weights before the DiT preload —
-        // the 5B transformer needs the VRAM headroom (mirrors the upstream Wan E2E test).
+        // Encode the prompt pair, then free the encoder before the DiT preload.
         int[] promptTokens = entry.Tokenizer.Encode(prompt);
         int[] negTokens = entry.Tokenizer.Encode(negative);
         Tensor batch = entry.Umt5.Encode(backend,
@@ -216,49 +234,81 @@ public static class WanVideoLoader
         backend.Sync();
         backend.FreeWeights(entry.Umt5.EnumerateWeights());
 
-        // I2V conditioning: fit the init image to the clip size, VAE-encode to the normalized
-        // [1,48,1,H/16,W/16] first-frame latent, then drop the encoder's GPU weights too.
-        Tensor firstFrameLatent = null;
-        if (initImage is not null)
-        {
-            byte[] frameRgb = RgbToImage.ToHwcRgbResized(initImage, width, height);
-            firstFrameLatent = entry.VaeEncoder.EncodeRgbFrame(backend, frameRgb, width, height);
-            backend.Sync();
-            backend.FreeWeights(entry.VaeEncoder.EnumerateWeights());
-        }
-
         TextToImageRequest request = new TextToImageRequest
         {
-            Prompt = prompt,
-            NegativePrompt = negative,
-            Width = width,
-            Height = height,
-            Steps = steps,
-            CfgScale = cfgScale,
-            Seed = seedLong < 0 ? null : (int?)(int)(seedLong & 0x7FFFFFFF),
+            Prompt = prompt, NegativePrompt = negative, Width = width, Height = height,
+            Steps = steps, CfgScale = cfgScale, Seed = seedLong < 0 ? null : (int?)(int)(seedLong & 0x7FFFFFFF),
         };
 
         long start = Environment.TickCount64;
-        Action<GenerationProgress> bridge = p =>
-        {
-            cancel.ThrowIfCancellationRequested();
-            onProgress(p);
-        };
+        Action<GenerationProgress> bridge = p => { cancel.ThrowIfCancellationRequested(); onProgress(p); };
 
         try
         {
-            var (frames, outW, outH, _) = pipeline.GenerateFromEmbeddings(
-                promptEmbeds, negEmbeds, request, numFrames, bridge, firstFrameLatent);
-            Logs.Verbose($"[HartsyInference][Wan] Pipeline returned {frames.Length} frames {outW}x{outH} " +
-                $"({(firstFrameLatent is null ? "T2V" : "I2V")}) in {Environment.TickCount64 - start}ms.");
-            return new[] { VideoParamResolver.FinishVideo(frames, outW, outH, input, cancel) };
+            // Concat-conditioned I2V (Wan2.1 I2V-14B with CLIP, or Wan2.2 I2V-A14B without): 36-ch
+            // [noise, mask, cond-latent] input. CLIP embeds are added only when the variant has an image embedder.
+            bool isConcatI2V = entry.Config.InChannels > entry.Config.VaeLatentChannels;
+            if (isConcatI2V && initImage is not null)
+            {
+                Tensor imageEmbeds = null;
+                if (entry.IsClipI2V && entry.ClipVision is not null)
+                {
+                    backend.PreloadWeights(entry.ClipVision.EnumerateWeights());
+                    Tensor pixels = ClipImagePreprocessor.Process(initImage, imageSize: 224);
+                    Tensor imageEmbedsBatched = entry.ClipVision.EncodeHiddenStates(backend, pixels);   // [1, 257, 1280]
+                    pixels.Dispose();
+                    backend.Sync();
+                    backend.FreeWeights(entry.ClipVision.EnumerateWeights());
+                    imageEmbeds = DropBatch(imageEmbedsBatched);
+                    imageEmbedsBatched.Dispose();
+                }
+
+                byte[] frameRgb = RgbToImage.ToHwcRgbResized(initImage, width, height);
+                (byte[][] f2, int w2, int h2, _) = pipeline.GenerateImageToVideoConcat(
+                    promptEmbeds, negEmbeds, imageEmbeds, frameRgb, request, numFrames, bridge);
+                imageEmbeds?.Dispose();
+                Logs.Verbose($"[HartsyInference][Wan] Concat-I2V returned {f2.Length} frames {w2}x{h2} in {Environment.TickCount64 - start}ms.");
+                return new[] { VideoParamResolver.FinishVideo(f2, w2, h2, input, cancel) };
+            }
+            if (isConcatI2V && initImage is null)
+            {
+                input.RefusalReasons?.Add("HartsyInference: this Wan I2V model requires an Init Image.");
+            }
+
+            // TI2V-5B expand_timesteps I2V (first-frame latent) or plain T2V.
+            Tensor firstFrameLatent = null;
+            if (initImage is not null && !isConcatI2V)
+            {
+                byte[] frameRgb = RgbToImage.ToHwcRgbResized(initImage, width, height);
+                firstFrameLatent = entry.VaeEncoder.EncodeRgbFrame(backend, frameRgb, width, height);
+                backend.Sync();
+                backend.FreeWeights(entry.VaeEncoder.EnumerateWeights());
+            }
+            try
+            {
+                var (frames, outW, outH, _) = pipeline.GenerateFromEmbeddings(
+                    promptEmbeds, negEmbeds, request, numFrames, bridge, firstFrameLatent);
+                Logs.Verbose($"[HartsyInference][Wan] Pipeline returned {frames.Length} frames {outW}x{outH} " +
+                    $"({(firstFrameLatent is null ? "T2V" : "I2V")}) in {Environment.TickCount64 - start}ms.");
+                return new[] { VideoParamResolver.FinishVideo(frames, outW, outH, input, cancel) };
+            }
+            finally { firstFrameLatent?.Dispose(); }
         }
         finally
         {
             promptEmbeds.Dispose();
             negEmbeds.Dispose();
-            firstFrameLatent?.Dispose();
         }
+    }
+
+    /// <summary>Copies a <c>[1, seq, dim]</c> tensor to a <c>[seq, dim]</c> tensor (the pipeline's image-embeds shape).</summary>
+    private static unsafe Tensor DropBatch(Tensor x)
+    {
+        int seq = (int)x.Shape[1], dim = (int)x.Shape[2];
+        Tensor o = new Tensor(new TensorShape(seq, dim), DType.F32);
+        long bytes = (long)seq * dim * 4;
+        Buffer.MemoryCopy((float*)x.DataPointer, (float*)o.DataPointer, bytes, bytes);
+        return o;
     }
 }
 
@@ -268,19 +318,21 @@ public sealed class WanVideoCacheEntry : IDisposable
     public required string CompatClass { get; init; }
     public required WanVideoPipeline Pipeline { get; init; }
     public required WanVideoConfig Config { get; init; }
+    public required bool IsClipI2V { get; init; }
     public required T5Tokenizer Tokenizer { get; init; }
     public required T5TextEncoder Umt5 { get; init; }
     public required WanVideoTransformer Transformer { get; init; }
 
-    /// <summary>Converted (diffusers-named) DiT weight dict, retained for per-generation LoRA
-    /// merging — tensor refs over <see cref="CheckpointLoader"/>'s mmap, so the cost is the dict
-    /// shell only. <see cref="LoraApplier.ShallowClone"/> before mutating.</summary>
+    /// <summary>Converted (diffusers-named) DiT weight dict, retained for per-generation LoRA merging
+    /// (<see cref="LoraApplier.ShallowClone"/> before mutating).</summary>
     public required Dictionary<string, Tensor> TransformerWeights { get; init; }
-    public required Wan22VaeDecoder Vae { get; init; }
-    public required Wan22VaeEncoder VaeEncoder { get; init; }
+    public required IWanVaeDecoder Vae { get; init; }
+    public required IWanVaeEncoder VaeEncoder { get; init; }
+    public ClipVisionEncoder ClipVision { get; init; }
     public required SafeTensorsLoader CheckpointLoader { get; init; }
     public required IReadOnlyList<SafeTensorsLoader> VaeLoaders { get; init; }
     public required SafeTensorsLoader Umt5Loader { get; init; }
+    public SafeTensorsLoader ClipLoader { get; init; }
 
     public DateTime LastUsedUtc { get; set; } = DateTime.UtcNow;
     private bool _disposed;
@@ -295,6 +347,7 @@ public sealed class WanVideoCacheEntry : IDisposable
         Transformer?.Dispose();
         CheckpointLoader?.Dispose();
         Umt5Loader?.Dispose();
+        ClipLoader?.Dispose();
         if (VaeLoaders is not null)
         {
             foreach (SafeTensorsLoader loader in VaeLoaders) loader?.Dispose();

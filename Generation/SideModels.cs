@@ -287,6 +287,37 @@ public static class SideModels
         Hash: "e40321bd36b9709991dae2530eb4ac303dd168276980d3e9bc4b6e2b75fed156",
         DisplayName: "Wan 2.2 VAE");
 
+    /// <summary>Wan2.1 16-channel video VAE (8× spatial / 4× temporal) — shared by Wan2.1 1.3B/14B and the Wan2.2
+    /// A14B 14B models. Comfy-Org repackaged file. Hash unpinned (TODO: pin once verified against a download).</summary>
+    public static readonly Entry Wan21Vae = new(
+        CanonicalName: "Wan/wan_2.1_vae.safetensors",
+        FolderType: "VAE",
+        Url: "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/vae/wan_2.1_vae.safetensors",
+        Hash: "",
+        DisplayName: "Wan 2.1 VAE");
+
+    /// <summary>Wav2Vec2 speech feature extractor for Wan2.2-S2V (the frozen audio front-end whose stacked hidden
+    /// states the S2V audio injector cross-attends to). The official S2V card uses <c>TencentGameMate/chinese-wav2vec2-base</c>
+    /// (hidden 768, 12 layers); the WanS2VLoader picks <see cref="Wav2Vec2Base"/> vs <see cref="Wav2Vec2Large"/> from the
+    /// checkpoint's audio-encoder input dim. <b>URLs/hashes are best-effort and UNVERIFIED</b> — S2V is validation-pending
+    /// and the exact distribution/format isn't pinned yet; if the download or load fails, the loader refuses cleanly.
+    /// TODO: confirm the safetensors source + hash against the real checkpoint, and whether base or large is correct.</summary>
+    public static readonly Entry Wav2Vec2Base = new(
+        CanonicalName: "Wav2Vec2/chinese-wav2vec2-base.safetensors",
+        FolderType: "Clip",
+        Url: "https://huggingface.co/TencentGameMate/chinese-wav2vec2-base/resolve/main/model.safetensors",
+        Hash: "",
+        DisplayName: "Wav2Vec2 (chinese-base, S2V audio front-end)");
+
+    /// <summary>wav2vec2-large variant (hidden 1024, 24 layers) for S2V checkpoints whose audio encoder expects 1024-dim
+    /// features. Best-effort/unverified — see <see cref="Wav2Vec2Base"/>.</summary>
+    public static readonly Entry Wav2Vec2Large = new(
+        CanonicalName: "Wav2Vec2/wav2vec2-large.safetensors",
+        FolderType: "Clip",
+        Url: "https://huggingface.co/facebook/wav2vec2-large-960h/resolve/main/model.safetensors",
+        Hash: "",
+        DisplayName: "Wav2Vec2 (large, S2V audio front-end)");
+
     /// <summary>ACE-Step 1.5 Oobleck audio VAE (48 kHz stereo ↔ 64-ch 25 Hz latents). Canonical
     /// path, URL, and hash match SwarmUI core's <c>CommonModels.Known["ace-step-15-vae"]</c> so a
     /// copy downloaded by the ComfyUI backend is reused (and vice versa).</summary>

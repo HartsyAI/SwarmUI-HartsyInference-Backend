@@ -580,12 +580,24 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                     _cache.PutQwenImage(entry);
                 });
             }
-            else if (compat == WanVideoLoader.Wan22_5BCompatClassId)
+            else if (compat == WanVideoLoader.Wan22_5BCompatClassId
+                || compat == WanVideoLoader.Wan21_1_3BCompatClassId
+                || compat == WanVideoLoader.Wan21_14BCompatClassId)
             {
                 await Task.Run(() =>
                 {
-                    WanVideoCacheEntry entry = WanVideoLoader.Load(_backend, model, input, msg => AddLoadStatus(msg));
-                    _cache.PutWanVideo(entry);
+                    // VACE shares the plain-Wan compat class but needs its own control-branch loader;
+                    // route off the model-class ID (Animate/S2V are refused inside WanVideoLoader.Load).
+                    if (WanModelVariants.IsVace(model.ModelClass?.ID))
+                    {
+                        WanVaceCacheEntry entry = WanVaceLoader.Load(_backend, model, input, msg => AddLoadStatus(msg));
+                        _cache.PutWanVace(entry);
+                    }
+                    else
+                    {
+                        WanVideoCacheEntry entry = WanVideoLoader.Load(_backend, model, input, msg => AddLoadStatus(msg));
+                        _cache.PutWanVideo(entry);
+                    }
                 });
             }
             else if (compat == LtxVideoLoader.LtxVideoCompatClassId)
@@ -941,8 +953,17 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                     // LoRA / img2img (edit) / inpaint not implemented for Qwen-Image — refused upfront in IsValidForThisBackend.
                     return QwenImageLoader.Generate(entry, _backend, input, progressBridge, cancel);
                 }
-                if (compat == WanVideoLoader.Wan22_5BCompatClassId)
+                if (compat == WanVideoLoader.Wan22_5BCompatClassId
+                    || compat == WanVideoLoader.Wan21_1_3BCompatClassId
+                    || compat == WanVideoLoader.Wan21_14BCompatClassId)
                 {
+                    // VACE (control-video) routes to its own loader; LoRA on VACE refused in IsValidForThisBackend.
+                    if (WanModelVariants.IsVace(model.ModelClass?.ID))
+                    {
+                        WanVaceCacheEntry vaceEntry = _cache.TryGetWanVace(model.Name)
+                            ?? throw new InvalidOperationException("Wan VACE model loaded but not in cache.");
+                        return WanVaceLoader.Generate(vaceEntry, _backend, input, progressBridge, cancel);
+                    }
                     WanVideoCacheEntry entry = _cache.TryGetWanVideo(model.Name)
                         ?? throw new InvalidOperationException("Wan video model loaded but not in cache.");
                     // Video-extend / end-frame not implemented for Wan — refused upfront in IsValidForThisBackend.
@@ -1259,10 +1280,29 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         //   - End frame / video-extend / audio params: Comfy-only flows we don't implement.
         //   - Refiner over a video output would feed mp4 bytes into the SDXL refiner — refuse.
         bool isVideoArch = compat == WanVideoLoader.Wan22_5BCompatClassId
+            || compat == WanVideoLoader.Wan21_1_3BCompatClassId
+            || compat == WanVideoLoader.Wan21_14BCompatClassId
             || compat == LtxVideoLoader.LtxVideoCompatClassId
             || compat == LanceLoader.LanceVideoCompatClassId;
         if (isVideoArch)
         {
+            // Wan VACE (control-video mode): the Init Image slot is the control clip and is REQUIRED;
+            // LoRA on the VACE control branch isn't wired yet.
+            if (WanModelVariants.IsVace(model.ModelClass?.ID))
+            {
+                if (input.Get(T2IParamTypes.InitImage) is null)
+                {
+                    input.RefusalReasons.Add(
+                        "HartsyInference: Wan VACE needs a control video (or image) in the Init Image slot — "
+                        + "that's the pose/depth/edge/sketch sequence the generation follows.");
+                    return false;
+                }
+                if (input.TryGet(T2IParamTypes.Loras, out List<string> vaceLoras) && vaceLoras is not null && vaceLoras.Count > 0)
+                {
+                    input.RefusalReasons.Add("HartsyInference: LoRAs aren't supported for Wan VACE yet. Remove the LoRA selection.");
+                    return false;
+                }
+            }
             if (input.Get(T2IParamTypes.InitImage) is not null && compat == LtxVideoLoader.LtxVideoCompatClassId)
             {
                 input.RefusalReasons.Add(
@@ -1377,7 +1417,9 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 compat == Sd15Loader.Sd15CompatClassId
                 || compat == SdxlLoader.SdxlCompatClassId
                 || compat == FluxLoader.Flux1CompatClassId
-                || compat == WanVideoLoader.Wan22_5BCompatClassId;
+                || compat == WanVideoLoader.Wan22_5BCompatClassId
+                || compat == WanVideoLoader.Wan21_1_3BCompatClassId
+                || compat == WanVideoLoader.Wan21_14BCompatClassId;
             if (!isLoraSupported)
             {
                 input.RefusalReasons.Add(
@@ -1522,7 +1564,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             AnimaLoader.AnimaCompatClassId => _cache.TryGetAnima(modelName) is not null,
             HiDreamLoader.HiDreamI1CompatClassId => _cache.TryGetHiDream(modelName) is not null,
             QwenImageLoader.QwenImageCompatClassId => _cache.TryGetQwenImage(modelName) is not null,
-            WanVideoLoader.Wan22_5BCompatClassId => _cache.TryGetWanVideo(modelName) is not null,
+            WanVideoLoader.Wan22_5BCompatClassId or WanVideoLoader.Wan21_1_3BCompatClassId
+                or WanVideoLoader.Wan21_14BCompatClassId => _cache.TryGetWanVideo(modelName) is not null,
             LtxVideoLoader.LtxVideoCompatClassId => _cache.TryGetLtxVideo(modelName) is not null,
             AceStepLoader.AceStepCompatClassId => _cache.TryGetAceStep(modelName) is not null || _cache.TryGetAceStep15(modelName) is not null,
             MusicGenLoader.MusicGenCompatClassId => _cache.TryGetMusicGen(modelName) is not null,
