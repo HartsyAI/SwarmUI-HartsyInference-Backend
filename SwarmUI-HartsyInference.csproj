@@ -5,6 +5,16 @@
              ChromaVariantLoaders) — Buffer.MemoryCopy + byte* to extract embedding sub-rows
              without a managed copy. -->
         <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+        <!-- Make the floating HartsyInference 'alpha.*' reference (below) ACTUALLY resolve to the
+             latest published version on every build. Without this, NuGet serves the flat-container
+             version index from its local HTTP cache (~30 min TTL), so a freshly-published alpha.N
+             stays invisible and the build silently sticks on a stale cached version. SwarmUI's
+             ExtensionsManager.BuildExtension runs a plain `dotnet build` (implicit restore, with no
+             cache-bypassing flag), so we force the live feed query here at the project level.
+             Trade-off: extension builds now require network access to nuget.org (no offline restore
+             of a NEW floating version; already-resolved versions in the global-packages folder are
+             unaffected). Pin Version below to a specific alpha.N if you ever need an offline build. -->
+        <RestoreNoHttpCache>true</RestoreNoHttpCache>
     </PropertyGroup>
     <Import Project="../../SwarmUI.extension.props" />
 
