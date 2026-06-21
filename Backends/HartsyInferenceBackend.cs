@@ -138,7 +138,15 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     public override async Task Init()
     {
         EnsureLoggerWired();
-        await MaybeAutoUpdateEngine();
+        if (await MaybeAutoUpdateEngine())
+        {
+            // A newer engine was staged but can't hot-swap into this process. Fail loud instead of
+            // silently serving the stale in-process version — the user must restart to load it.
+            Status = BackendStatus.ERRORED;
+            AddLoadStatus("Engine update staged — RESTART SwarmUI to load the new engine. This backend is disabled until you restart.");
+            Logs.Warning("[HartsyInference] Backend disabled: a newer engine is staged. Restart SwarmUI to load it (set AutoUpdate=aggressive to auto-restart).");
+            return;
+        }
         try
         {
             string requested = Settings?.ComputeBackend?.ToLowerInvariant() ?? "auto";
@@ -231,10 +239,13 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     /// <i>staged</i> into the extension's build output and only takes effect on the next SwarmUI start. 'aggressive'
     /// clears NuGet caches and calls <see cref="Program.RequestRestart"/> so the new build loads automatically.
     /// Best-effort: any failure is logged and the current engine keeps running.</summary>
-    private async Task MaybeAutoUpdateEngine()
+    /// <summary>Returns true if a newer engine was staged and the backend should now refuse to run on the
+    /// stale in-process version (forcing the user to restart). False when up to date, when staging failed,
+    /// when 'aggressive' is restarting anyway, or when the loop-guard tripped (run degraded, don't brick).</summary>
+    private async Task<bool> MaybeAutoUpdateEngine()
     {
         string mode = (Settings?.AutoUpdate ?? "false").Trim().ToLowerInvariant();
-        if (mode is "false" or "" or "0" or "no" or "off") return;
+        if (mode is "false" or "" or "0" or "no" or "off") return false;
         bool aggressive = mode is "aggressive" or "force";
         // Boot-loop guard: when 'aggressive' stages an update and restarts, we record the target version.
         // If we come back up STILL behind that exact version, the restore isn't advancing (e.g. a version
@@ -248,7 +259,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             string loaded = LoadedEngineVersion();
             string latest = await LatestEnginePackageVersion();
             AddLoadStatus($"Auto-update: loaded engine={loaded ?? "unknown"}, latest published={latest ?? "unknown"}.");
-            if (latest is null) { AddLoadStatus("Auto-update: could not query NuGet; skipping."); return; }
+            if (latest is null) { AddLoadStatus("Auto-update: could not query NuGet; skipping."); return false; }
             if (loaded is not null && !IsNewerAlpha(latest, loaded))
             {
                 // Up to date — a prior staged update (if any) applied successfully, so clear the marker.
@@ -258,7 +269,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                     catch (Exception mEx) { Logs.Debug($"[HartsyInference] Auto-update: couldn't clear update marker: {mEx.Message}"); }
                 }
                 AddLoadStatus("Auto-update: engine is already up to date.");
-                return;
+                return false;
             }
             string pending = File.Exists(updateMarker) ? File.ReadAllText(updateMarker).Trim() : null;
             if (aggressive && string.Equals(pending, latest, StringComparison.Ordinal))
@@ -266,14 +277,14 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 Logs.Error($"[HartsyInference] Auto-update: engine {latest} was already staged on a previous restart but the running engine is still {loaded}. " +
                     $"Not auto-restarting again (avoiding a boot loop). The rebuild's NuGet restore isn't resolving {latest} — check for a version race or a stale floating-version restore.");
                 AddLoadStatus($"Auto-update: {latest} did not apply after a restart — auto-restart paused to avoid a loop (see logs).");
-                return;
+                return false; // run degraded on the old engine rather than bricking the backend
             }
 
             string csproj = ExtensionProjectPath();
             if (csproj is null)
             {
                 Logs.Warning("[HartsyInference] Auto-update: extension .csproj not found next to the assembly; cannot rebuild.");
-                return;
+                return false;
             }
             AddLoadStatus($"Auto-update: verifying engine {latest} compiles against this extension (this can take a minute)...");
             string dir = Path.GetDirectoryName(csproj);
@@ -289,7 +300,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             {
                 Logs.Error($"[HartsyInference] Auto-update: engine {latest} does NOT compile against this extension — staying on the current engine. Build output:\n{output}");
                 AddLoadStatus($"Auto-update: engine {latest} failed to compile — keeping the current engine (see logs).");
-                return;
+                return false;
             }
 
             // The engine is an IN-PROCESS library: it can't hot-swap, and SwarmUI's
@@ -313,7 +324,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 Logs.Warning($"[HartsyInference] Auto-update: couldn't invalidate cached build '{selfDll}' ({delEx.Message}). " +
                     $"Delete that file (or its folder under src/bin/extensions/) and restart to load engine {latest}.");
                 AddLoadStatus($"Auto-update: couldn't invalidate cached build — delete '{Path.GetFileName(selfDll)}' manually and restart.");
-                return;
+                return false;
             }
             Logs.Warning($"[HartsyInference] Engine {latest} verified + cached extension build invalidated. SwarmUI will REBUILD against the new engine on next start (an in-process library can't hot-swap).");
             if (aggressive)
@@ -324,16 +335,19 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 try { File.WriteAllText(updateMarker, latest); }
                 catch (Exception mEx) { Logs.Debug($"[HartsyInference] Auto-update: couldn't write update marker: {mEx.Message}"); }
                 Program.RequestRestart();
+                return false; // process is restarting; no need to error the backend
             }
             else
             {
-                AddLoadStatus($"Auto-update: engine {latest} verified — restart SwarmUI to rebuild and apply.");
+                AddLoadStatus($"Auto-update: engine {latest} staged — RESTART SwarmUI to load it.");
+                return true; // staged but not loaded: caller errors the backend so it won't run stale
             }
         }
         catch (Exception ex)
         {
             Logs.Error($"[HartsyInference] Auto-update failed: {ex.ReadableString()}");
             AddLoadStatus("Auto-update: failed (continuing with the current engine).");
+            return false;
         }
     }
 
