@@ -37,7 +37,7 @@
              1.0.0-alpha.<run_number> on each push to main; bump this to the EXACT version that CI
              published (check the run's "Publishing version:" log line) whenever you ship engine changes.
              alpha.25 = lazy host-buffer allocation (GPU activations no longer pay host malloc+memset). -->
-        <PackageReference Include="HartsyInference" Version="1.0.0-alpha.25" />
+        <PackageReference Include="HartsyInference" Version="1.0.0-alpha.26" />
     </ItemGroup>
 
     <!-- Ideogram 4's magic-prompt system prompt, ported verbatim from upstream

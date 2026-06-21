@@ -229,7 +229,10 @@ public static class Ideogram4Loader
         // Chat-template tokenize, then trim the right-pad run (EncodeChat pads to
         // maxLength with BOS; feeding 2048 mostly-pad tokens would both dilute the
         // conditioning and ~3x the attention cost of the unified sequence).
-        int[] padded = entry.Tokenizer.EncodeChat(promptForEncode);
+        // includeThinkBlock:false — Ideogram 4's encoder is Qwen3-VL-8B-Instruct, whose chat template
+        // ends the generation prompt at "<|im_start|>assistant\n" with NO <think> block (unlike the
+        // Qwen3-text template Klein uses). Matches upstream pipeline_ideogram4.py apply_chat_template.
+        int[] padded = entry.Tokenizer.EncodeChat(promptForEncode, includeThinkBlock: false);
         int[] promptTokens = TrimRightPad(padded, Qwen3Tokenizer.BosTokenId);
         Logs.Verbose($"[HartsyInference][Ideogram4] Prompt tokenized to {promptTokens.Length} tokens (chat template, pad trimmed).");
 
