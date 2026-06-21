@@ -236,6 +236,13 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         string mode = (Settings?.AutoUpdate ?? "false").Trim().ToLowerInvariant();
         if (mode is "false" or "" or "0" or "no" or "off") return;
         bool aggressive = mode is "aggressive" or "force";
+        // Boot-loop guard: when 'aggressive' stages an update and restarts, we record the target version.
+        // If we come back up STILL behind that exact version, the restore isn't advancing (e.g. a version
+        // race or a stuck floating restore) — so we refuse to auto-restart again and surface an error
+        // instead of cycling forever.
+        string updateMarker = Path.Combine(
+            Path.GetDirectoryName(typeof(HartsyInferenceBackend).Assembly.Location) ?? ".",
+            ".hartsy-engine-update-pending");
         try
         {
             string loaded = LoadedEngineVersion();
@@ -244,7 +251,21 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             if (latest is null) { AddLoadStatus("Auto-update: could not query NuGet; skipping."); return; }
             if (loaded is not null && !IsNewerAlpha(latest, loaded))
             {
+                // Up to date — a prior staged update (if any) applied successfully, so clear the marker.
+                if (File.Exists(updateMarker))
+                {
+                    try { File.Delete(updateMarker); }
+                    catch (Exception mEx) { Logs.Debug($"[HartsyInference] Auto-update: couldn't clear update marker: {mEx.Message}"); }
+                }
                 AddLoadStatus("Auto-update: engine is already up to date.");
+                return;
+            }
+            string pending = File.Exists(updateMarker) ? File.ReadAllText(updateMarker).Trim() : null;
+            if (aggressive && string.Equals(pending, latest, StringComparison.Ordinal))
+            {
+                Logs.Error($"[HartsyInference] Auto-update: engine {latest} was already staged on a previous restart but the running engine is still {loaded}. " +
+                    $"Not auto-restarting again (avoiding a boot loop). The rebuild's NuGet restore isn't resolving {latest} — check for a version race or a stale floating-version restore.");
+                AddLoadStatus($"Auto-update: {latest} did not apply after a restart — auto-restart paused to avoid a loop (see logs).");
                 return;
             }
 
@@ -299,6 +320,9 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             {
                 Logs.Warning("[HartsyInference] AutoUpdate=aggressive — requesting a SwarmUI restart to rebuild and load the new engine.");
                 AddLoadStatus($"Auto-update: engine {latest} verified — restarting SwarmUI to rebuild and apply.");
+                // Record the target so the boot-loop guard above can detect if the restart didn't take.
+                try { File.WriteAllText(updateMarker, latest); }
+                catch (Exception mEx) { Logs.Debug($"[HartsyInference] Auto-update: couldn't write update marker: {mEx.Message}"); }
                 Program.RequestRestart();
             }
             else
