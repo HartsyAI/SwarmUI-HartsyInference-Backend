@@ -27,6 +27,7 @@ public static class ModelSupport
         AuraFlowLoader.AuraFlowCompatClassId,     // "auraflow-v1"
         FLiteLoader.FLiteCompatClassId,           // "f-lite" — wired-untested (no E2E test in HartsyInference yet)
         Ideogram4Loader.Ideogram4CompatClassId,   // "ideogram-4" — dual 9.3B DiT; ≥22 GB VRAM gate at load time; non-commercial license
+        BooguImageLoader.BooguImageCompatClassId, // "boogu-image" — 10B OmniGen2/Lumina-2 DiT + Qwen3-VL-8B + FLUX.1 VAE; T2I + reference-image edit (Apache-2.0)
         ErnieImageLoader.ErnieImageCompatClassId, // "ernie-image" — Baidu ~8B single-stream DiT + Ministral-3-3B TE + Flux.2 VAE (Apache-2.0)
         ZImageLoader.ZImageCompatClassId,         // "z-image"
         AnimaLoader.AnimaCompatClassId,           // "anima" — Cosmos-Predict2-2B family + LlmAdapter

@@ -607,6 +607,14 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                     _cache.PutIdeogram4(entry);
                 });
             }
+            else if (compat == BooguImageLoader.BooguImageCompatClassId)
+            {
+                await Task.Run(() =>
+                {
+                    BooguImageCacheEntry entry = BooguImageLoader.Load(_backend, model, input, msg => AddLoadStatus(msg));
+                    _cache.PutBooguImage(entry);
+                });
+            }
             else if (compat == ErnieImageLoader.ErnieImageCompatClassId)
             {
                 await Task.Run(() =>
@@ -990,6 +998,14 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                     // LoRA / img2img / inpaint / IPA / ControlNet not implemented for Ideogram 4 —
                     // refused upfront in IsValidForThisBackend (not in any per-feature allow list).
                     return Ideogram4Loader.Generate(entry, input, progressBridge, cancel);
+                }
+                if (compat == BooguImageLoader.BooguImageCompatClassId)
+                {
+                    BooguImageCacheEntry entry = _cache.TryGetBooguImage(model.Name)
+                        ?? throw new InvalidOperationException("Boogu-Image model loaded but not in cache.");
+                    // Text-to-image, or reference-image edit when an Init Image is present (allowed in the
+                    // img2img gate below). LoRA / inpaint mask / ControlNet / IPA refused in IsValidForThisBackend.
+                    return BooguImageLoader.Generate(entry, _backend, input, progressBridge, cancel);
                 }
                 if (compat == ErnieImageLoader.ErnieImageCompatClassId)
                 {
@@ -1566,6 +1582,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 || compat == FluxLoader.Flux1CompatClassId
                 || Sd3Loader.IsSd3Compat(compat)
                 || compat == ZImageLoader.ZImageCompatClassId
+                || compat == BooguImageLoader.BooguImageCompatClassId // Init Image = the edit reference (TI2I)
                 || Flux2Loader.IsFlux2Compat(compat);
             if (!isImg2ImgSupported)
             {

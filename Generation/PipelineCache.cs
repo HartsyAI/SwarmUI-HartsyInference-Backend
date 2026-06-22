@@ -18,6 +18,7 @@ public sealed class PipelineCache
     private readonly Dictionary<string, AuraFlowCacheEntry> _auraFlow = new();
     private readonly Dictionary<string, FLiteCacheEntry> _fLite = new();
     private readonly Dictionary<string, Ideogram4CacheEntry> _ideogram4 = new();
+    private readonly Dictionary<string, BooguImageCacheEntry> _booguImage = new();
     private readonly Dictionary<string, ErnieImageCacheEntry> _ernieImage = new();
     private readonly Dictionary<string, ChromaRadianceCacheEntry> _chromaRadiance = new();
     private readonly Dictionary<string, ZetaChromaCacheEntry> _zetaChroma = new();
@@ -56,6 +57,7 @@ public sealed class PipelineCache
     public AuraFlowCacheEntry TryGetAuraFlow(string modelName) => Touch(_auraFlow, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
     public FLiteCacheEntry TryGetFLite(string modelName) => Touch(_fLite, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
     public Ideogram4CacheEntry TryGetIdeogram4(string modelName) => Touch(_ideogram4, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
+    public BooguImageCacheEntry TryGetBooguImage(string modelName) => Touch(_booguImage, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
     public ErnieImageCacheEntry TryGetErnieImage(string modelName) => Touch(_ernieImage, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
     public ChromaRadianceCacheEntry TryGetChromaRadiance(string modelName) => Touch(_chromaRadiance, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
     public ZetaChromaCacheEntry TryGetZetaChroma(string modelName) => Touch(_zetaChroma, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
@@ -87,6 +89,7 @@ public sealed class PipelineCache
     public void PutAuraFlow(AuraFlowCacheEntry entry) => Put(_auraFlow, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
     public void PutFLite(FLiteCacheEntry entry) => Put(_fLite, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
     public void PutIdeogram4(Ideogram4CacheEntry entry) => Put(_ideogram4, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
+    public void PutBooguImage(BooguImageCacheEntry entry) => Put(_booguImage, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
     public void PutErnieImage(ErnieImageCacheEntry entry) => Put(_ernieImage, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
     public void PutChromaRadiance(ChromaRadianceCacheEntry entry) => Put(_chromaRadiance, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
     public void PutZetaChroma(ZetaChromaCacheEntry entry) => Put(_zetaChroma, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
@@ -144,7 +147,7 @@ public sealed class PipelineCache
         }
     }
 
-    private int TotalCount => _flux.Count + _flux2.Count + _chroma.Count + _chromaRadiance.Count + _zetaChroma.Count + _auraFlow.Count + _fLite.Count + _ideogram4.Count + _ernieImage.Count + _zImage.Count + _anima.Count + _hiDream.Count + _qwenImage.Count + _sd15.Count + _sdxl.Count + _sd3.Count + _wanVideo.Count + _wanVace.Count + _wanAnimate.Count + _wanS2V.Count + _ltxVideo.Count + _ltxVideo2.Count + _aceStep.Count + _aceStep15.Count + _musicGen.Count + _yue.Count + _lance.Count + _lens.Count + _refiner.Count + _ipAdapter.Count;
+    private int TotalCount => _flux.Count + _flux2.Count + _chroma.Count + _chromaRadiance.Count + _zetaChroma.Count + _auraFlow.Count + _fLite.Count + _ideogram4.Count + _booguImage.Count + _ernieImage.Count + _zImage.Count + _anima.Count + _hiDream.Count + _qwenImage.Count + _sd15.Count + _sdxl.Count + _sd3.Count + _wanVideo.Count + _wanVace.Count + _wanAnimate.Count + _wanS2V.Count + _ltxVideo.Count + _ltxVideo2.Count + _aceStep.Count + _aceStep15.Count + _musicGen.Count + _yue.Count + _lance.Count + _lens.Count + _refiner.Count + _ipAdapter.Count;
 
     /// <summary>Evict the globally-oldest entry across all architecture maps until we're
     /// at or under <see cref="_maxEntries"/>.</summary>
@@ -207,6 +210,15 @@ public sealed class PipelineCache
                     oldestTime = kv.Value.LastUsedUtc;
                     string key = kv.Key;
                     evictAction = () => { _ideogram4[key].Dispose(); _ideogram4.Remove(key); };
+                }
+            }
+            foreach (KeyValuePair<string, BooguImageCacheEntry> kv in _booguImage)
+            {
+                if (kv.Value.LastUsedUtc < oldestTime)
+                {
+                    oldestTime = kv.Value.LastUsedUtc;
+                    string key = kv.Key;
+                    evictAction = () => { _booguImage[key].Dispose(); _booguImage.Remove(key); };
                 }
             }
             foreach (KeyValuePair<string, ErnieImageCacheEntry> kv in _ernieImage)
@@ -442,6 +454,7 @@ public sealed class PipelineCache
             foreach (AuraFlowCacheEntry entry in _auraFlow.Values) entry.Dispose();
             foreach (FLiteCacheEntry entry in _fLite.Values) entry.Dispose();
             foreach (Ideogram4CacheEntry entry in _ideogram4.Values) entry.Dispose();
+            foreach (BooguImageCacheEntry entry in _booguImage.Values) entry.Dispose();
             foreach (ErnieImageCacheEntry entry in _ernieImage.Values) entry.Dispose();
             foreach (ChromaRadianceCacheEntry entry in _chromaRadiance.Values) entry.Dispose();
             foreach (ZetaChromaCacheEntry entry in _zetaChroma.Values) entry.Dispose();
@@ -472,6 +485,7 @@ public sealed class PipelineCache
             _auraFlow.Clear();
             _fLite.Clear();
             _ideogram4.Clear();
+            _booguImage.Clear();
             _ernieImage.Clear();
             _chromaRadiance.Clear();
             _zetaChroma.Clear();
