@@ -191,7 +191,7 @@ public static class Krea2Loader
     }
 
     private static (Dictionary<string, Tensor> Weights, SafeTensorsLoader Loader) LoadComponent(
-        string filePath, Func<string, string?> keyTransform, bool applyFp8Dequant)
+        string filePath, Func<string, string> keyTransform, bool applyFp8Dequant)
     {
         SafeTensorsLoader loader = new();
         loader.Load(filePath);
@@ -201,7 +201,7 @@ public static class Krea2Loader
             foreach (KeyValuePair<string, Tensor> kvp in loader.GetAllTensors())
             {
                 if (kvp.Key.EndsWith(".scaled_fp8", StringComparison.Ordinal) || kvp.Key == "scaled_fp8") continue;
-                string? mapped = keyTransform(kvp.Key);
+                string mapped = keyTransform(kvp.Key);
                 if (mapped is not null) merged[mapped] = kvp.Value;
             }
             return (applyFp8Dequant ? CheckpointConvertUtils.ApplyFp8ScaledDequant(merged) : merged, loader);
@@ -224,8 +224,9 @@ public static class Krea2Loader
         return key;
     }
 
-    /// <summary>Maps a Qwen3-VL checkpoint key to the <c>LlamaStyleEncoder</c> convention (drops vision tower + lm_head).</summary>
-    private static string? RemapQwenKey(string key)
+    /// <summary>Maps a Qwen3-VL checkpoint key to the <c>LlamaStyleEncoder</c> convention (drops vision tower + lm_head;
+    /// returns null to drop a key).</summary>
+    private static string RemapQwenKey(string key)
     {
         if (key.Contains(".visual.") || key.StartsWith("visual.", StringComparison.Ordinal)) return null;
         if (key.Contains("lm_head")) return null;
