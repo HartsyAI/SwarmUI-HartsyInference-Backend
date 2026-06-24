@@ -744,6 +744,14 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                     _cache.PutLens(entry);
                 });
             }
+            else if (compat == Krea2Loader.Krea2CompatClassId)
+            {
+                await Task.Run(() =>
+                {
+                    Krea2CacheEntry entry = Krea2Loader.Load(_backend, model, input, msg => AddLoadStatus(msg));
+                    _cache.PutKrea2(entry);
+                });
+            }
             else
             {
                 Logs.Warning($"[HartsyInference] LoadModel: architecture '{compat}' not supported. Returning false so another backend can handle it.");
@@ -1129,6 +1137,13 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                         ?? throw new InvalidOperationException("Lens model loaded but not in cache.");
                     // LoRA / img2img / inpaint not implemented for Lens — refused upfront in IsValidForThisBackend.
                     return LensLoader.Generate(entry, input, progressBridge, cancel);
+                }
+                if (compat == Krea2Loader.Krea2CompatClassId)
+                {
+                    Krea2CacheEntry entry = _cache.TryGetKrea2(model.Name)
+                        ?? throw new InvalidOperationException("Krea 2 model loaded but not in cache.");
+                    // Krea 2 is text-to-image only; LoRA / img2img / inpaint refused upfront in IsValidForThisBackend.
+                    return Krea2Loader.Generate(entry, input, progressBridge, cancel);
                 }
                 throw new InvalidOperationException($"No generator wired for compat '{compat}'.");
             }, cancel);
@@ -1716,6 +1731,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             LanceLoader.LanceCompatClassId => _cache.TryGetLance(modelName) is not null,
             LanceLoader.LanceVideoCompatClassId => _cache.TryGetLance(modelName) is not null,
             LensLoader.LensCompatClassId => _cache.TryGetLens(modelName) is not null,
+            Krea2Loader.Krea2CompatClassId => _cache.TryGetKrea2(modelName) is not null,
             _ => false,
         };
     }

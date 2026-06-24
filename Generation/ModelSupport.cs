@@ -47,6 +47,7 @@ public static class ModelSupport
         LanceLoader.LanceCompatClassId,           // "lance" — ByteDance Lance 3B folder-checkpoint T2I (validation-pending numerics)
         LanceLoader.LanceVideoCompatClassId,      // "lance-video" — Lance 3B Video T2V (validation-pending numerics)
         LensLoader.LensCompatClassId,             // "lens" — Microsoft Lens 3.8B MMDiT + GPT-OSS-20B encoder (Comfy split files)
+        Krea2Loader.Krea2CompatClassId,           // "krea-2" — Krea 2 12.9B single-stream MMDiT (Qwen3-VL-4B 12-layer tap + text-fusion + Qwen-Image VAE); Base + Turbo (filename-detected)
         // TODO: SdxlLoader.SdxlRefinerCompatClassId once we wire the refiner two-pass flow.
     };
 

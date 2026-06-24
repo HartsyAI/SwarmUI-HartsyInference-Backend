@@ -153,6 +153,18 @@ public static class SideModels
         Hash: "4ba424cf62e51392e4d1a39933e803706f4e823c1065f36aaf149c6453f66bcd",
         DisplayName: "Qwen3-VL-8B (Ideogram 4)");
 
+    /// <summary>Qwen3-VL-4B (language tower) — Krea 2's text encoder. Krea 2 taps 12 of its decoder layers'
+    /// hidden states (see <c>Krea2Config.TextEncoderSelectLayers</c>) and fuses them in-transformer; rope θ=5e6
+    /// (<c>LlamaStyleEncoderConfig.Qwen3_VL_4B</c>). Distinct from the base Qwen3-4B (<see cref="Qwen3_4B"/>) Z-Image /
+    /// Flux.2 Klein 4B use — Krea needs the VL-4B weights. fp8_scaled variant from <c>Comfy-Org/Krea-2</c> (the engine
+    /// folds the scale_weight companions at load). Saved under <c>Krea2/</c> so it sits apart from the base-4B file.</summary>
+    public static readonly Entry Qwen3VL_4B = new(
+        CanonicalName: "Krea2/qwen3vl_4b_fp8_scaled.safetensors",
+        FolderType: "Clip",
+        Url: "https://huggingface.co/Comfy-Org/Krea-2/resolve/main/text_encoders/qwen3vl_4b_fp8_scaled.safetensors",
+        Hash: "54bd5144df0bbc25dd6ccadfcb826b521445a1b06ae5a42570bdd2974ca87094",
+        DisplayName: "Qwen3-VL-4B (Krea 2)");
+
     /// <summary>Mistral 3 Small for Flux.2 Dev. Same FP4 caveat as Qwen3-8B above.</summary>
     public static readonly Entry MistralSmallFlux2 = new(
         CanonicalName: "mistral_3_small_flux2.safetensors",

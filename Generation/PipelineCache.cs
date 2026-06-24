@@ -41,6 +41,7 @@ public sealed class PipelineCache
     private readonly Dictionary<string, YueCacheEntry> _yue = new();
     private readonly Dictionary<string, LanceCacheEntry> _lance = new();
     private readonly Dictionary<string, LensCacheEntry> _lens = new();
+    private readonly Dictionary<string, Krea2CacheEntry> _krea2 = new();
     private readonly Dictionary<string, RefinerCacheEntry> _refiner = new();
     private readonly Dictionary<string, IpAdapterCacheEntry> _ipAdapter = new();
     private readonly object _lock = new();
@@ -80,6 +81,7 @@ public sealed class PipelineCache
     public YueCacheEntry TryGetYue(string modelName) => Touch(_yue, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
     public LanceCacheEntry TryGetLance(string modelName) => Touch(_lance, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
     public LensCacheEntry TryGetLens(string modelName) => Touch(_lens, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
+    public Krea2CacheEntry TryGetKrea2(string modelName) => Touch(_krea2, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
     public RefinerCacheEntry TryGetRefiner(string modelName) => Touch(_refiner, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
     public IpAdapterCacheEntry TryGetIpAdapter(string filePath) => Touch(_ipAdapter, filePath, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
 
@@ -112,6 +114,7 @@ public sealed class PipelineCache
     public void PutYue(YueCacheEntry entry) => Put(_yue, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
     public void PutLance(LanceCacheEntry entry) => Put(_lance, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
     public void PutLens(LensCacheEntry entry) => Put(_lens, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
+    public void PutKrea2(Krea2CacheEntry entry) => Put(_krea2, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
     public void PutRefiner(RefinerCacheEntry entry) => Put(_refiner, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
     public void PutIpAdapter(IpAdapterCacheEntry entry) => Put(_ipAdapter, entry.FilePath, entry, e => e.LastUsedUtc = DateTime.UtcNow);
 
@@ -147,7 +150,7 @@ public sealed class PipelineCache
         }
     }
 
-    private int TotalCount => _flux.Count + _flux2.Count + _chroma.Count + _chromaRadiance.Count + _zetaChroma.Count + _auraFlow.Count + _fLite.Count + _ideogram4.Count + _booguImage.Count + _ernieImage.Count + _zImage.Count + _anima.Count + _hiDream.Count + _qwenImage.Count + _sd15.Count + _sdxl.Count + _sd3.Count + _wanVideo.Count + _wanVace.Count + _wanAnimate.Count + _wanS2V.Count + _ltxVideo.Count + _ltxVideo2.Count + _aceStep.Count + _aceStep15.Count + _musicGen.Count + _yue.Count + _lance.Count + _lens.Count + _refiner.Count + _ipAdapter.Count;
+    private int TotalCount => _flux.Count + _flux2.Count + _chroma.Count + _chromaRadiance.Count + _zetaChroma.Count + _auraFlow.Count + _fLite.Count + _ideogram4.Count + _booguImage.Count + _ernieImage.Count + _zImage.Count + _anima.Count + _hiDream.Count + _qwenImage.Count + _sd15.Count + _sdxl.Count + _sd3.Count + _wanVideo.Count + _wanVace.Count + _wanAnimate.Count + _wanS2V.Count + _ltxVideo.Count + _ltxVideo2.Count + _aceStep.Count + _aceStep15.Count + _musicGen.Count + _yue.Count + _lance.Count + _lens.Count + _krea2.Count + _refiner.Count + _ipAdapter.Count;
 
     /// <summary>Evict the globally-oldest entry across all architecture maps until we're
     /// at or under <see cref="_maxEntries"/>.</summary>
@@ -419,6 +422,15 @@ public sealed class PipelineCache
                     evictAction = () => { _lens[key].Dispose(); _lens.Remove(key); };
                 }
             }
+            foreach (KeyValuePair<string, Krea2CacheEntry> kv in _krea2)
+            {
+                if (kv.Value.LastUsedUtc < oldestTime)
+                {
+                    oldestTime = kv.Value.LastUsedUtc;
+                    string key = kv.Key;
+                    evictAction = () => { _krea2[key].Dispose(); _krea2.Remove(key); };
+                }
+            }
             foreach (KeyValuePair<string, RefinerCacheEntry> kv in _refiner)
             {
                 if (kv.Value.LastUsedUtc < oldestTime)
@@ -477,6 +489,7 @@ public sealed class PipelineCache
             foreach (YueCacheEntry entry in _yue.Values) entry.Dispose();
             foreach (LanceCacheEntry entry in _lance.Values) entry.Dispose();
             foreach (LensCacheEntry entry in _lens.Values) entry.Dispose();
+            foreach (Krea2CacheEntry entry in _krea2.Values) entry.Dispose();
             foreach (RefinerCacheEntry entry in _refiner.Values) entry.Dispose();
             foreach (IpAdapterCacheEntry entry in _ipAdapter.Values) entry.Dispose();
             _flux.Clear();
@@ -508,6 +521,7 @@ public sealed class PipelineCache
             _yue.Clear();
             _lance.Clear();
             _lens.Clear();
+            _krea2.Clear();
             _refiner.Clear();
             _ipAdapter.Clear();
             return true;
