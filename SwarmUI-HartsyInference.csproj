@@ -39,8 +39,10 @@
              alpha.25 = lazy host-buffer allocation (GPU activations no longer pay host malloc+memset).
              alpha.33 = Boogu-Image pipeline + Qwen3-VL vision/multimodal encoders.
              alpha.35 = first version with Krea 2 (transformer + pipeline + converter + Qwen3_VL_4B preset).
-             alpha.36 = latest. -->
-        <PackageReference Include="HartsyInference" Version="1.0.0-alpha.36" />
+             alpha.36 = Krea 2 keys.
+             alpha.38 = CUDA LeakyRelu + AdaInstanceNorm1d kernels (Kokoro/StyleTTS2 runs fully on GPU).
+                        (alpha.37 was burned by a pre-fix pack; bumped to dodge the immutable NuGet cache.) -->
+        <PackageReference Include="HartsyInference" Version="1.0.0-alpha.38" />
     </ItemGroup>
 
     <!-- Ideogram 4's magic-prompt system prompt, ported verbatim from upstream
