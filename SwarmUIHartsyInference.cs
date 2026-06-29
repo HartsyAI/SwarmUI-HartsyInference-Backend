@@ -123,6 +123,11 @@ public class SwarmUIHartsyInference : Extension
             "Ideogram 4 Magic Prompt",
             "Rewrite your plain prompt into Ideogram 4's structured JSON caption using a running LLM backend, the way Ideogram's own stack does.\nRequires an LLM backend (Server > Backends — LlamaSharp, Anthropic, or remote). When off (default), your prompt is sent to the model as-is (which also works).",
             "false",
+            // Toggleable so the frontend only sends it (and thus only requires the
+            // "hartsyinference" flag) when actually enabled. A non-toggleable flagged param
+            // is sent on every request, forcing "hartsyinference" onto unrelated generations
+            // and refusing the Comfy backend (which lacks the flag) — see [[backend feature flags]].
+            Toggleable: true,
             Group: Ideogram4ParamGroup,
             FeatureFlag: "hartsyinference"));
 

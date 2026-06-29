@@ -42,7 +42,7 @@
              alpha.36 = Krea 2 keys.
              alpha.38 = CUDA LeakyRelu + AdaInstanceNorm1d kernels (Kokoro/StyleTTS2 runs fully on GPU).
                         (alpha.37 was burned by a pre-fix pack; bumped to dodge the immutable NuGet cache.) -->
-        <PackageReference Include="HartsyInference" Version="1.0.0-alpha.38" />
+        <PackageReference Include="HartsyInference" Version="1.0.0-alpha.40" />
     </ItemGroup>
 
     <!-- Ideogram 4's magic-prompt system prompt, ported verbatim from upstream

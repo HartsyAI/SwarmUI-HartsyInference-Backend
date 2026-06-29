@@ -23,39 +23,60 @@ flag). They surface for any backend.
 ### B. ComfyUI-extension parameters that we want to support
 
 The ComfyUI backend extension registers ~60 params with `FeatureFlag: "comfyui"`:
-LoRAs, ControlNet inputs, IP-Adapter weights, refiner toggles, IP-Adapter weight type,
-free-U values, etc. These were tagged `"comfyui"` because Swarm's authors didn't
-foresee non-Comfy backends needing them.
+LoRAs, ControlNet inputs, IP-Adapter weights, refiner toggles, the alternate-guidance
+node family, custom-workflow IR, etc. These were tagged `"comfyui"` because Swarm's
+authors didn't foresee non-Comfy backends needing them.
 
-**Initial recommendation was to advertise `"comfyui"` ourselves. After reading the
-mechanism end-to-end ([T2IEngine.cs:100-108](../../../Text2Image/T2IEngine.cs),
-[T2IParamInput.cs:664-678](../../../Text2Image/T2IParamInput.cs)), that was wrong.**
+**We DO advertise `"comfyui"`. An earlier version of this doc argued against it — that
+was wrong, and it actively broke generation when a Comfy backend was also configured.**
 
-Here's why: a param's `FeatureFlag` becomes a hard requirement at backend-selection
-time. If we claim `"comfyui"`, Swarm will route every comfyui-tagged param request
-to us, including ones we cannot service (Sampler, Scheduler, RefinerUpscaleMethod,
-custom workflow IR, FreeU, etc. — all tagged `"comfyui"`). We'd silently ignore
-them at gen time. That's the worst kind of UX bug — the user thinks their setting
-took effect, but the image came out the same.
+Why advertising is required: a param's `FeatureFlag` becomes a *hard requirement* on
+the request at backend-selection time ([T2IEngine.cs:100-108](../../../Text2Image/T2IEngine.cs),
+[T2IParamInput.cs:671-685](../../../Text2Image/T2IParamInput.cs)). The required flags
+are the **union** across every param actually sent, and SwarmUI cannot split one
+request across two backends. So when Comfy and HartsyInference are both installed, the
+shared UI sends both families' params and a single request carries both `"comfyui"`
+and `"hartsyinference"`. If we don't advertise `"comfyui"`, no single backend covers
+the union → the generation is refused outright (Comfy lacks `hartsyinference`, we lack
+`comfyui`). That deadlock is the bug this design fixes.
 
-The honest pattern is:
+The honest pattern is therefore a **two-layer** one:
 
-1. **Advertise only flags we genuinely service.** Mirror Comfy's
-   [`NodeToFeatureMap`](../../../BuiltinExtensions/ComfyUIBackend/ComfyUIBackendExtension.cs)
-   pattern: at Init, probe what HartsyInference can actually do, declare those
-   specific flags.
-2. **Accept that we lose params we can't support.** Without `"comfyui"`, the UI
-   hides Sampler/Scheduler/etc. when HartsyInference is the only configured backend.
-   That's the correct UX — those params don't have a home in our pipeline today.
-3. **Coexist gracefully with Comfy.** When both backends are configured, the UI
-   shows the union of features. Users who pick comfyui-only options route to Comfy
-   automatically via `T2IEngine`'s flag check.
-4. **As capabilities ship, add the specific flag.** `"lora"`, `"refiners"`,
-   `"endstepsearly"`, `"img2img"`, `"inpaint"`, `"controlnet"`, `"ipadapter"` —
-   each only when the code path genuinely works.
+1. **Advertise `"comfyui"` so requests reach us.** We declare `"comfyui"` so comfyui-tagged
+   requests are not pre-filtered away before our validator runs. This mirrors the built-in
+   peer [`SwarmSwarmBackend`](../../../Backends/SwarmSwarmBackend.cs), which also advertises
+   `"comfyui"`. It is execution-safe: core never routes us through Comfy's workflow
+   builder on the basis of this flag — each backend runs its own `Generate`.
+2. **Enforce honesty in `IsValidForThisBackend`.** A flag-driven guard there refuses —
+   and cleanly routes to a Comfy backend — any comfyui-tagged param actually set that we
+   can't service. The guard iterates the params present on the request, and refuses any
+   `"comfyui"`-flagged one that isn't in a small allow-list of params we genuinely honor
+   (Sampler, Scheduler, Refiner Sampler/Scheduler, Refiner Upscale Method — see
+   `HonoredComfyParams`). Custom-workflow IR (`comfyworkflowraw` /
+   `comfyuicustomworkflow`) is refused explicitly. So advertising `"comfyui"` does **not**
+   mean "we silently serve everything Comfy-tagged."
 
-This matches the [`docs/Making Extensions.md`](../../../../docs/Making%20Extensions.md)
-guidance and the working API Backends extension's pattern.
+This satisfies [`docs/Making Extensions.md`](../../../../docs/Making%20Extensions.md)
+Standards #2 (non-breakage of core) and #3 (self-containment / "just works"), without
+touching `DisregardedFeatureFlags` (which Standard #4 forbids an extension from doing).
+
+### Proposed core cleanup: a `standard_sampling` split
+
+The root cause is that core's `"comfyui"` flag is *overloaded*: it means both "the
+backend-agnostic Sampler/Scheduler/Refiner-override param family" and "real ComfyUI
+custom-workflow capability." A peer backend that only wants the former is forced to claim
+the latter (the small white lie above).
+
+The clean upstream fix would be to split a `"standard_sampling"` flag out of `"comfyui"`
+(move the 5 standard sampler/refiner params onto it and add it to Comfy's
+`FeaturesSupported`). A peer backend could then advertise `"standard_sampling"` to service
+sampling params **without** claiming `"comfyui"`, so genuinely-Comfy-only requests route to
+Comfy purely by the flag filter — no white lie, no guard reliance.
+
+This is **not implemented** — it's a core change to raise with upstream. Our extension does
+not depend on it: the `"comfyui"` + validator-guard approach above is fully self-contained
+on stock SwarmUI. If/when core gains `"standard_sampling"`, advertise it in `SupportedFeatures`
+to drop the lie.
 
 ### C. Parameters specific to HartsyInference
 
@@ -107,15 +128,37 @@ The full list (subject to phase progress — see
 | `seamless` | Seamless tiling | 5+ |
 | `video` | Video models | — (out of scope for this extension) |
 | `yolov8` | YOLO post-processing | — (separate extension) |
-| `comfyui` | **Never.** This means "I can service any Comfy-extension-registered param" — including Sampler, Scheduler, Refiner, workflow IR. We can't. |
+| `comfyui` | Advertised so comfyui-tagged requests reach our validator instead of being pre-filtered out (the coexistence fix). We do **not** silently serve everything Comfy-tagged — the `IsValidForThisBackend` guard refuses comfyui-only params we can't run (custom workflow IR, alternate-guidance nodes, GLIGEN, SAM2, etc.) and routes them to Comfy. | 1 (active) |
 
-A feature flag is **only** advertised when we can actually service requests gated by
-it. Lying ("we support controlnet!" then erroring at generation time) is worse than
-being honest ("we don't yet, please use ComfyUI for this").
+With the exception of the broad `comfyui` routing flag (kept honest by the validator
+guard), a capability flag is **only** advertised when we can actually service requests
+gated by it. Lying ("we support controlnet!" then erroring at generation time) is worse
+than being honest ("we don't yet, please use ComfyUI for this").
 
 The `IsValidForThisBackend` method is the second line of defense — even if a flag
 is advertised, a specific input might still be unservable (wrong architecture,
 missing component) and we should reject early.
+
+## Coexistence model (Comfy + HartsyInference both installed)
+
+How a request routes when both backends exist:
+
+| Request | Routes to |
+|---------|-----------|
+| Plain gen, model only HartsyInference has (e.g. nvfp4 Ideogram) | HartsyInference (model-availability filter) |
+| Plain gen, model both backends have | Either — load-balanced. Pin one with the **Backend Type** or **Exact Backend ID** advanced params |
+| Custom ComfyUI workflow, or any comfyui-only param we can't run | Comfy (our `IsValidForThisBackend` guard refuses and routes there) |
+| Sampler / Scheduler / Refiner sampler set | Either — we honor these (`HonoredComfyParams` allow-list) |
+
+Two invariants make this work:
+
+- **The Ideogram Magic Prompt param is `Toggleable`** (opt-in). A non-toggleable flagged
+  param is sent on *every* request, which would force `"hartsyinference"` onto unrelated
+  generations and refuse the Comfy backend. Any HartsyInference param carrying a
+  `FeatureFlag` must be `Toggleable` for this reason.
+- **We never block.** If we can't service a request we add a clear `RefusalReason` and
+  return false, which routes the request to a Comfy backend if one is configured, rather
+  than failing the generation.
 
 ## Permissions
 

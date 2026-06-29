@@ -75,20 +75,27 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     {
         get
         {
-            // Advertise ONLY flags we genuinely service. Lying here means params we
-            // can't handle (Sampler, Scheduler, RefinerUpscaleMethod, custom workflow,
-            // etc. — all tagged "comfyui") would route to us and be silently dropped.
+            // We advertise "comfyui" so that, when a Comfy backend is ALSO configured, requests
+            // carrying Comfy-tagged params reach our validator instead of being pre-filtered out
+            // by T2IEngine's flag check. SwarmUI can't split one request across two backends, so
+            // a request that picked up both "comfyui" (from Comfy's shared params, eg Sampler) and
+            // "hartsyinference" would otherwise match NEITHER backend and refuse the generation
+            // entirely (Comfy lacks "hartsyinference", we lack "comfyui").
             //
-            // Trade-off: with no "comfyui" flag, params tagged "comfyui" disappear from
-            // the UI when HartsyInference is the only configured backend. For Flux that's
-            // correct — we use FlowMatchEulerDiscrete unconditionally and don't expose
-            // sampler choice. When both Comfy and HartsyInference are configured, the
-            // UI shows comfyui params (their union) and T2IEngine routes them to Comfy.
+            // Honesty is enforced one layer down: IsValidForThisBackend refuses any comfyui-only
+            // param we can't actually service (custom ComfyUI workflows, the alternate-guidance
+            // node family, GLIGEN, SAM2, etc.), cleanly routing those to a Comfy backend. So
+            // advertising "comfyui" does NOT mean "we silently serve everything Comfy-tagged".
+            // This mirrors the built-in peer SwarmSwarmBackend, which also advertises "comfyui".
+            // It is execution-safe: core never routes us through Comfy's workflow builder on the
+            // basis of this flag — each backend runs its own Generate.
             //
-            // As we ship real capabilities (LoRA, refiner, ControlNet, img2img), add the
-            // matching specific flag here. Mirror Comfy's NodeToFeatureMap: only declare
-            // what's compiled in.
+            // NOTE: the cleaner long-term fix is a core split of a "standard_sampling" flag out of
+            // "comfyui" (so peer backends advertise that instead of claiming Comfy). If/when core
+            // gains it, add `yield return "standard_sampling";` here. Until then "comfyui" + the
+            // validator guard is the self-contained, stock-core-compatible approach.
             yield return "hartsyinference";
+            yield return "comfyui";
             yield return "text2image";
             yield return "flux-dev";   // in DisregardedFeatureFlags — informational, but signals that FluxGuidanceScale is honored
             yield return "lora";       // SD 1.5 / SDXL / Flux supported via LoraStack; SD3 / Z-Image refused at validation time
@@ -1277,6 +1284,14 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         new(@"<(object|region|clear|embed)\s*:|<break\s*>",
             System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Compiled);
 
+    /// <summary>Cleaned IDs of "comfyui"-tagged params we genuinely service, so the
+    /// comfy-only guard in <see cref="IsValidForThisBackend"/> doesn't falsely refuse them.
+    /// Comfy's Sampler/Scheduler are courtesy-mapped by SamplingParamResolver; the refiner
+    /// sampler/scheduler/upscale-method feed our refiner path. Everything else tagged
+    /// "comfyui" is a Comfy-node-only feature we can't run, so it's refused and routed to Comfy.</summary>
+    private static readonly HashSet<string> HonoredComfyParams =
+        ["sampler", "scheduler", "refinersampler", "refinerscheduler", "refinerupscalemethod"];
+
     /// <summary>Architectures whose pipelines have the inpaint blend path — the only ones that
     /// can run YOLO segment re-denoise (which is img2img + mask under the hood).</summary>
     private static bool IsInpaintCapable(string compat) =>
@@ -1674,6 +1689,44 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                     $"Either remove the ControlNet selection or pick an SDXL model.");
                 return false;
             }
+        }
+
+        // ComfyUI-only param guard. We advertise "comfyui" (see SupportedFeatures) so that
+        // comfyui-tagged requests reach this validator rather than being pre-filtered out.
+        // Here we honour that by refusing — and cleanly routing to a Comfy backend — any
+        // comfyui-tagged param actually set on the request that we can't service. The check
+        // is driven by the params' own FeatureFlag so it auto-covers future Comfy params.
+
+        // input.InternalSet.ValuesInput is the (non-obsolete) map of params actually set on the
+        // request, keyed by cleaned param ID — the authoritative "what did the user send" list.
+        Dictionary<string, object> setParams = input.InternalSet.ValuesInput;
+
+        // Explicit safety net first: a custom ComfyUI workflow (the raw node-graph IR, or the
+        // stored-workflow selector that expands into it) is the one we must never accept.
+        foreach (string wfKey in new[] { "comfyworkflowraw", "comfyuicustomworkflow" })
+        {
+            if (setParams.TryGetValue(wfKey, out object wfVal) && !string.IsNullOrWhiteSpace($"{wfVal}"))
+            {
+                input.RefusalReasons.Add(
+                    "HartsyInference: custom ComfyUI workflows aren't supported by this backend. "
+                    + "Use a ComfyUI backend for this generation.");
+                return false;
+            }
+        }
+
+        // Generic sweep over every param actually set on the request.
+        foreach (string paramId in setParams.Keys.ToArray())
+        {
+            if (HonoredComfyParams.Contains(paramId)) { continue; }
+            if (!T2IParamTypes.TryGetType(paramId, out T2IParamType pType, input) || pType.FeatureFlag is null) { continue; }
+            if (!pType.FeatureFlag.Split(',').Contains("comfyui")) { continue; }
+            string valStr = $"{setParams[paramId]}";
+            // Skip params left at their default / ignore value — they have no effect.
+            if (valStr == pType.Default || (pType.IgnoreIf is not null && valStr == pType.IgnoreIf)) { continue; }
+            input.RefusalReasons.Add(
+                $"HartsyInference: the '{pType.Name}' parameter is a ComfyUI-only feature this backend "
+                + "can't service. Remove it, or use a ComfyUI backend for this generation.");
+            return false;
         }
 
         return true;
