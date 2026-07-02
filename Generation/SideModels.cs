@@ -215,6 +215,18 @@ public static class SideModels
         Hash: "c3355d30191f1f066b26d93fba017ae9809dce6c627dda5f6a66eaa651204f68",
         DisplayName: "umT5-XXL (fp8 scaled) — Wan video");
 
+    /// <summary>Gemma-3-12B-it (fp8 scaled, Comfy repackage) — LTX-2's text encoder when the checkpoint
+    /// doesn't bundle the text tower (the dev fp8 single-file ships without it). Loaded raw by
+    /// <c>LlamaStyleEncoder(Gemma3_12B)</c> (fp8 weights stay fp8-resident; run the backend with
+    /// CacheWeightCasts=off for 24 GB cards). The Gemma SentencePiece tokenizer is a separate file —
+    /// see <c>LtxVideo2Loader.LocateGemmaTokenizer</c>.</summary>
+    public static readonly Entry GemmaLtx2 = new(
+        CanonicalName: "gemma_3_12B_it_fp8_scaled.safetensors",
+        FolderType: "Clip",
+        Url: "https://huggingface.co/Comfy-Org/ltx-2/resolve/main/split_files/text_encoders/gemma_3_12B_it_fp8_scaled.safetensors",
+        Hash: "60216ce97c01c3a8753c2dfd0a89fc76e16fbe446d1a32ef8f1b528ac8bae466", // sha256 of the known-good local file (verify against the repackage repo when downloading fresh).
+        DisplayName: "Gemma-3-12B-it (fp8 scaled) — LTX-2 text encoder");
+
     // ── VAEs (folder = "VAE") ──
 
     /// <summary>Qwen3-0.6B Base — Anima's text encoder. The Anima HF repo hosts this file as

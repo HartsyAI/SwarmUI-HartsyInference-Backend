@@ -51,6 +51,9 @@ public class HartsyInferenceBackend : AbstractT2IBackend
 
         [ConfigComment("Whether to auto-update the HartsyInference engine (the in-process NuGet library) when this backend starts.\n'false' (default): never check.\n'true': on start, check NuGet for a newer engine build and, if found, download + rebuild the extension against it.\n'aggressive': same as 'true' but also clears the NuGet caches first (fixes a stuck floating-version restore) and automatically restarts SwarmUI to load the new build.\nThe engine is loaded in-process, so a staged update applies on the NEXT SwarmUI restart (a loaded DLL can't hot-swap). With 'true' you'll get a log line telling you to restart; 'aggressive' restarts for you.")]
         public string AutoUpdate = "false";
+
+        [ConfigComment("Cache fp16 casts of fp8/quantized weights on the GPU (CUDA only).\n'on' (default): fastest — each fp8 weight is cast to fp16 once and kept, but that keeps BOTH copies resident (~2x the checkpoint size; a 14B fp8 model needs ~28 GB and will OOM a 24 GB card).\n'off': re-cast per use — slower steps but roughly half the weight VRAM; required for 14B-class fp8 models on 24 GB GPUs.\nNative FP8 GEMM avoids the cast only when activations are also fp8, which diffusion pipelines' are not — so this cache is what actually governs fp8 model VRAM.")]
+        public string CacheWeightCasts = "on";
     }
 
     public HartsyInferenceBackendSettings Settings => SettingsRaw as HartsyInferenceBackendSettings;
@@ -190,6 +193,11 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 cudaBackend.EnableNativeFp8Gemm = enableFp8;
                 AddLoadStatus($"Native FP8 GEMM: {(enableFp8 ? "enabled" : "disabled")} " +
                     $"(mode={fp8Mode}, SM {cudaBackend.Context.ComputeCapabilityMajor}.{cudaBackend.Context.ComputeCapabilityMinor}).");
+
+                bool cacheCasts = (Settings?.CacheWeightCasts ?? "on").Trim().ToLowerInvariant() != "off";
+                cudaBackend.CacheWeightCasts = cacheCasts;
+                AddLoadStatus($"Weight-cast caching: {(cacheCasts ? "on (fast, ~2x fp8 checkpoint VRAM)" : "off (re-cast per use, ~half weight VRAM)")}.");
+                Logs.Debug($"[HartsyInference] CacheWeightCasts={cacheCasts}");
             }
 
             _cache = new PipelineCache(_backend, Settings?.MaxCachedPipelines ?? 1);
@@ -1601,9 +1609,9 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             }
         }
 
-        // Img2img: SD 1.5 / SDXL / Flux / SD3 / Z-Image all load a VaeEncoder. Flux.2
-        // pipeline supports it but the loader doesn't wire it yet — exclude until
-        // the loader's Img2ImgResolver path is plumbed in.
+        // Img2img: SD 1.5 / SDXL / Flux / SD3 / Z-Image / Flux.2 all load a VaeEncoder and
+        // run the Img2ImgResolver path. Boogu accepts an Init Image as the reference-image
+        // edit (TI2I) source via its own Qwen3-VL vision-tower path (not Img2ImgResolver).
         if (input.Get(T2IParamTypes.InitImage) is not null)
         {
             bool isImg2ImgSupported =
@@ -1613,12 +1621,17 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 || Sd3Loader.IsSd3Compat(compat)
                 || compat == ZImageLoader.ZImageCompatClassId
                 || compat == BooguImageLoader.BooguImageCompatClassId // Init Image = the edit reference (TI2I)
-                || Flux2Loader.IsFlux2Compat(compat);
+                || Flux2Loader.IsFlux2Compat(compat)
+                // Wan video: Init Image = the I2V first frame, not img2img. The loader routes it
+                // (CLIP-I2V / concat-I2V for 14B I2V checkpoints, expand_timesteps for TI2V-5B)
+                // and itself refuses unsupported combos with a specific message.
+                || compat == WanVideoLoader.Wan21_14BCompatClassId
+                || compat == WanVideoLoader.Wan22_5BCompatClassId;
             if (!isImg2ImgSupported)
             {
                 input.RefusalReasons.Add(
                     $"HartsyInference: img2img isn't supported on architecture '{compat}' yet. " +
-                    $"Currently supported: SD 1.5, SDXL, Flux, Flux.2, SD3, Z-Image. Remove the Init Image or pick a model from a supported architecture.");
+                    $"Currently supported: SD 1.5, SDXL, Flux, Flux.2, SD3, Z-Image, Boogu. Remove the Init Image or pick a model from a supported architecture.");
                 return false;
             }
         }
@@ -1770,6 +1783,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             AuraFlowLoader.AuraFlowCompatClassId => _cache.TryGetAuraFlow(modelName) is not null,
             FLiteLoader.FLiteCompatClassId => _cache.TryGetFLite(modelName) is not null,
             Ideogram4Loader.Ideogram4CompatClassId => _cache.TryGetIdeogram4(modelName) is not null,
+            BooguImageLoader.BooguImageCompatClassId => _cache.TryGetBooguImage(modelName) is not null,
             ErnieImageLoader.ErnieImageCompatClassId => _cache.TryGetErnieImage(modelName) is not null,
             ZImageLoader.ZImageCompatClassId => _cache.TryGetZImage(modelName) is not null,
             AnimaLoader.AnimaCompatClassId => _cache.TryGetAnima(modelName) is not null,
@@ -1778,6 +1792,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             WanVideoLoader.Wan22_5BCompatClassId or WanVideoLoader.Wan21_1_3BCompatClassId
                 or WanVideoLoader.Wan21_14BCompatClassId => _cache.TryGetWanVideo(modelName) is not null,
             LtxVideoLoader.LtxVideoCompatClassId => _cache.TryGetLtxVideo(modelName) is not null,
+            LtxVideo2Loader.LtxVideo2CompatClassId => _cache.TryGetLtxVideo2(modelName) is not null,
             AceStepLoader.AceStepCompatClassId => _cache.TryGetAceStep(modelName) is not null || _cache.TryGetAceStep15(modelName) is not null,
             MusicGenLoader.MusicGenCompatClassId => _cache.TryGetMusicGen(modelName) is not null,
             YueLoader.YueCompatClassId => _cache.TryGetYue(modelName) is not null,

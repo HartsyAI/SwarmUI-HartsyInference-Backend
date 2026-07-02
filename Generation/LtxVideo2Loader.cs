@@ -65,6 +65,7 @@ public static class LtxVideo2Loader
             throw new FileNotFoundException($"LTX-2 checkpoint not found: {model.RawFilePath}");
         }
 
+        SafeTensorsLoader gemmaLoaderOuter = null;
         try
         {
             if (conv.Transformer.Count == 0)
@@ -110,17 +111,35 @@ public static class LtxVideo2Loader
                 log("  No bundled audio VAE/vocoder — video-only output.");
             }
 
-            // Gemma-3-12B text tower (from the bundled text_encoder.* weights).
-            if (conv.TextEncoder.Count == 0)
-                throw new InvalidOperationException(
-                    $"LTX-2 checkpoint '{model.Name}' has no bundled Gemma-3-12B text encoder (text_encoder.*). "
-                    + "A standalone Gemma side-model is not yet wired for LTX-2.");
-            log("Loading Gemma-3-12B text tower...");
+            // Gemma-3-12B text tower: bundled text_encoder.* weights when present, else the standalone
+            // Comfy-repackage side model (fp8 scaled — LlamaStyleEncoder consumes it raw, weights stay
+            // fp8-resident; the raw safetensors loader must stay alive for the pipeline's lifetime
+            // because the tensors are memory-mapped views into it).
             LlamaStyleEncoder gemma = new LlamaStyleEncoder(LlamaStyleEncoderConfig.Gemma3_12B);
-            gemma.LoadWeights(conv.TextEncoder);
+            SafeTensorsLoader gemmaLoader = null;
+            string gemmaSidePath = null;
+            if (conv.TextEncoder.Count > 0)
+            {
+                log("Loading Gemma-3-12B text tower (bundled)...");
+                gemma.LoadWeights(conv.TextEncoder);
+            }
+            else
+            {
+                T2IModel gemmaModel = ModelAutoDownloader.EnsureSideModel(
+                    userPick: input?.Get(T2IParamTypes.T5XXLModel),
+                    entry: SideModels.GemmaLtx2,
+                    log: log);
+                gemmaSidePath = gemmaModel.RawFilePath;
+                log($"Loading Gemma-3-12B text tower (standalone: {Path.GetFileName(gemmaSidePath)})...");
+                gemmaLoader = new SafeTensorsLoader();
+                gemmaLoaderOuter = gemmaLoader;
+                gemmaLoader.Load(gemmaSidePath);
+                gemma.LoadWeights(gemmaLoader.GetAllTensors());
+            }
 
-            // Gemma SentencePiece tokenizer — read from a file next to the checkpoint.
-            GemmaTokenizer tokenizer = new GemmaTokenizer(LocateGemmaTokenizer(model.RawFilePath), maxLength: TokenLength);
+            // Gemma SentencePiece tokenizer — next to the checkpoint, or next to the standalone encoder.
+            GemmaTokenizer tokenizer = new GemmaTokenizer(
+                LocateGemmaTokenizer(model.RawFilePath, gemmaSidePath), maxLength: TokenLength);
 
             log("Building LTX-2 pipeline...");
             LtxVideo2Pipeline pipeline = new LtxVideo2Pipeline(backend, transformer, connectors, vae, gemma, config,
@@ -141,10 +160,12 @@ public static class LtxVideo2Loader
                 AudioVae = audioVae,
                 Vocoder = vocoder,
                 CheckpointLoader = ckptLoader,
+                GemmaLoader = gemmaLoader,
             };
         }
         catch
         {
+            gemmaLoaderOuter?.Dispose();
             ckptLoader.Dispose();
             throw;
         }
@@ -231,20 +252,30 @@ public static class LtxVideo2Loader
         return outArr;
     }
 
-    /// <summary>Finds the Gemma SentencePiece model next to the checkpoint (<c>tokenizer.model</c> or
-    /// <c>gemma*.model</c> / <c>*.spm</c>). Gemma ships no embedded tokenizer in the engine.</summary>
-    private static string LocateGemmaTokenizer(string checkpointPath)
+    /// <summary>Finds the Gemma SentencePiece model (<c>tokenizer.model</c> / <c>gemma*.model</c> / any
+    /// <c>*.model</c>) next to the checkpoint, or next to the standalone Gemma encoder when one was
+    /// resolved. Gemma ships no embedded tokenizer in the engine.</summary>
+    private static string LocateGemmaTokenizer(string checkpointPath, string gemmaSidePath = null)
     {
-        string dir = File.Exists(checkpointPath) ? Path.GetDirectoryName(checkpointPath) : checkpointPath;
-        foreach (string candidate in new[] { "tokenizer.model", "gemma.model", "gemma3.model" })
+        List<string> dirs = [];
+        string ckptDir = File.Exists(checkpointPath) ? Path.GetDirectoryName(checkpointPath) : checkpointPath;
+        if (!string.IsNullOrEmpty(ckptDir)) dirs.Add(ckptDir);
+        if (!string.IsNullOrEmpty(gemmaSidePath)) dirs.Add(Path.GetDirectoryName(gemmaSidePath));
+        foreach (string dir in dirs)
         {
-            string path = Path.Combine(dir!, candidate);
-            if (File.Exists(path)) return path;
+            foreach (string candidate in new[] { "tokenizer.model", "gemma.model", "gemma3.model" })
+            {
+                string path = Path.Combine(dir!, candidate);
+                if (File.Exists(path)) return path;
+            }
         }
-        string[] spm = Directory.GetFiles(dir!, "*.model");
+        // Any loose SentencePiece file next to the checkpoint (legacy behavior; checkpoint dir only —
+        // the Clip folder holds unrelated .model files).
+        string[] spm = Directory.GetFiles(dirs[0]!, "*.model");
         if (spm.Length > 0) return spm[0];
         throw new FileNotFoundException(
-            $"LTX-2 needs the Gemma SentencePiece tokenizer (tokenizer.model) next to the checkpoint in '{dir}'.");
+            $"LTX-2 needs the Gemma SentencePiece tokenizer (tokenizer.model) next to the checkpoint in '{dirs[0]}' "
+            + (dirs.Count > 1 ? $"or next to the Gemma encoder in '{dirs[1]}'." : "."));
     }
 
     /// <summary>Disposes a set of safetensors loaders as one <see cref="IDisposable"/> (sharded checkpoints).</summary>
@@ -268,6 +299,8 @@ public sealed class LtxVideo2CacheEntry : IDisposable
     public LtxAudioVaeDecoder AudioVae { get; init; }
     public LtxAudioVocoder Vocoder { get; init; }
     public required IDisposable CheckpointLoader { get; init; }
+    /// <summary>Keeps the standalone Gemma safetensors mapping alive (tensor views point into it). Null when the text tower came bundled in the checkpoint.</summary>
+    public SafeTensorsLoader GemmaLoader { get; init; }
 
     public DateTime LastUsedUtc { get; set; } = DateTime.UtcNow;
     private bool _disposed;
@@ -283,5 +316,6 @@ public sealed class LtxVideo2CacheEntry : IDisposable
         Connectors?.Dispose();
         (Vocoder as IDisposable)?.Dispose();
         CheckpointLoader?.Dispose();
+        GemmaLoader?.Dispose();
     }
 }

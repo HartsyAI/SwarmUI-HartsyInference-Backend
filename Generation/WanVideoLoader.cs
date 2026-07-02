@@ -76,8 +76,15 @@ public static class WanVideoLoader
         bool isClipI2V = conv.Transformer.ContainsKey("condition_embedder.image_embedder.norm1.weight");
         int inChannels = conv.Transformer.TryGetValue("patch_embedding.weight", out Tensor pe) ? (int)pe.Shape[1] : 0;
         WanVideoConfig config = ResolveConfig(compat, isClipI2V, inChannels);
+        // fp8 checkpoints carry a small velocity DC bias that CFG>=5 amplifies into a color-drifting /
+        // dark trajectory over the clip; CFG renormalization (~0.7) corrects it. Mirrors the engine's
+        // WanConfigDetector fp8 auto-detect, which the preset-based ResolveConfig path bypasses.
+        if (conv.Transformer.TryGetValue("blocks.0.ffn.net.0.proj.weight", out Tensor ffn0) && ffn0.DType.IsFp8)
+        {
+            config = config with { CfgRescale = 0.7f };
+        }
         string mode = isClipI2V ? "CLIP-I2V" : config.InChannels > config.VaeLatentChannels ? "concat-I2V" : "T2V/TI2V";
-        log($"  Converted: {conv.Transformer.Count} transformer keys ({mode}, in {inChannels}, inner {config.InnerDim})");
+        log($"  Converted: {conv.Transformer.Count} transformer keys ({mode}, in {inChannels}, inner {config.InnerDim}{(config.CfgRescale > 0 ? $", cfg-renorm {config.CfgRescale}" : "")})");
 
         WanVideoTransformer transformer = new WanVideoTransformer(config);
         transformer.LoadWeights(conv.Transformer);
@@ -196,6 +203,19 @@ public static class WanVideoLoader
         }
     }
 
+    /// <summary>Zeroes embedding rows past the real tokens (content + EOS; pad id 0), matching the
+    /// reference Wan pipelines which zero-pad the umT5 output to the 512-row context. See the call
+    /// site in <see cref="RunPipeline"/> for why this is load-bearing.</summary>
+    internal static unsafe void ZeroPaddedRows(Tensor embeds, int[] tokens, int dim)
+    {
+        int realLen = 0;
+        while (realLen < tokens.Length && tokens[realLen] != 0) realLen++;
+        int rows = (int)(embeds.Shape.ElementCount / dim);
+        if (realLen >= rows) return;
+        float* p = (float*)embeds.DataPointer;
+        new Span<float>(p + (long)realLen * dim, (rows - realLen) * dim).Clear();
+    }
+
     private static Image[] RunPipeline(
         WanVideoPipeline pipeline, WanVideoCacheEntry entry, IBackend backend, T2IParamInput input,
         Action<GenerationProgress> onProgress, CancellationToken cancel)
@@ -231,6 +251,11 @@ public static class WanVideoLoader
         Tensor promptEmbeds = CfgHelper.SliceBatchElement(batch, 0, TokenLength, entry.Config.TextDim);
         Tensor negEmbeds = CfgHelper.SliceBatchElement(batch, 1, TokenLength, entry.Config.TextDim);
         batch.Dispose();
+        // Wan's DiT cross-attends over all 512 context rows with NO text mask — the reference
+        // (diffusers WanPipeline / Comfy) zero-pads embeddings past the real tokens. umT5 emits
+        // garbage at pad positions; leaving it in drowns the prompt and denoises to a flat clip.
+        ZeroPaddedRows(promptEmbeds, promptTokens, entry.Config.TextDim);
+        ZeroPaddedRows(negEmbeds, negTokens, entry.Config.TextDim);
         backend.Sync();
         backend.FreeWeights(entry.Umt5.EnumerateWeights());
 

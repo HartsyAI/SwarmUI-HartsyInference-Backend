@@ -139,6 +139,11 @@ public static class LtxVideoLoader
             [T5Tokenizer.CreateAttentionMask(promptTokens), T5Tokenizer.CreateAttentionMask(negTokens)]);
         Tensor promptEmbeds = CfgHelper.SliceBatchElement(batch, 0, TokenLength, entry.Config.CaptionChannels);
         Tensor negEmbeds = CfgHelper.SliceBatchElement(batch, 1, TokenLength, entry.Config.CaptionChannels);
+        // The engine's LTX pipeline has no context attention mask (the reference masks pad tokens in
+        // cross-attention); zeroing the pad rows is the closest approximation and prevents T5's
+        // garbage pad-position outputs from drowning the prompt (same failure class as Wan's flat video).
+        WanVideoLoader.ZeroPaddedRows(promptEmbeds, promptTokens, entry.Config.CaptionChannels);
+        WanVideoLoader.ZeroPaddedRows(negEmbeds, negTokens, entry.Config.CaptionChannels);
         batch.Dispose();
         backend.Sync();
         backend.FreeWeights(entry.T5.EnumerateWeights());

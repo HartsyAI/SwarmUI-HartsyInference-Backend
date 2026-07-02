@@ -41,8 +41,13 @@
              alpha.35 = first version with Krea 2 (transformer + pipeline + converter + Qwen3_VL_4B preset).
              alpha.36 = Krea 2 keys.
              alpha.38 = CUDA LeakyRelu + AdaInstanceNorm1d kernels (Kokoro/StyleTTS2 runs fully on GPU).
-                        (alpha.37 was burned by a pre-fix pack; bumped to dodge the immutable NuGet cache.) -->
-        <PackageReference Include="HartsyInference" Version="1.0.0-alpha.41" />
+                        (alpha.37 was burned by a pre-fix pack; bumped to dodge the immutable NuGet cache.)
+             alpha.43 = query-tiled CUDA SDPA for long sequences (Wan-Video full-res self-attention no
+                        longer materializes the ~49GB score matrix), Wan VAE + variant work, LTX fixes.
+             alpha.43.1-local = locally-packed worktree build (see nuget.config): adds WanVideoConfig.CfgRescale +
+                        MoE expert swap + umT5/T5 AttentionScale=1.0 fix (the flat-video root cause) + fp8 GEMM
+                        precision knobs. Publish these engine changes and re-pin to the CI alpha when available. -->
+        <PackageReference Include="HartsyInference" Version="1.0.0-alpha.43.1-local" />
     </ItemGroup>
 
     <!-- Ideogram 4's magic-prompt system prompt, ported verbatim from upstream
