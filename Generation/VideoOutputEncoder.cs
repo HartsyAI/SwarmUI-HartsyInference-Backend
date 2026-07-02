@@ -19,11 +19,23 @@ namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 /// </summary>
 public static class VideoOutputEncoder
 {
+    /// <summary>A stereo audio track to mux into the video container (e.g. LTX-2's generated soundtrack,
+    /// or a Wan S2V driving-speech clip). <see cref="Right"/> may be null for mono (Left is duplicated).</summary>
+    public sealed class AudioTrack
+    {
+        public required float[] Left { get; init; }
+        public float[] Right { get; init; }
+        public required int SampleRate { get; init; }
+        public bool HasSamples => Left is not null && Left.Length > 0 && SampleRate > 0;
+    }
+
     /// <summary>Encodes frames to the requested <c>VideoFormat</c> value ("h264-mp4", "h265-mp4",
     /// "webm", "prores", "gif", "gif-hd", "webp"). A single frame short-circuits to a plain PNG image,
-    /// matching the Comfy node's behavior.</summary>
+    /// matching the Comfy node's behavior. When <paramref name="audio"/> is supplied and the container
+    /// can carry sound (mp4/mov/webm), the audio is muxed in as a second ffmpeg input so the output is a
+    /// single playable video-with-sound file; formats that can't carry audio (gif/webp/png) ignore it.</summary>
     /// <param name="frames">Interleaved RGB24 bytes, one array per frame, each width*height*3 long.</param>
-    public static Image Encode(byte[][] frames, int width, int height, int fps, string format, CancellationToken cancel)
+    public static Image Encode(byte[][] frames, int width, int height, int fps, string format, CancellationToken cancel, AudioTrack audio = null)
     {
         if (frames is null || frames.Length == 0)
         {
@@ -41,8 +53,16 @@ public static class VideoOutputEncoder
                 + "Install ffmpeg on your system PATH (or install the ComfyUI self-start backend, whose bundled copy Swarm reuses).");
         }
         (string videoArgs, string ext, MediaType type) = FormatArgs(format);
+        string audioCodec = audio is not null && audio.HasSamples ? AudioArgsForContainer(ext) : null;
+        // Audio goes in as a second ffmpeg input from a temp f32le file (video streams over stdin).
+        string audioTmp = audioCodec is not null ? WriteInterleavedF32(audio, cancel) : null;
         string tmpFile = Path.Combine(Path.GetTempPath(), $"hartsyinference_video_{Guid.NewGuid():N}.{ext}");
-        string args = $"-v error -f rawvideo -pix_fmt rgb24 -s {width}x{height} -r {fps} -i - {videoArgs} -y \"{tmpFile}\"";
+        string inputArgs = audioTmp is not null
+            ? $"-f rawvideo -pix_fmt rgb24 -s {width}x{height} -r {fps} -i - -f f32le -ar {audio.SampleRate} -ac 2 -i \"{audioTmp}\" -map 0:v:0 -map 1:a:0"
+            : $"-f rawvideo -pix_fmt rgb24 -s {width}x{height} -r {fps} -i -";
+        // -shortest trims to the shorter of video/audio so a slight frame-vs-sample mismatch doesn't pad silence.
+        string muxArgs = audioTmp is not null ? $"{audioCodec} -shortest" : "";
+        string args = $"-v error {inputArgs} {videoArgs} {muxArgs} -y \"{tmpFile}\"";
         ProcessStartInfo psi = new()
         {
             FileName = ffmpeg,
@@ -52,7 +72,8 @@ public static class VideoOutputEncoder
             UseShellExecute = false,
             CreateNoWindow = true,
         };
-        Logs.Verbose($"[HartsyInference] Encoding {frames.Length} frames {width}x{height}@{fps}fps as '{format}' via ffmpeg {args}");
+        Logs.Verbose($"[HartsyInference] Encoding {frames.Length} frames {width}x{height}@{fps}fps as '{format}'"
+            + (audioTmp is not null ? $" with a {audio.SampleRate} Hz audio track" : "") + $" via ffmpeg {args}");
         Process proc = Process.Start(psi) ?? throw new InvalidOperationException("Failed to launch ffmpeg.");
         try
         {
@@ -81,7 +102,44 @@ public static class VideoOutputEncoder
             proc.Dispose();
             try { if (File.Exists(tmpFile)) File.Delete(tmpFile); }
             catch (Exception ex) { Logs.Warning($"[HartsyInference] Failed to delete temp video file '{tmpFile}': {ex.Message}"); }
+            if (audioTmp is not null)
+            {
+                try { if (File.Exists(audioTmp)) File.Delete(audioTmp); }
+                catch (Exception ex) { Logs.Warning($"[HartsyInference] Failed to delete temp audio file '{audioTmp}': {ex.Message}"); }
+            }
         }
+    }
+
+    /// <summary>True if the container for this <c>VideoFormat</c> value can carry an audio stream
+    /// (mp4/mov/webm). gif/webp can't, so LTX-2 falls back to a separate mp3 for those.</summary>
+    public static bool FormatSupportsAudio(string format) => AudioArgsForContainer(FormatArgs(format).ext) is not null;
+
+    /// <summary>Per-container audio codec args, or null if the container can't carry audio (gif/webp).
+    /// mp4/mov take AAC; webm needs Opus (AAC isn't valid in a WebM/Matroska container).</summary>
+    private static string AudioArgsForContainer(string ext) => ext switch
+    {
+        "mp4" or "mov" => "-c:a aac -b:a 192k",
+        "webm" => "-c:a libopus -b:a 192k",
+        _ => null, // gif / webp — no audio stream
+    };
+
+    /// <summary>Writes a stereo audio track to a temp f32le raw file (interleaved L/R), for use as a
+    /// second ffmpeg input. Mono tracks (null Right) duplicate Left into both channels.</summary>
+    private static string WriteInterleavedF32(AudioTrack audio, CancellationToken cancel)
+    {
+        float[] left = audio.Left;
+        float[] right = audio.Right;
+        int n = right is null ? left.Length : Math.Min(left.Length, right.Length);
+        byte[] interleaved = new byte[n * 2 * sizeof(float)];
+        for (int i = 0; i < n; i++)
+        {
+            cancel.ThrowIfCancellationRequested();
+            BitConverter.TryWriteBytes(interleaved.AsSpan(i * 8, 4), left[i]);
+            BitConverter.TryWriteBytes(interleaved.AsSpan(i * 8 + 4, 4), right is null ? left[i] : right[i]);
+        }
+        string path = Path.Combine(Path.GetTempPath(), $"hartsyinference_vaudio_{Guid.NewGuid():N}.f32le");
+        File.WriteAllBytes(path, interleaved);
+        return path;
     }
 
     /// <summary>Applies the shared frame-array post-edits the Comfy path supports:

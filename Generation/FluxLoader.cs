@@ -154,6 +154,19 @@ public static class FluxLoader
             ? FluxConfig.Flux1Tools
             : (hasGuidance ? FluxConfig.Dev : FluxConfig.Schnell);
 
+        // fp8 checkpoints on hardware without native FP8 GEMM (Ampere and below) fall back to
+        // casting each fp8 weight to F16/BF16 on first use. With CacheWeightCasts=true (default)
+        // that cast is kept resident forever — roughly doubling VRAM for every fp8 tensor touched
+        // (transformer + CLIP-L + T5-XXL here) and OOMs a 12 GB 3060 partway through text encoding.
+        // Keep weights fp8-resident with a transient per-GEMM dequant instead (same fix already
+        // applied to LtxVideoLoader's 13B fp8 path).
+        if (backend is HartsyInference.Cuda.CudaBackend cudaBackend && !cudaBackend.EnableNativeFp8Gemm
+            && (HasFp8Weights(transformerWeights) || HasFp8Weights(clipLWeights) || HasFp8Weights(t5Weights)))
+        {
+            cudaBackend.CacheWeightCasts = false;
+            log("  fp8 checkpoint on non-native-FP8 hardware: CacheWeightCasts disabled (fp8-resident, transient per-GEMM dequant).");
+        }
+
         log("Building transformer...");
         FluxTransformer transformer = new FluxTransformer(fluxConfig);
         transformer.LoadWeights(transformerWeights);
@@ -531,6 +544,18 @@ public static class FluxLoader
             }
         }
         return result;
+    }
+
+    /// <summary>True if any tensor in the dict is still in raw FP8 (E4M3/E5M2) — i.e. not
+    /// pre-dequantized by <c>FluxCheckpointConverter</c>'s ComfyUI-scaled-fp8 handling.</summary>
+    private static bool HasFp8Weights(Dictionary<string, Tensor> weights)
+    {
+        foreach (Tensor tensor in weights.Values)
+        {
+            if (tensor.DType.IsFp8)
+                return true;
+        }
+        return false;
     }
 
 }

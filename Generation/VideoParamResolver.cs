@@ -47,15 +47,17 @@ public static class VideoParamResolver
     }
 
     /// <summary>Runs trim + boomerang frame edits, then muxes to the user's chosen format. The single
-    /// final step every video loader's Generate ends with.</summary>
-    public static SwarmUI.Utils.Image FinishVideo(byte[][] frames, int width, int height, T2IParamInput input, CancellationToken cancel)
+    /// final step every video loader's Generate ends with. When <paramref name="audio"/> is supplied
+    /// (LTX-2's generated soundtrack, or a Wan S2V driving clip), it is muxed into the container so the
+    /// output is a single video-with-sound file — see <see cref="VideoOutputEncoder.Encode"/>.</summary>
+    public static SwarmUI.Utils.Image FinishVideo(byte[][] frames, int width, int height, T2IParamInput input, CancellationToken cancel, VideoOutputEncoder.AudioTrack audio = null)
     {
         frames = VideoOutputEncoder.ApplyFrameEdits(
             frames,
             trimStart: input.Get(T2IParamTypes.TrimVideoStartFrames, 0),
             trimEnd: input.Get(T2IParamTypes.TrimVideoEndFrames, 0),
             boomerang: input.Get(T2IParamTypes.VideoBoomerang, false));
-        return VideoOutputEncoder.Encode(frames, width, height, ResolveFps(input), ResolveFormat(input), cancel);
+        return VideoOutputEncoder.Encode(frames, width, height, ResolveFps(input), ResolveFormat(input), cancel, audio);
     }
 
     /// <summary>Image-to-video target resolution per the <c>VideoResolution</c> param's documented modes

@@ -109,9 +109,11 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             yield return "controlnet"; // SDXL-base only in v1, Canny preprocessor only; SD 1.5 / Flux ControlNet + Depth/OpenPose/etc refused at validation time
             yield return "ipadapter";  // SDXL standard + Plus + Plus-Face via blend-on-vanilla cross-attn injection; SD 1.5 / Flux IPA + FaceID variants refused at validation time
             yield return "variation_seed"; // SD 1.5 / SDXL via InitialNoise slerp (VariationSeedResolver); other archs refused at validation time
-            yield return "video";      // Wan2.2 TI2V-5B + LTX-Video text-to-video. Exposes VideoFPS/VideoFormat/boomerang/trim params
-                                       // ("text2video" itself is client-derived from the model's compat class and disregarded for routing).
-                                       // Unsupported video extras (end frame, video-extend, audio) are refused at validation time.
+            yield return "video";      // Wan (TI2V / VACE / Animate / S2V) + LTX-Video + LTX-2 (video+generated audio track).
+                                       // Exposes VideoFPS/VideoFormat/boomerang/trim params ("text2video" itself is client-derived
+                                       // from the model's compat class and disregarded for routing). LTX-2 muxes its generated
+                                       // soundtrack into the output container; unsupported video INPUT extras (end frame,
+                                       // video-extend, audio-reference) are refused at validation time.
         }
     }
 
@@ -1427,6 +1429,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             || compat == WanVideoLoader.Wan21_1_3BCompatClassId
             || compat == WanVideoLoader.Wan21_14BCompatClassId
             || compat == LtxVideoLoader.LtxVideoCompatClassId
+            || compat == LtxVideo2Loader.LtxVideo2CompatClassId
             || compat == LanceLoader.LanceVideoCompatClassId;
         if (isVideoArch)
         {

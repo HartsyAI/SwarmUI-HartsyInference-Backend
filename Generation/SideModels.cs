@@ -352,6 +352,34 @@ public static class SideModels
         Hash: "6de92e3a862acd287e08b024ac90f0783a8635451b728721a33ff03565bcb2bb",
         DisplayName: "ACE-Step 1.5 VAE (Oobleck)");
 
+    /// <summary>LTX-2.3 video VAE (bf16) — the split LTX-2.3 model keeps the video VAE out of the DiT file.
+    /// Canonical path/URL/hash match SwarmUI core's <c>CommonModels["ltx2-3-video-vae"]</c> so a Comfy-downloaded
+    /// copy is reused. Auto-resolved by <see cref="LtxVideo2Loader"/> when the DiT carries no bundled VAE.</summary>
+    public static readonly Entry Ltx23VideoVae = new(
+        CanonicalName: "LTX-2/LTX23_video_vae_bf16.safetensors",
+        FolderType: "VAE",
+        Url: "https://huggingface.co/Kijai/LTX2.3_comfy/resolve/main/vae/LTX23_video_vae_bf16.safetensors",
+        Hash: "01ea62d09bc139f95c5dee7b5c062ad6a3e6cd8be910a1983ac02e7eb5b8ee3b",
+        DisplayName: "LTX-2.3 Video VAE");
+
+    /// <summary>LTX-2.3 audio VAE (bf16) — bundles both the audio VAE (<c>audio_vae.*</c>) and the BigVGAN
+    /// vocoder (<c>vocoder.*</c>) the LTX-2 audio path needs. Matches core's <c>CommonModels["ltx2-3-audio-vae"]</c>.</summary>
+    public static readonly Entry Ltx23AudioVae = new(
+        CanonicalName: "LTX-2/LTX23_audio_vae_bf16.safetensors",
+        FolderType: "VAE",
+        Url: "https://huggingface.co/Kijai/LTX2.3_comfy/resolve/main/vae/LTX23_audio_vae_bf16.safetensors",
+        Hash: "5bc10fa4adecf99dda132d916e23048cbd56797702c5fa50eb5d2079048a38c3",
+        DisplayName: "LTX-2.3 Audio VAE");
+
+    /// <summary>LTX-2.3 text-embedding-projection (bf16) — the <c>text_embedding_projection.*</c> weights the
+    /// connectors consume, split out of the DiT file. Matches Comfy's <c>GetLTX23TextProjectionClip()</c> file.</summary>
+    public static readonly Entry Ltx23TextProjection = new(
+        CanonicalName: "LTX-2/ltx-2.3_text_projection_bf16.safetensors",
+        FolderType: "Clip",
+        Url: "https://huggingface.co/Kijai/LTX2.3_comfy/resolve/main/text_encoders/ltx-2.3_text_projection_bf16.safetensors",
+        Hash: "911d59bb4cb7708179c9a0045ea0fe41212ecfb77aed3a02702b7c0a8274911f",
+        DisplayName: "LTX-2.3 Text Projection");
+
     // ── TAESD preview decoders (folder = "VAE", subfolder "Taesd/") ──
     //
     // Tiny autoencoders by Ollin Boer Bohan (madebyollin/taesd). ~10 MB each, one per latent

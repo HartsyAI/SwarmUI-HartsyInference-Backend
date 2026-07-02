@@ -44,10 +44,12 @@
                         (alpha.37 was burned by a pre-fix pack; bumped to dodge the immutable NuGet cache.)
              alpha.43 = query-tiled CUDA SDPA for long sequences (Wan-Video full-res self-attention no
                         longer materializes the ~49GB score matrix), Wan VAE + variant work, LTX fixes.
-             alpha.43.1-local = locally-packed worktree build (see nuget.config): adds WanVideoConfig.CfgRescale +
+             PENDING (not yet packed anywhere, do not pin until published): WanVideoConfig.CfgRescale +
                         MoE expert swap + umT5/T5 AttentionScale=1.0 fix (the flat-video root cause) + fp8 GEMM
-                        precision knobs. Publish these engine changes and re-pin to the CI alpha when available. -->
-        <PackageReference Include="HartsyInference" Version="1.0.0-alpha.43.1-local" />
+                        precision knobs. nuget.config's hartsy-local feed path doesn't exist on this machine and
+                        no alpha.43.1-local package has actually been packed — pin to it once it's really built,
+                        or once published as a real CI alpha. -->
+        <PackageReference Include="HartsyInference" Version="1.0.0-alpha.43" />
     </ItemGroup>
 
     <!-- Ideogram 4's magic-prompt system prompt, ported verbatim from upstream

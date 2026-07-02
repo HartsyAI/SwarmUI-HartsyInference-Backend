@@ -11,6 +11,7 @@ using HartsyInference.Diffusion.Models.Music;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.ModelHandler.CheckpointConverters;
 using HartsyInference.ModelHandler.SafeTensors;
+using HartsyInference.ModelHandler.TextEncoders;
 using HartsyInference.Tokenizers;
 using HartsyInference.Video.Pipelines;
 using Image = SwarmUI.Utils.Image;
@@ -48,26 +49,52 @@ public static class LtxVideo2Loader
             throw new InvalidOperationException("LTX-2 model has no file path.");
 
         log($"Loading LTX-2 checkpoint: {model.Name}");
-        LtxVideo2CheckpointConverter.ConvertedWeights conv;
-        IDisposable ckptLoader;
-        if (File.Exists(model.RawFilePath))
+        // Gather every safetensors for this model into one dict, then route once. A bundled checkpoint is a
+        // single file (or shard dir) carrying every component; a SPLIT LTX-2.3 model (SwarmUI's
+        // `lightricks-ltx-video-2-3`) ships the DiT alone and keeps the video VAE, the audio VAE (+ vocoder),
+        // and the text-embedding-projection in separate files — auto-resolved below. Convert() routes any
+        // merged dict by key, so a split model just needs its pieces merged in first.
+        List<SafeTensorsLoader> loaders = new();
+        Dictionary<string, Tensor> merged = new();
+        void AddFile(string path)
         {
-            var (c, loader) = LtxVideo2CheckpointConverter.LoadAndConvert(model.RawFilePath);
-            conv = c; ckptLoader = loader;
-        }
-        else if (Directory.Exists(model.RawFilePath))
-        {
-            var (c, loaders) = LtxVideo2CheckpointConverter.LoadAndConvertShards(model.RawFilePath);
-            conv = c; ckptLoader = new MultiLoaderHandle(loaders);
-        }
-        else
-        {
-            throw new FileNotFoundException($"LTX-2 checkpoint not found: {model.RawFilePath}");
+            if (File.Exists(path))
+            {
+                SafeTensorsLoader l = new(); l.Load(path); loaders.Add(l);
+                foreach (KeyValuePair<string, Tensor> kv in l.GetAllTensors()) merged[kv.Key] = kv.Value;
+            }
+            else if (Directory.Exists(path))
+            {
+                string[] shards = Directory.GetFiles(path, "*.safetensors", SearchOption.AllDirectories);
+                if (shards.Length == 0) throw new FileNotFoundException($"No safetensors shards in: {path}");
+                foreach (string shard in shards)
+                {
+                    SafeTensorsLoader l = new(); l.Load(shard); loaders.Add(l);
+                    foreach (KeyValuePair<string, Tensor> kv in l.GetAllTensors()) merged[kv.Key] = kv.Value;
+                }
+            }
+            else throw new FileNotFoundException($"LTX-2 file not found: {path}");
         }
 
         SafeTensorsLoader gemmaLoaderOuter = null;
+        MultiLoaderHandle ckptLoader = new(loaders);
         try
         {
+            AddFile(model.RawFilePath);
+            LtxVideo2CheckpointConverter.ConvertedWeights conv = LtxVideo2CheckpointConverter.Convert(merged);
+
+            // Split LTX-2.3: DiT-only file (no bundled VAE). Pull in the video VAE, audio VAE (+ vocoder), and the
+            // text-embedding-projection from their canonical Kijai files (auto-downloaded; same names Comfy uses —
+            // bf16, so engine-friendly), then re-route the merged set.
+            if (conv.Vae.Count == 0)
+            {
+                log("LTX-2.3 split model (no bundled VAE) — resolving side files: video VAE, audio VAE, text projection...");
+                AddFile(ModelAutoDownloader.EnsureSideModel(null, SideModels.Ltx23VideoVae, log).RawFilePath);
+                AddFile(ModelAutoDownloader.EnsureSideModel(null, SideModels.Ltx23AudioVae, log).RawFilePath);
+                AddFile(ModelAutoDownloader.EnsureSideModel(null, SideModels.Ltx23TextProjection, log).RawFilePath);
+                conv = LtxVideo2CheckpointConverter.Convert(merged);
+            }
+
             if (conv.Transformer.Count == 0)
                 throw new InvalidOperationException(
                     $"LTX-2 checkpoint '{model.Name}' has no recognized DiT weights after conversion.");
@@ -126,7 +153,7 @@ public static class LtxVideo2Loader
             else
             {
                 T2IModel gemmaModel = ModelAutoDownloader.EnsureSideModel(
-                    userPick: input?.Get(T2IParamTypes.T5XXLModel),
+                    userPick: input?.Get(T2IParamTypes.GemmaModel),
                     entry: SideModels.GemmaLtx2,
                     log: log);
                 gemmaSidePath = gemmaModel.RawFilePath;
@@ -214,13 +241,28 @@ public static class LtxVideo2Loader
         Logs.Verbose($"[HartsyInference][LTX-2] Pipeline returned {result.Frames.Length} frames " +
             $"{result.Width}x{result.Height} in {Environment.TickCount64 - start}ms.");
 
-        Image video = VideoParamResolver.FinishVideo(result.Frames, result.Width, result.Height, input, cancel);
-        if (result.Audio is null || result.Audio.Length == 0)
+        // Build the generated soundtrack (when the audio VAE + vocoder were present) and mux it INTO the
+        // video container so the user gets a single playable video-with-sound file. gif/webp can't carry
+        // audio, so for those we fall back to emitting the soundtrack as a separate mp3 rather than losing it.
+        VideoOutputEncoder.AudioTrack audioTrack = null;
+        if (result.Audio is not null && result.Audio.Length > 0 && result.Audio[0]?.Length > 0)
+        {
+            audioTrack = new VideoOutputEncoder.AudioTrack
+            {
+                Left = result.Audio[0],
+                Right = result.Audio.Length > 1 ? result.Audio[1] : null,
+                SampleRate = result.AudioSampleRate,
+            };
+        }
+
+        string format = VideoParamResolver.ResolveFormat(input);
+        bool muxAudio = audioTrack is not null && VideoOutputEncoder.FormatSupportsAudio(format);
+        Image video = VideoParamResolver.FinishVideo(result.Frames, result.Width, result.Height, input, cancel, muxAudio ? audioTrack : null);
+        if (audioTrack is null || muxAudio)
             return new[] { video };
 
-        float[] left = result.Audio[0];
-        float[] right = result.Audio.Length > 1 ? result.Audio[1] : result.Audio[0];
-        Image audio = AudioOutputEncoder.EncodeMp3(left, right, result.AudioSampleRate, cancel);
+        Logs.Verbose($"[HartsyInference][LTX-2] Format '{format}' can't carry audio — emitting a separate mp3 soundtrack.");
+        Image audio = AudioOutputEncoder.EncodeMp3(audioTrack.Left, audioTrack.Right, result.AudioSampleRate, cancel);
         return new[] { video, audio };
     }
 
@@ -260,22 +302,25 @@ public static class LtxVideo2Loader
         List<string> dirs = [];
         string ckptDir = File.Exists(checkpointPath) ? Path.GetDirectoryName(checkpointPath) : checkpointPath;
         if (!string.IsNullOrEmpty(ckptDir)) dirs.Add(ckptDir);
-        if (!string.IsNullOrEmpty(gemmaSidePath)) dirs.Add(Path.GetDirectoryName(gemmaSidePath));
+        if (!string.IsNullOrEmpty(gemmaSidePath))
+        {
+            string gemmaDir = Path.GetDirectoryName(gemmaSidePath);
+            if (!string.IsNullOrEmpty(gemmaDir) && !dirs.Contains(gemmaDir)) dirs.Add(gemmaDir);
+        }
         foreach (string dir in dirs)
         {
+            if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) continue;
             foreach (string candidate in new[] { "tokenizer.model", "gemma.model", "gemma3.model" })
             {
-                string path = Path.Combine(dir!, candidate);
+                string path = Path.Combine(dir, candidate);
                 if (File.Exists(path)) return path;
             }
+            string[] spm = Directory.GetFiles(dir, "*.model");
+            if (spm.Length > 0) return spm[0];
         }
-        // Any loose SentencePiece file next to the checkpoint (legacy behavior; checkpoint dir only —
-        // the Clip folder holds unrelated .model files).
-        string[] spm = Directory.GetFiles(dirs[0]!, "*.model");
-        if (spm.Length > 0) return spm[0];
         throw new FileNotFoundException(
-            $"LTX-2 needs the Gemma SentencePiece tokenizer (tokenizer.model) next to the checkpoint in '{dirs[0]}' "
-            + (dirs.Count > 1 ? $"or next to the Gemma encoder in '{dirs[1]}'." : "."));
+            $"LTX-2 needs the Gemma SentencePiece tokenizer (tokenizer.model) next to the checkpoint "
+            + $"(searched: {string.Join(", ", dirs)}).");
     }
 
     /// <summary>Disposes a set of safetensors loaders as one <see cref="IDisposable"/> (sharded checkpoints).</summary>
