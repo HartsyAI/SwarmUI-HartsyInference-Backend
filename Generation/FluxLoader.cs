@@ -127,7 +127,12 @@ public static class FluxLoader
         // Depth/Fill detect cleanly but refuse at load time so the user gets a clear msg
         // instead of a runtime crash from missing depth-estimator / mask handling.
         FluxToolsMode toolsMode = DetectToolsMode(transformerWeights, model.Name);
-        log($"Architecture: {doubleBlocks} double, {singleBlocks} single, guidance={hasGuidance} ({(hasGuidance ? "Dev" : "Schnell")}), tools={toolsMode}");
+        // Kontext is architecturally identical to Dev (x_embedder stays 64-wide — the reference image is
+        // sequence-appended at runtime, not channel-concat like Tools), so it can only be identified from
+        // Swarm's model class or the filename. Kontext models accept an Init Image as the EDIT REFERENCE.
+        bool isKontext = (model.ModelClass?.ID?.Contains("kontext", StringComparison.OrdinalIgnoreCase) ?? false)
+            || model.Name.Contains("kontext", StringComparison.OrdinalIgnoreCase);
+        log($"Architecture: {doubleBlocks} double, {singleBlocks} single, guidance={hasGuidance} ({(hasGuidance ? "Dev" : "Schnell")}), tools={toolsMode}, kontext={isKontext}");
         if (toolsMode == FluxToolsMode.Depth)
         {
             mainLoader?.Dispose();
@@ -201,6 +206,7 @@ public static class FluxLoader
             ModelName = model.Name,
             CompatClass = Flux1CompatClassId,
             IsDev = hasGuidance,
+            IsKontext = isKontext,
             ToolsMode = toolsMode,
             Pipeline = pipeline,
             FluxConfig = fluxConfig,
@@ -335,6 +341,18 @@ public static class FluxLoader
         }
 
         Img2ImgResolver.Img2ImgSpec img2img = Img2ImgResolver.Resolve(input, width, height);
+        // Kontext editing: on a Kontext model the Init Image is the EDIT REFERENCE, not an img2img source —
+        // the pipeline VAE-encodes it and sequence-appends its tokens every step (diffusers FluxKontext flow),
+        // while denoising still starts from pure noise. Consume the resolved spec's tensor as the reference
+        // and drop the img2img request (strength/creativity doesn't apply to Kontext).
+        Tensor kontextRef = null;
+        if (entry.IsKontext && img2img is not null)
+        {
+            kontextRef = img2img.SourceTensor;
+            Logs.Verbose("[HartsyInference][Flux Kontext] Init Image routed as the Kontext edit reference.");
+            img2img.MaskTensor?.Dispose();
+            img2img = null;
+        }
         int? seed = seedLong < 0 ? null : (int?)(int)(seedLong & 0x7FFFFFFF);
         // Variation seed: Flux injects unpacked [1,16,H/8,W/8] noise (FluxLatentChannels=16).
         Tensor variationNoise = VariationSeedResolver.Resolve(input, width, height, seed, VariationSeedResolver.FluxLatentChannels);
@@ -380,7 +398,8 @@ public static class FluxLoader
                 clipTokens, eosPos, t5Tokens, t5Mask, request,
                 guidanceScale: guidance,
                 onProgress: bridge,
-                controlImage: fluxCannyControl);
+                controlImage: fluxCannyControl,
+                kontextRefImage: kontextRef);
 
             Logs.Verbose($"[HartsyInference][Flux] Pipeline returned {outW}x{outH} in {Environment.TickCount64 - start}ms.");
             return new[] { RgbToImage.FromHwcRgb(rgbBytes, outW, outH) };
@@ -388,6 +407,7 @@ public static class FluxLoader
         finally
         {
             img2img?.Dispose();
+            kontextRef?.Dispose();
             fluxCannyControl?.Dispose();
         }
     }
@@ -574,6 +594,10 @@ public sealed class FluxCacheEntry : IDisposable
     public required string ModelName { get; init; }
     public required string CompatClass { get; init; }
     public required bool IsDev { get; init; }
+
+    /// <summary>True for FLUX.1 Kontext models — the Init Image routes as the sequence-appended edit
+    /// reference instead of an img2img source.</summary>
+    public bool IsKontext { get; init; }
     public required FluxToolsMode ToolsMode { get; init; }
     public required FluxPipeline Pipeline { get; init; }
     public required FluxConfig FluxConfig { get; init; }

@@ -10,6 +10,7 @@ using HartsyInference.Diffusion.Models.Vae.QwenImage;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.ModelHandler.CheckpointConverters;
+using HartsyInference.ModelHandler.Gguf;
 using HartsyInference.ModelHandler.SafeTensors;
 using HartsyInference.Tokenizers;
 
@@ -50,11 +51,32 @@ public static class QwenImageLoader
             throw new FileNotFoundException($"Qwen-Image checkpoint not found: {model.RawFilePath}");
 
         // 1. Load + convert the transformer (and any bundled encoder/VAE in an all-in-one file).
+        // GGUF checkpoints (e.g. qwen-image-edit-2511-Q5_K_M.gguf) route through the same converter via
+        // the GGUF bridge, mirroring FluxLoader's split-mode GGUF path.
         log($"Loading Qwen-Image checkpoint: {model.Name}");
-        var (converted, mainLoader) = QwenImageCheckpointConverter.LoadAndConvert(model.RawFilePath);
+        bool isGguf = model.RawFilePath.EndsWith(".gguf", StringComparison.OrdinalIgnoreCase);
+        QwenImageCheckpointConverter.ConvertedWeights converted;
+        SafeTensorsLoader mainLoader = null;
+        IDisposable ggufHandle = null;
+        if (isGguf)
+        {
+            // Keep the quantized tensors NATIVE (mmap-backed): dequantizing a 20B Q4/Q5 checkpoint to F16 on the
+            // host needs ~40 GB RAM and got the process OOM-killed. The engine's Linear path dequantizes GGUF
+            // quants per-GEMM on the GPU instead. Rank-2 relabel converts ggml's [in, out] shape metadata to the
+            // [out, in] order every converter/Linear assumes (pure metadata swap, valid for quantized dtypes).
+            GgufModelLoader.LoadedGgufModel gguf = GgufModelLoader.Load(model.RawFilePath);
+            ggufHandle = gguf;
+            converted = QwenImageCheckpointConverter.Convert(
+                GgufModelLoader.RelabelRank2ToPyTorchOrder(gguf.Weights));
+        }
+        else
+        {
+            (converted, mainLoader) = QwenImageCheckpointConverter.LoadAndConvert(model.RawFilePath);
+        }
         if (converted.Transformer.Count == 0)
         {
-            mainLoader.Dispose();
+            mainLoader?.Dispose();
+            ggufHandle?.Dispose();
             throw new InvalidOperationException(
                 $"Qwen-Image checkpoint '{model.Name}' contains no transformer weights " +
                 "(looked for <c>transformer_blocks.*</c> / <c>img_in.*</c>).");
@@ -89,12 +111,16 @@ public static class QwenImageLoader
             textEncoder.LoadWeights(encoderLoader.GetAllTensors());
         }
 
-        // 3. Resolve + load the Qwen-Image VAE (shared with Anima).
-        log("Building Qwen-Image VAE decoder (16-channel)...");
+        // 3. Resolve + load the Qwen-Image VAE (shared with Anima). Both halves: the decoder for output,
+        // the encoder for img2img/edit (ImageToImageRequest requires it on pipeline construction).
+        log("Building Qwen-Image VAE decoder + encoder (16-channel)...");
         QwenImageVaeDecoder vae = new QwenImageVaeDecoder(VaeConfig.QwenImage);
+        QwenImageVaeEncoder vaeEncoder = new QwenImageVaeEncoder(VaeConfig.QwenImage);
         if (converted.Vae.Count > 0)
         {
-            vae.LoadWeights(CastToF32(converted.Vae));
+            Dictionary<string, Tensor> vaeWeights = CastToF32(converted.Vae);
+            vae.LoadWeights(vaeWeights);
+            vaeEncoder.LoadWeights(vaeWeights);
         }
         else
         {
@@ -102,11 +128,13 @@ public static class QwenImageLoader
                 userPick: input?.Get(T2IParamTypes.VAE), entry: SideModels.QwenImageVae, log: log);
             vaeLoader = new SafeTensorsLoader();
             vaeLoader.Load(vaeModel.RawFilePath);
-            vae.LoadWeights(CastToF32(vaeLoader.GetAllTensors()));
+            Dictionary<string, Tensor> vaeWeights = CastToF32(vaeLoader.GetAllTensors());
+            vae.LoadWeights(vaeWeights);
+            vaeEncoder.LoadWeights(vaeWeights);
         }
 
         log("Building Qwen-Image pipeline...");
-        QwenImagePipeline pipeline = new QwenImagePipeline(backend, textEncoder, transformer, vae, config);
+        QwenImagePipeline pipeline = new QwenImagePipeline(backend, textEncoder, transformer, vae, vaeEncoder, config);
 
         log("Loading Qwen tokenizer (embedded)...");
         Qwen3Tokenizer tokenizer = new Qwen3Tokenizer(maxLength: 512);
@@ -122,7 +150,9 @@ public static class QwenImageLoader
             TextEncoder = textEncoder,
             Transformer = transformer,
             Vae = vae,
+            VaeEncoder = vaeEncoder,
             CheckpointLoader = mainLoader,
+            GgufHandle = ggufHandle,
             EncoderLoader = encoderLoader,
             VaeLoader = vaeLoader,
         };
@@ -152,16 +182,41 @@ public static class QwenImageLoader
         var (promptTokens, promptDrop) = EncodeWithTemplate(entry.Tokenizer, prompt);
         var (negTokens, negDrop) = EncodeWithTemplate(entry.Tokenizer, negative);
 
-        TextToImageRequest request = new TextToImageRequest
+        // Img2img / edit: an Init Image routes through the Qwen-Image VAE encoder (flow-matching AddNoise at
+        // the strength-selected step); an additional Mask Image enables the blend-on-vanilla inpaint path —
+        // same request contract as Flux.
+        Img2ImgResolver.Img2ImgSpec img2img = Img2ImgResolver.Resolve(input, width, height);
+        int? seed = seedLong < 0 ? null : (int?)(int)(seedLong & 0x7FFFFFFF);
+        TextToImageRequest request;
+        if (img2img is not null)
         {
-            Prompt = prompt,
-            NegativePrompt = negative,
-            Width = width,
-            Height = height,
-            Steps = steps,
-            CfgScale = cfg,
-            Seed = seedLong < 0 ? null : (int?)(int)(seedLong & 0x7FFFFFFF),
-        };
+            request = new ImageToImageRequest
+            {
+                Prompt = prompt,
+                NegativePrompt = negative,
+                Width = width,
+                Height = height,
+                Steps = steps,
+                CfgScale = cfg,
+                Seed = seed,
+                SourceImage = img2img.SourceTensor,
+                Strength = img2img.Strength,
+                Mask = img2img.MaskTensor,
+            };
+        }
+        else
+        {
+            request = new TextToImageRequest
+            {
+                Prompt = prompt,
+                NegativePrompt = negative,
+                Width = width,
+                Height = height,
+                Steps = steps,
+                CfgScale = cfg,
+                Seed = seed,
+            };
+        }
 
         long start = Environment.TickCount64;
         Action<GenerationProgress> bridge = p =>
@@ -170,12 +225,19 @@ public static class QwenImageLoader
             onProgress(p);
         };
 
-        var (rgbBytes, outW, outH, _) = entry.Pipeline.GenerateFromTokens(
-            promptTokens, negTokens, request, bridge,
-            promptDropIndex: promptDrop, negativeDropIndex: negDrop);
+        try
+        {
+            var (rgbBytes, outW, outH, _) = entry.Pipeline.GenerateFromTokens(
+                promptTokens, negTokens, request, bridge,
+                promptDropIndex: promptDrop, negativeDropIndex: negDrop);
 
-        Logs.Verbose($"[HartsyInference][Qwen-Image] Pipeline returned {outW}x{outH} in {Environment.TickCount64 - start}ms.");
-        return new[] { RgbToImage.FromHwcRgb(rgbBytes, outW, outH) };
+            Logs.Verbose($"[HartsyInference][Qwen-Image] Pipeline returned {outW}x{outH} in {Environment.TickCount64 - start}ms.");
+            return new[] { RgbToImage.FromHwcRgb(rgbBytes, outW, outH) };
+        }
+        finally
+        {
+            img2img?.Dispose();
+        }
     }
 
     /// <summary>The exact system prompt Qwen-Image conditions on (diffusers
@@ -236,7 +298,11 @@ public sealed class QwenImageCacheEntry : IDisposable
     public required LlamaStyleEncoder TextEncoder { get; init; }
     public required QwenImageTransformer Transformer { get; init; }
     public required QwenImageVaeDecoder Vae { get; init; }
-    public required SafeTensorsLoader CheckpointLoader { get; init; }
+    public QwenImageVaeEncoder VaeEncoder { get; init; }
+    /// <summary>Null for GGUF checkpoints (see <see cref="GgufHandle"/>).</summary>
+    public SafeTensorsLoader CheckpointLoader { get; init; }
+    /// <summary>Owns the memory-mapped GGUF when the checkpoint was a .gguf; null for safetensors.</summary>
+    public IDisposable GgufHandle { get; init; }
     public SafeTensorsLoader EncoderLoader { get; init; }
     public SafeTensorsLoader VaeLoader { get; init; }
 
@@ -252,7 +318,9 @@ public sealed class QwenImageCacheEntry : IDisposable
         TextEncoder?.Dispose();
         Transformer?.Dispose();
         // VaeDecoder isn't IDisposable (no owned native handles freed here).
+        VaeEncoder?.Dispose();
         CheckpointLoader?.Dispose();
+        GgufHandle?.Dispose();
         EncoderLoader?.Dispose();
         VaeLoader?.Dispose();
     }

@@ -74,10 +74,9 @@ public static class WanAnimateLoader
         }
         log($"  Converted: {conv.Transformer.Count} transformer keys (Animate: pose + face/motion pathway, inner {config.InnerDim})");
 
-        // Real Wan-Animate-14B face/motion/pose hyperparameters (engine constructor defaults).
-        WanAnimateTransformer transformer = new WanAnimateTransformer(config, poseLatentChannels: 16,
-            motionEncoderSize: MotionEncoderSize, motionDim: 512, faceHiddenDim: 1024, faceNumHeads: 4,
-            injectFaceLatentsBlocks: 5, motionVecDim: 20, motionBlocks: 5);
+        // Engine API (c9603f1): the face/motion/pose hyperparameters moved into the transformer's
+        // internal weight-derived setup; the ctor takes the config alone.
+        WanAnimateTransformer transformer = new WanAnimateTransformer(config);
         transformer.LoadWeights(conv.Transformer);
 
         try
@@ -173,8 +172,18 @@ public static class WanAnimateLoader
         Action<GenerationProgress> bridge = p => { cancel.ThrowIfCancellationRequested(); onProgress(p); };
         try
         {
+            // Engine API (c9603f1): GenerateAnimation now REQUIRES a reference identity image (referenceRgb)
+            // matching ComfyUI's WanAnimate conditioning. The extension has no reference-image parameter wired
+            // for Animate yet (the driving video occupies Init Image) — refuse with a clear message instead of
+            // fabricating conditioning. Runtime wiring lands with the engine-side Animate parity work.
+            throw new SwarmUserErrorException(
+                "HartsyInference: Wan Animate needs the new reference-image conditioning wiring (engine API "
+                + "changed to require an identity reference alongside the pose/face clips). This path is being "
+                + "reworked for ComfyUI parity — use the ComfyUI backend for Wan Animate in the meantime.");
+#pragma warning disable CS0162 // unreachable — kept for the pending rewire
             var (frames, outW, outH, _) = entry.Pipeline.GenerateAnimation(
-                promptEmbeds, negEmbeds, poseClip, faceClip, request, bridge);
+                promptEmbeds, negEmbeds, referenceRgb: null, poseClip, faceClip, request, onProgress: bridge);
+#pragma warning restore CS0162
             Logs.Verbose($"[HartsyInference][Animate] Pipeline returned {frames.Length} frames {outW}x{outH} "
                 + $"({numFrames}f pose / {numFrames - 1}f face) in {Environment.TickCount64 - start}ms.");
             return new[] { VideoParamResolver.FinishVideo(frames, outW, outH, input, cancel) };

@@ -536,6 +536,17 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         Status = BackendStatus.LOADING;
         try
         {
+            // Make room BEFORE the new model's weights allocate: evict outgoing pipelines now (Put-time eviction
+            // ran only after the load, so both models' device residency briefly coexisted — the SD3.5/Ideogram-4
+            // model-switch OOMs). When that empties the cache entirely, also wipe every cached device allocation:
+            // entry disposal alone does NOT release preloaded weights (the backend weight cache keeps them and
+            // their Tensors alive), so each switch used to leak the outgoing model's full preloaded set.
+            _cache.MakeRoomForLoad();
+            if (_cache.IsEmpty)
+            {
+                _backend.FreeAllDeviceMemory();
+            }
+
             if (compat == Sd15Loader.Sd15CompatClassId)
             {
                 await Task.Run(() =>
@@ -1624,6 +1635,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 || Sd3Loader.IsSd3Compat(compat)
                 || compat == ZImageLoader.ZImageCompatClassId
                 || compat == BooguImageLoader.BooguImageCompatClassId // Init Image = the edit reference (TI2I)
+                || compat == QwenImageLoader.QwenImageCompatClassId   // img2img via QwenImageVaeEncoder (covers qwen-image-edit checkpoints too)
                 || Flux2Loader.IsFlux2Compat(compat)
                 // Wan video: Init Image = the I2V first frame, not img2img. The loader routes it
                 // (CLIP-I2V / concat-I2V for 14B I2V checkpoints, expand_timesteps for TI2V-5B)
@@ -1634,7 +1646,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             {
                 input.RefusalReasons.Add(
                     $"HartsyInference: img2img isn't supported on architecture '{compat}' yet. " +
-                    $"Currently supported: SD 1.5, SDXL, Flux, Flux.2, SD3, Z-Image, Boogu. Remove the Init Image or pick a model from a supported architecture.");
+                    $"Currently supported: SD 1.5, SDXL, Flux, Flux.2, SD3, Z-Image, Qwen-Image, Boogu. Remove the Init Image or pick a model from a supported architecture.");
                 return false;
             }
         }
@@ -1651,12 +1663,15 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             bool isInpaintSupported =
                 compat == SdxlLoader.SdxlCompatClassId
                 || compat == FluxLoader.Flux1CompatClassId
-                || Sd3Loader.IsSd3Compat(compat);
+                || Sd3Loader.IsSd3Compat(compat)
+                // Qwen-Image: QwenImagePipeline runs the same blend-on-vanilla path as Flux when
+                // ImageToImageRequest.Mask is set (per-step packed blend + pixel recomposite).
+                || compat == QwenImageLoader.QwenImageCompatClassId;
             if (!isInpaintSupported)
             {
                 input.RefusalReasons.Add(
                     $"HartsyInference: inpainting (mask image) isn't wired for architecture '{compat}' yet. " +
-                    $"Currently supported: SDXL, Flux, SD3. Remove the Mask Image or pick a model from a supported architecture.");
+                    $"Currently supported: SDXL, Flux, SD3, Qwen-Image. Remove the Mask Image or pick a model from a supported architecture.");
                 return false;
             }
         }
@@ -1751,6 +1766,12 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     public override async Task<bool> FreeMemory(bool systemRam)
     {
         bool freed = _cache?.EvictAll() ?? false;
+        if (freed)
+        {
+            // Entry disposal alone leaves preloaded weights in the backend's device cache — wipe it so
+            // "free memory" actually returns the VRAM.
+            _backend?.FreeAllDeviceMemory();
+        }
 
         if (systemRam)
         {

@@ -35,6 +35,33 @@ public static class BooguImageLoader
 {
     public const string BooguImageCompatClassId = "boogu-image";
 
+    /// <summary>Registers the Boogu-Image model + compat classes. SwarmUI core has no Boogu detector, so
+    /// without this the transformer files scan as unclassified (or collide with the OmniGen2 lineage they
+    /// share <c>context_refiner.*</c> keys with) and the backend never dispatches here. The probe keys off
+    /// <c>double_stream_layers.*.img_instruct_attn.*</c> — Boogu's TI2I instruct-attention stream, present in
+    /// no other supported arch (OmniGen2 uses flat <c>layers.*</c>; verified against both headers). Call once
+    /// at extension init, before model folders are scanned.</summary>
+    public static void RegisterModelClass()
+    {
+        T2IModelCompatClass compat = T2IModelClassSorter.RegisterCompat(new()
+        {
+            ID = BooguImageCompatClassId,
+            ShortCode = "Boogu",
+            LorasTargetTextEnc = false,
+            VaeFamily = T2IModelClassSorter.VaeFlux1, // Boogu reuses the Flux.1 KL VAE
+        });
+        T2IModelClassSorter.Register(new T2IModelClass
+        {
+            ID = BooguImageCompatClassId,
+            CompatClass = compat,
+            Name = "Boogu Image",
+            StandardWidth = 1024,
+            StandardHeight = 1024,
+            IsThisModelOfClass = (model, header) =>
+                header.ContainsKey("double_stream_layers.0.img_instruct_attn.processor.img_to_q.weight"),
+        });
+    }
+
     /// <summary>Boogu T2I system prompt (verbatim from <c>pipeline_boogu.py</c> <c>SYSTEM_PROMPT_4_T2I_UNIFIED</c>).</summary>
     private const string SystemPromptT2I =
         "You are a helpful assistant that generates high-quality images based on user instructions. The instructions are as follows.";

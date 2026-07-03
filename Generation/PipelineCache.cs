@@ -154,9 +154,28 @@ public sealed class PipelineCache
 
     /// <summary>Evict the globally-oldest entry across all architecture maps until we're
     /// at or under <see cref="_maxEntries"/>.</summary>
-    private void EvictIfOverCapacity()
+    private void EvictIfOverCapacity() => EvictDownTo(_maxEntries);
+
+    /// <summary>True when no pipelines are cached. Combined with <see cref="MakeRoomForLoad"/>, lets the backend
+    /// safely wipe ALL device memory (orphaned preloaded weights included) before a fresh model load.</summary>
+    public bool IsEmpty { get { lock (_lock) { return TotalCount == 0; } } }
+
+    /// <summary>Frees room for an incoming model load BEFORE its weights allocate: evicts oldest entries until
+    /// at most <c>_maxEntries - 1</c> remain. Without this, eviction only ran at Put time — i.e. AFTER the new
+    /// model finished loading — so during every model switch the outgoing pipeline's device residency coexisted
+    /// with the incoming load's peak (SDXL+Flux residuals pushed SD3.5-Large fp8's encode into OOM, and Z-Image's
+    /// residency tripped Ideogram-4's 22 GB pre-gate, on a 24 GB card).</summary>
+    public void MakeRoomForLoad()
     {
-        while (TotalCount > _maxEntries)
+        lock (_lock)
+        {
+            EvictDownTo(Math.Max(0, _maxEntries - 1));
+        }
+    }
+
+    private void EvictDownTo(int maxEntries)
+    {
+        while (TotalCount > maxEntries)
         {
             DateTime oldestTime = DateTime.MaxValue;
             Action evictAction = null;

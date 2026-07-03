@@ -93,10 +93,15 @@ public static class WanS2VLoader
         log($"  Converted: {w.Count} keys (S2V audio injector ×{injectCount} @ [{string.Join(",", injectLayers)}], "
             + $"audioDim {audioDim}, {numAudioLayers} harvested layers, {tokensPerFrame} tok/frame)");
 
-        WanS2VTransformer transformer = new WanS2VTransformer(config, injectLayers);
+        // Engine API (c9603f1): inject layers moved onto WanVideoConfig (record `with` copy); the
+        // transformer ctor takes the config alone.
+        config = config with { AudioInjectLayers = injectLayers };
+        WanS2VTransformer transformer = new WanS2VTransformer(config);
         transformer.LoadWeights(w);
+        // Engine API (c9603f1): `tokensPerFrame:` renamed to `numTokens:`; the conv kernel size is now
+        // derived from the checkpoint weights inside LoadWeights (no ctor param).
         WanS2VAudioEncoder audioEncoder = new WanS2VAudioEncoder(numAudioLayers, audioDim, config.InnerDim,
-            tokensPerFrame: tokensPerFrame, kernel: audioKernel);
+            numTokens: tokensPerFrame);
         audioEncoder.LoadWeights(w, "audio_encoder");
 
         Wav2Vec2Encoder wav2vec2 = null;
@@ -207,7 +212,7 @@ public static class WanS2VLoader
         try
         {
             var (frames, outW, outH, _) = entry.Pipeline.GenerateFromWaveform(
-                promptEmbeds, negEmbeds, waveform, entry.Wav2Vec2, request, numFrames, bridge);
+                promptEmbeds, negEmbeds, waveform, entry.Wav2Vec2, request, numFrames, onProgress: bridge);
             Logs.Verbose($"[HartsyInference][S2V] Pipeline returned {frames.Length} frames {outW}x{outH} in {Environment.TickCount64 - start}ms.");
             return new[] { VideoParamResolver.FinishVideo(frames, outW, outH, input, cancel) };
         }
