@@ -60,6 +60,18 @@ public static class BooguImageLoader
             IsThisModelOfClass = (model, header) =>
                 header.ContainsKey("double_stream_layers.0.img_instruct_attn.processor.img_to_q.weight"),
         });
+
+        // Class resolution is first-match in registration order and core classes register before extension
+        // ones — Boogu's OmniGen2-lineage keys (`context_refiner.*`, `time_caption_embed.*`) satisfy core's
+        // omnigen-2 probe, so Boogu files were classifying as OmniGen 2 and dispatching to the refusal path.
+        // Refine core's probe in place to exclude Boogu's unique double-stream instruct-attention keys.
+        if (T2IModelClassSorter.ModelClasses.TryGetValue("omnigen-2", out T2IModelClass omni)
+            && omni.IsThisModelOfClass is not null)
+        {
+            var origProbe = omni.IsThisModelOfClass;
+            omni.IsThisModelOfClass = (m, h) =>
+                !h.ContainsKey("double_stream_layers.0.img_instruct_attn.processor.img_to_q.weight") && origProbe(m, h);
+        }
     }
 
     /// <summary>Boogu T2I system prompt (verbatim from <c>pipeline_boogu.py</c> <c>SYSTEM_PROMPT_4_T2I_UNIFIED</c>).</summary>

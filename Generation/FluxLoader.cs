@@ -108,13 +108,40 @@ public static class FluxLoader
             t5Weights = converted.T5;
             vaeWeights = converted.Vae;
 
-            if (transformerWeights.Count == 0 || clipLWeights.Count == 0 || t5Weights.Count == 0 || vaeWeights.Count == 0)
+            if (transformerWeights.Count == 0)
             {
                 mainLoader.Dispose();
                 throw new InvalidOperationException(
-                    "Flux all-in-one mode: this checkpoint doesn't contain all of Transformer/CLIP-L/T5/VAE. " +
-                    "Either pick a complete BFL/civitai checkpoint, OR configure CLIP-L Model + T5-XXL Model + VAE " +
-                    "parameters in Swarm to load components from separate files.");
+                    "Flux: this checkpoint contains no transformer weights — not a Flux diffusion model.");
+            }
+
+            // Transformer-only checkpoint (Comfy diffusion_models style, e.g. flux1-dev-kontext_fp8_scaled):
+            // resolve the missing components from the central SideModels registry (same canonical files the
+            // split-file mode and Comfy use; auto-downloaded when absent) instead of refusing. The user's
+            // explicit CLIP-L/T5/VAE picks still win — they'd have routed through split mode above.
+            if (clipLWeights.Count == 0)
+            {
+                T2IModel clipLSide = ModelAutoDownloader.EnsureSideModel(userPick: null, entry: SideModels.ClipL, log: log);
+                log($"  CLIP-L (side model): {clipLSide.Name}");
+                clipLLoader = new SafeTensorsLoader();
+                clipLLoader.Load(clipLSide.RawFilePath);
+                clipLWeights = ConvertClipLFromStandalone(clipLLoader.GetAllTensors());
+            }
+            if (t5Weights.Count == 0)
+            {
+                T2IModel t5Side = ModelAutoDownloader.EnsureSideModel(userPick: null, entry: SideModels.T5XxlEnconly, log: log);
+                log($"  T5-XXL (side model): {t5Side.Name}");
+                t5Loader = new SafeTensorsLoader();
+                t5Loader.Load(t5Side.RawFilePath);
+                t5Weights = ConvertT5FromStandalone(t5Loader.GetAllTensors());
+            }
+            if (vaeWeights.Count == 0)
+            {
+                T2IModel vaeSide = ModelAutoDownloader.EnsureSideModel(userPick: null, entry: SideModels.FluxAe, log: log);
+                log($"  VAE (side model): {vaeSide.Name}");
+                vaeLoader = new SafeTensorsLoader();
+                vaeLoader.Load(vaeSide.RawFilePath);
+                vaeWeights = ConvertVaeFromStandalone(vaeLoader.GetAllTensors());
             }
         }
 
