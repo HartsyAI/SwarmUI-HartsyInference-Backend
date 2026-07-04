@@ -26,16 +26,6 @@ public static class SegmentRefiner
         return new PromptRegion(prompt).Parts.Any(p => p.Type == PromptRegion.PartType.Segment);
     }
 
-    /// <summary>True if every segment part targets YOLO (the only detector we support). Used by the
-    /// validator to refuse text/CLIP-Seg targets upfront with a clear message.</summary>
-    public static bool AllSegmentsAreYolo(T2IParamInput input)
-    {
-        string prompt = input.Get(T2IParamTypes.Prompt) ?? "";
-        return new PromptRegion(prompt).Parts
-            .Where(p => p.Type == PromptRegion.PartType.Segment)
-            .All(SegmentResolver.IsYoloTarget);
-    }
-
     /// <summary>Runs every segment part over each base image, returning the refined images.
     /// <paramref name="reGenerate"/> takes a (cloned) input with InitImage + MaskImage + segment
     /// prompt set and returns the re-denoised image(s) using the active architecture's loader.</summary>
@@ -62,7 +52,10 @@ public static class SegmentRefiner
             foreach (PromptRegion.Part part in parts)
             {
                 cancel.ThrowIfCancellationRequested();
-                Image mask = SegmentResolver.BuildYoloMask(backend, current, part, input, log);
+                // YOLO targets ("yolo-...") use the detector; any other target text is free-text CLIPSeg.
+                Image mask = SegmentResolver.IsYoloTarget(part)
+                    ? SegmentResolver.BuildYoloMask(backend, current, part, input, log)
+                    : ClipSegResolver.BuildTextMask(backend, current, part, input, log);
                 if (mask is null)
                 {
                     segIdx++;

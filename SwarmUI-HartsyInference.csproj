@@ -49,7 +49,7 @@
                         precision knobs. nuget.config's hartsy-local feed path doesn't exist on this machine and
                         no alpha.43.1-local package has actually been packed — pin to it once it's really built,
                         or once published as a real CI alpha. -->
-        <PackageReference Include="HartsyInference" Version="1.0.0-alpha.43.7-local" />
+        <PackageReference Include="HartsyInference" Version="1.0.0-alpha.43.110-local" />
     </ItemGroup>
 
     <!-- Ideogram 4's magic-prompt system prompt, ported verbatim from upstream

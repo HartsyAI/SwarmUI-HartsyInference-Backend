@@ -7,6 +7,7 @@ using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines;
+using HartsyInference.Diffusion.Prompting;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.ModelHandler.CheckpointConverters;
 using HartsyInference.ModelHandler.Lora;
@@ -136,7 +137,7 @@ public static class SdxlLoader
             unet.LoadWeights(unetWeights);
 
             using SdxlPipeline pipeline = new SdxlPipeline(backend, clipL, clipG, unet, entry.Vae, entry.VaeEncoder);
-            return RunSdxlPipeline(pipeline, entry.Tokenizer, input, onProgress, cancel, refinerSwap, ipAdapters);
+            return RunSdxlPipeline(pipeline, entry.Tokenizer, clipL, clipG, backend, input, onProgress, cancel, refinerSwap, ipAdapters);
         }
         finally
         {
@@ -149,13 +150,14 @@ public static class SdxlLoader
 
     public static Image[] Generate(
         SdxlCacheEntry entry,
+        IBackend backend,
         T2IParamInput input,
         Action<GenerationProgress> onProgress,
         CancellationToken cancel,
         RefinerSwapConfig refinerSwap = null,
         IReadOnlyList<HartsyInference.Diffusion.Adapters.IpAdapterConditioning> ipAdapters = null)
     {
-        return RunSdxlPipeline(entry.Pipeline, entry.Tokenizer, input, onProgress, cancel, refinerSwap, ipAdapters);
+        return RunSdxlPipeline(entry.Pipeline, entry.Tokenizer, entry.ClipL, entry.ClipG, backend, input, onProgress, cancel, refinerSwap, ipAdapters);
     }
 
     /// <summary>Shared per-pipeline driver — same logic whether the pipeline is the
@@ -165,6 +167,9 @@ public static class SdxlLoader
     private static Image[] RunSdxlPipeline(
         SdxlPipeline pipeline,
         ClipTokenizer tokenizer,
+        ClipTextEncoder clipL,
+        ClipTextEncoder clipG,
+        IBackend backend,
         T2IParamInput input,
         Action<GenerationProgress> onProgress,
         CancellationToken cancel,
@@ -179,10 +184,15 @@ public static class SdxlLoader
         long seedLong = input.Get(T2IParamTypes.Seed);
         double cfgRaw = input.Get(T2IParamTypes.CFGScale);
 
+        // Textual inversion <embed:name>: resolve the \0swarmembed markers into a placeholder-token plan +
+        // per-encoder inline vectors. The plain tokens below (which drive the pooled/ADM vector) use the
+        // marker-stripped prompt; the embedding's cross-attention effect is injected via the schedule built later.
+        EmbeddingResolver.Plan embedPlan = EmbeddingResolver.Resolve(prompt, tokenizer, new[] { 768, 1280 });
+
         // Both encoders use the same BPE — encode once, feed to both. CLIP-G needs the
         // EOS position to extract the pooled vector for ADM conditioning.
-        int[] promptTokensL = tokenizer.Encode(prompt);
-        int[] negTokensL = tokenizer.Encode(negative);
+        int[] promptTokensL = tokenizer.Encode(EmbeddingResolver.StripMarkers(prompt));
+        int[] negTokensL = tokenizer.Encode(EmbeddingResolver.StripMarkers(negative));
         int[] promptTokensG = promptTokensL;
         int[] negTokensG = negTokensL;
         int promptEosG = ClipTokenizer.FindEosPosition(promptTokensG);
@@ -239,15 +249,53 @@ public static class SdxlLoader
                 onProgress(p);
             };
 
+            // ComfyUI-style weighting + <break> + [a|b]: build the weighted dual-CLIP [2,S,2048] conditioning
+            // and pass it as a single-variant schedule (the pipeline overrides its token-encoded cross-attention
+            // conditioning with it). Null for plain prompts → byte-identical unchanged path. SDXL is penultimate
+            // (clipSkip=2) by spec — the plain path uses the same, so the schedule must match.
+            // <embed> takes precedence over weighting when present (the embed schedule already encodes the full
+            // token layout); otherwise fall back to the weighting/[a|b] schedule. Both are null for plain prompts.
+            ConditioningSchedule weightedSchedule = embedPlan is not null
+                ? EmbeddingResolver.BuildDualClipSchedule(backend, clipL, clipG, tokenizer, embedPlan, negative, layersFromEnd: 2)
+                : WeightedConditioning.BuildDualClip(backend, clipL, clipG, tokenizer, prompt, negative, layersFromEnd: 2);
+
+            // <refiner> prompt: when a StepSwap refiner is active and the prompt carries a <refiner> section,
+            // encode it with CLIP-G (penultimate, [2,S,1280]) and hand it to the refiner phase so it cross-attends
+            // to the refiner prompt instead of the base one. Empty <refiner> → refiner reuses base cond (unchanged).
+            Tensor refinerCond = null;
+            RefinerSwapConfig effectiveRefiner = refinerSwap;
+            if (refinerSwap is not null)
+            {
+                string refinerPrompt = new PromptRegion(input.Get(T2IParamTypes.Prompt) ?? "").RefinerPrompt;
+                if (!string.IsNullOrWhiteSpace(refinerPrompt))
+                {
+                    int[] rTok = tokenizer.Encode(refinerPrompt);
+                    int[][] rBatch = new[] { negTokensG, rTok };   // [uncond = base negative, cond = <refiner> prompt]
+                    int[] rEos = new[] { negEosG, ClipTokenizer.FindEosPosition(rTok) };
+                    (refinerCond, Tensor rPooled) = clipG.EncodePenultimate(backend, rBatch, rEos, 2);
+                    rPooled?.Dispose();
+                    effectiveRefiner = refinerSwap with { RefinerConditioning = refinerCond };
+                }
+            }
+
             var (rgbBytes, outW, outH, _) = pipeline.GenerateFromTokens(
                 promptTokensL, negTokensL,
                 promptTokensG, negTokensG,
                 promptEosG, negEosG,
                 request, bridge,
                 controlnets?.Conditionings,
-                refinerSwap,
-                ipAdapters);
+                effectiveRefiner,
+                ipAdapters,
+                weightedSchedule);
 
+            refinerCond?.Dispose();
+            if (weightedSchedule is not null)
+            {
+                foreach (Tensor variant in weightedSchedule.Variants)
+                {
+                    variant.Dispose();
+                }
+            }
             Logs.Verbose($"[HartsyInference][SDXL] Pipeline returned {outW}x{outH} in {Environment.TickCount64 - start}ms.");
             return new[] { RgbToImage.FromHwcRgb(rgbBytes, outW, outH) };
         }
@@ -255,6 +303,7 @@ public static class SdxlLoader
         {
             img2img?.Dispose();
             controlnets?.Dispose();
+            embedPlan?.Dispose();
         }
     }
 }

@@ -57,6 +57,34 @@ public static class Ideogram4MagicPrompt
             && (prompt.Contains("compositional_deconstruction") || prompt.Contains("high_level_description"));
     }
 
+    /// <summary>Wraps a plain user prompt in Ideogram 4's minimal structured-caption JSON shape WITHOUT an LLM.
+    /// Ideogram 4 was trained on structured JSON captions; feeding raw plain text is out-of-distribution and
+    /// makes the model's built-in safety filter false-trigger far more often (it renders a grey "Image blocked
+    /// by safety filter" placeholder). Putting the whole idea in <c>high_level_description</c> inside the schema
+    /// keeps the input in the JSON form the model expects. This is the always-available fallback for the richer
+    /// LLM <see cref="Expand"/> path (which is gated off on cores without the LLM API). Uses System.Text.Json
+    /// for correct string escaping (Newtonsoft is only imported under HARTSY_LLM_CORE).</summary>
+    public static string WrapPlainAsJson(string prompt)
+    {
+        string p = string.IsNullOrWhiteSpace(prompt) ? "a photograph" : prompt.Trim();
+        // Best-effort structured shape for a bare prompt. NOTE (verified 2026-07-03): this is NOT sufficient to
+        // reliably clear Ideogram 4's trained safety head — mechanically echoing a short prompt into the schema
+        // still reads as out-of-distribution and often yields the grey "Image blocked by safety filter" frame,
+        // whereas a genuinely written rich caption (elaborated high_level_description + specific multi-detail
+        // background + a decomposed focal element) renders correctly. Producing that from a bare prompt needs the
+        // LLM Expand() path. Kept as a slightly-better-than-plain fallback; callers should warn the user.
+        var caption = new
+        {
+            high_level_description = p,
+            compositional_deconstruction = new
+            {
+                background = p,
+                elements = new object[] { new { type = "obj", desc = p } },
+            },
+        };
+        return System.Text.Json.JsonSerializer.Serialize(caption);
+    }
+
     /// <summary>Expands <paramref name="plainPrompt"/> into the canonical Ideogram 4 JSON caption via a running
     /// LLM backend. <b>Gated:</b> when built without <c>HARTSY_LLM_CORE</c> this is a no-op that returns the
     /// prompt unchanged (Ideogram 4 accepts plain text), pending SwarmUI core's expanded LLM API.</summary>

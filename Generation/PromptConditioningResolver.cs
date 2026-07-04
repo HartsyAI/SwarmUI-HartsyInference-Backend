@@ -39,4 +39,22 @@ public static class PromptConditioningResolver
         }
         return new PromptRegion(raw).GlobalPrompt ?? "";
     }
+
+    /// <summary>Video-stage text: the <c>&lt;video&gt;</c> sub-prompt when present (image-to-video's alternate
+    /// motion prompt), else the tag-stripped global text. Prevents the raw <c>&lt;video&gt;</c>/other tags from
+    /// leaking into the video tokenizer (the routing guard doesn't cover <c>&lt;video&gt;</c>).</summary>
+    public static string VideoText(string raw)
+    {
+        if (string.IsNullOrEmpty(raw))
+        {
+            return raw ?? "";
+        }
+        if (!raw.Contains('<'))
+        {
+            return raw;
+        }
+        PromptRegion region = new PromptRegion(raw);
+        string video = region.VideoPrompt;
+        return !string.IsNullOrWhiteSpace(video) ? video : (region.GlobalPrompt ?? "");
+    }
 }

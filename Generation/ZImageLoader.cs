@@ -7,6 +7,7 @@ using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines;
+using HartsyInference.Diffusion.Prompting;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.ModelHandler.CheckpointConverters.Utils;
 using HartsyInference.ModelHandler.CheckpointConverters;
@@ -167,6 +168,23 @@ public static class ZImageLoader
             negativeEmbeddings = SliceFirstSeqF32(negEncodedFull, negRealLen);
         }
 
+        // Regional prompting: <region:x,y,w,h,strength> / <object:…> parts each get their own Qwen3 encode +
+        // spatial mask, assembled into a RegionalPlan the transformer turns into a per-step attention bias. Null
+        // (no such parts) keeps the plain single-conditioning path unchanged. Uses the RAW prompt — BaseText above
+        // stripped the tags. Region encodes reuse the exact global encode path (EncodeChat → penultimate → slice).
+        string rawPrompt = input.Get(T2IParamTypes.Prompt) ?? "";
+        RegionalPlan regionalPlan = RegionalPromptResolver.Resolve(
+            rawPrompt, positiveEmbeddings, width, height, steps,
+            regionText =>
+            {
+                int[] rTokens = entry.Tokenizer.EncodeChat(regionText);
+                int rLen = ComputeRealLength(rTokens);
+                Tensor rFull = entry.Qwen.EncodeMultiLayer(backend, new[] { rTokens }, new[] { penultimateIdx });
+                Tensor rCond = SliceFirstSeqF32(rFull, rLen);
+                rFull.Dispose();
+                return rCond;
+            });
+
         // Img2img: build an ImageToImageRequest if an init image is provided. The
         // upstream pipeline detects this on runtime type and switches behavior.
         // Caveat (per ZImagePipeline.cs): nonzero-strength Z-Image img2img produces
@@ -215,7 +233,8 @@ public static class ZImageLoader
                 request,
                 cfgScale: cfg,
                 negativeCaptionEmbeddings: negativeEmbeddings,
-                onProgress: bridge);
+                onProgress: bridge,
+                regionalPlan: regionalPlan);
 
             Logs.Verbose($"[HartsyInference][Z-Image] Pipeline returned {outW}x{outH} in {Environment.TickCount64 - start}ms.");
             return new[] { RgbToImage.FromHwcRgb(rgbBytes, outW, outH) };
@@ -223,6 +242,7 @@ public static class ZImageLoader
         finally
         {
             img2img?.SourceTensor?.Dispose();
+            RegionalPromptResolver.DisposeRegions(regionalPlan);
         }
     }
 
