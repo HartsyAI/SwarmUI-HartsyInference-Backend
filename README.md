@@ -118,6 +118,27 @@ fails, drain both streams + trim the device mempool, then retry. You may see
 `[Warning] [CudaMemory] OOM on first attempt` lines in the log during VAE decode —
 that's normal under tight memory and the retry is recovering.
 
+## Running on multiple GPUs
+
+Setup mirrors the ComfyUI backend exactly: **one backend instance per GPU**, added
+manually (neither backend auto-spawns per GPU). In `Server` → `Backends`, click
+`HartsyInference (Pure C# Inference)` once per GPU and set each instance's `GPU_ID`
+to a distinct ordinal (`0`, `1`, …). Swarm's scheduler then load-balances generations
+across the instances — it routes each request to the least-used instance that already
+has (or can load) the model, and different instances generate fully in parallel.
+
+Unlike ComfyUI (which isolates each GPU in a separate Python process via
+`CUDA_VISIBLE_DEVICES`), HartsyInference runs all instances **in one process**, so each
+instance's engine state must be per-device-isolated. It is: the engine binds its CUDA
+context per calling thread and keys every stream / memory pool / kernel module / cuBLAS
+handle by device, so two backends on two GPUs share no mutable state. (The one remaining
+cross-backend hazard — a process-global tensor-finalizer cleanup queue that let one
+backend's thread run another's cleanup — was fixed by partitioning that queue per CUDA
+context; requires engine ≥ the build noted in the extension bump.)
+
+A `GPU_ID` list like `0,1` is accepted but only the first ordinal is used — one
+HartsyInference instance drives one GPU. For multi-GPU, add multiple instances.
+
 ## Known limitations
 
 - **VAE decode is slow** when memory is tight (tens of seconds for 1024²) because of
