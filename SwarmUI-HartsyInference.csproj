@@ -21,7 +21,7 @@
              engine types (LtxVideo2/WanAnimate/WanS2V/WanVace/Boogu/Krea2/Qwen3-VL/…) — restoring the
              pin silently falls back to alpha.4-dev and the build fails. Revert to false once a real
              alpha.N carrying these ships and the pin below is bumped to it. -->
-        <UseLocalHartsy Condition="'$(UseLocalHartsy)' == ''">true</UseLocalHartsy>
+        <UseLocalHartsy Condition="'$(UseLocalHartsy)' == ''">false</UseLocalHartsy>
         <HartsyRepo Condition="'$(HartsyRepo)' == ''">$(MSBuildThisFileDirectory)../../../../SharpInference</HartsyRepo>
         <!-- Cli bin is the full engine closure: every HartsyInference.* assembly + Google.Protobuf +
              Microsoft.ML.Tokenizers, all in one folder. -->
@@ -60,7 +60,7 @@
                         precision knobs. nuget.config's hartsy-local feed path doesn't exist on this machine and
                         no alpha.43.1-local package has actually been packed — pin to it once it's really built,
                         or once published as a real CI alpha. -->
-        <PackageReference Include="HartsyInference" Version="1.0.0-alpha.43.110-local" />
+        <PackageReference Include="HartsyInference" Version="1.0.0-alpha.43.118-local" />
     </ItemGroup>
 
     <!-- LOCAL ENGINE: prebuilt DLLs from the SharpInference Cli bin (its full runtime closure). Referenced
