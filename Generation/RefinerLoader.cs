@@ -67,13 +67,19 @@ public static class RefinerLoader
         ClipTextEncoder clipG = new ClipTextEncoder(ClipTextEncoderConfig.SdxlClipG);
         clipG.LoadWeights(converted.ClipG, prefix: "text_model");
 
-        log("Building VAE encoder (Sdxl config)...");
-        VaeEncoder vaeEncoder = new VaeEncoder(VaeConfig.Sdxl);
-        vaeEncoder.LoadWeights(converted.Vae);
+        // SDXL VAE F16 is famously broken (resnet activations overflow → NaN → all-black output).
+        // The refiner ships the same SDXL VAE, so apply the identical BF16(Ampere+)/F32 cast the base
+        // SdxlLoader uses — otherwise the refined latent decodes to a black image (the F16 decode NaNs).
+        DType vaeDtype = VaePrecisionHelper.PreferredSdxlVaeDtype(backend);
+        Dictionary<string, Tensor> vaeWeights = VaePrecisionHelper.CastVaeWeights(converted.Vae, vaeDtype);
 
-        log("Building VAE decoder (Sdxl config)...");
+        log($"Building VAE encoder (Sdxl config, dtype={vaeDtype})...");
+        VaeEncoder vaeEncoder = new VaeEncoder(VaeConfig.Sdxl);
+        vaeEncoder.LoadWeights(vaeWeights);
+
+        log($"Building VAE decoder (Sdxl config, dtype={vaeDtype})...");
         VaeDecoder vaeDecoder = new VaeDecoder(VaeConfig.Sdxl);
-        vaeDecoder.LoadWeights(converted.Vae);
+        vaeDecoder.LoadWeights(vaeWeights);
 
         log("Building refiner pipeline...");
         SdxlRefinerPipeline pipeline = new SdxlRefinerPipeline(backend, clipG, refinerUnet, vaeEncoder, vaeDecoder);
