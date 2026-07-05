@@ -74,9 +74,8 @@ public class SwarmUIHartsyInference : Extension
         // MusicGen + YuE: gen-tab music models (audio params light up via IsAudioModel).
         Generation.MusicGenLoader.RegisterModelClass();
         Generation.YueLoader.RegisterModelClass();
-        // Boogu-Image: core has no detector for it (its OmniGen2-lineage keys would otherwise scan
-        // unclassified). Must register before model folders are scanned.
-        Generation.BooguImageLoader.RegisterModelClass();
+        // Boogu: core now detects it (compat class "boogu") and excludes it from the OmniGen2 probe, so
+        // the extension reuses core's classification — no registration needed.
     }
 
     public override void OnInit()

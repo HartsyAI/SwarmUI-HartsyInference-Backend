@@ -15,6 +15,17 @@
              of a NEW floating version; already-resolved versions in the global-packages folder are
              unaffected). Pin Version below to a specific alpha.N if you ever need an offline build. -->
         <RestoreNoHttpCache>true</RestoreNoHttpCache>
+        <!-- Engine source toggle (same pattern as SwarmUI-AudioLab): false = published NuGet;
+             true = prebuilt local SharpInference DLLs. Temporarily defaulted true because the pinned
+             NuGet (1.0.0-alpha.43.7-local) was never packed and no published alpha contains the current
+             engine types (LtxVideo2/WanAnimate/WanS2V/WanVace/Boogu/Krea2/Qwen3-VL/…) — restoring the
+             pin silently falls back to alpha.4-dev and the build fails. Revert to false once a real
+             alpha.N carrying these ships and the pin below is bumped to it. -->
+        <UseLocalHartsy Condition="'$(UseLocalHartsy)' == ''">true</UseLocalHartsy>
+        <HartsyRepo Condition="'$(HartsyRepo)' == ''">$(MSBuildThisFileDirectory)../../../../SharpInference</HartsyRepo>
+        <!-- Cli bin is the full engine closure: every HartsyInference.* assembly + Google.Protobuf +
+             Microsoft.ML.Tokenizers, all in one folder. -->
+        <HartsyLocalBin>$(HartsyRepo)/src/HartsyInference.Cli/bin/Release/net8.0</HartsyLocalBin>
     </PropertyGroup>
     <Import Project="../../SwarmUI.extension.props" />
 
@@ -32,7 +43,7 @@
          deps (Microsoft.ML.Tokenizers → Google.Protobuf). Its build targets auto-copy the CUDA PTX
          (→ Ptx/) and Vulkan SPIR-V (→ Spirv/) kernels into our output, exactly where the backend
          resolves them next to the extension DLL. https://www.nuget.org/packages/HartsyInference -->
-    <ItemGroup>
+    <ItemGroup Condition="'$(UseLocalHartsy)' != 'true'">
         <!-- Pinned prerelease for a reproducible build. The publish-nuget.yml workflow ships
              1.0.0-alpha.<run_number> on each push to main; bump this to the EXACT version that CI
              published (check the run's "Publishing version:" log line) whenever you ship engine changes.
@@ -50,6 +61,32 @@
                         no alpha.43.1-local package has actually been packed — pin to it once it's really built,
                         or once published as a real CI alpha. -->
         <PackageReference Include="HartsyInference" Version="1.0.0-alpha.43.7-local" />
+    </ItemGroup>
+
+    <!-- LOCAL ENGINE: prebuilt DLLs from the SharpInference Cli bin (its full runtime closure). Referenced
+         directly (Private=true copies them to our output for Swarm's per-extension AssemblyLoadContext),
+         plus the CUDA PTX kernels the backend resolves next to the DLL. FIRST build the engine:
+         dotnet build src/HartsyInference.Cli/HartsyInference.Cli.csproj -c Release -f net8.0 (in SharpInference). -->
+    <ItemGroup Condition="'$(UseLocalHartsy)' == 'true'">
+        <Reference Include="HartsyInference.Core"><HintPath>$(HartsyLocalBin)/HartsyInference.Core.dll</HintPath><Private>true</Private></Reference>
+        <Reference Include="HartsyInference.ModelHandler"><HintPath>$(HartsyLocalBin)/HartsyInference.ModelHandler.dll</HintPath><Private>true</Private></Reference>
+        <Reference Include="HartsyInference.Tokenizers"><HintPath>$(HartsyLocalBin)/HartsyInference.Tokenizers.dll</HintPath><Private>true</Private></Reference>
+        <Reference Include="HartsyInference.LLM"><HintPath>$(HartsyLocalBin)/HartsyInference.LLM.dll</HintPath><Private>true</Private></Reference>
+        <Reference Include="HartsyInference.Phonemizer"><HintPath>$(HartsyLocalBin)/HartsyInference.Phonemizer.dll</HintPath><Private>true</Private></Reference>
+        <Reference Include="HartsyInference.Diffusion"><HintPath>$(HartsyLocalBin)/HartsyInference.Diffusion.dll</HintPath><Private>true</Private></Reference>
+        <Reference Include="HartsyInference.Audio"><HintPath>$(HartsyLocalBin)/HartsyInference.Audio.dll</HintPath><Private>true</Private></Reference>
+        <Reference Include="HartsyInference.Video"><HintPath>$(HartsyLocalBin)/HartsyInference.Video.dll</HintPath><Private>true</Private></Reference>
+        <Reference Include="HartsyInference.Vision"><HintPath>$(HartsyLocalBin)/HartsyInference.Vision.dll</HintPath><Private>true</Private></Reference>
+        <Reference Include="HartsyInference.Interactive"><HintPath>$(HartsyLocalBin)/HartsyInference.Interactive.dll</HintPath><Private>true</Private></Reference>
+        <Reference Include="HartsyInference.Cpu"><HintPath>$(HartsyLocalBin)/HartsyInference.Cpu.dll</HintPath><Private>true</Private></Reference>
+        <Reference Include="HartsyInference.Cuda"><HintPath>$(HartsyLocalBin)/HartsyInference.Cuda.dll</HintPath><Private>true</Private></Reference>
+        <Reference Include="HartsyInference.Vulkan"><HintPath>$(HartsyLocalBin)/HartsyInference.Vulkan.dll</HintPath><Private>true</Private></Reference>
+        <!-- Engine's private managed deps (normally pulled by the meta-package). -->
+        <Reference Include="Google.Protobuf"><HintPath>$(HartsyLocalBin)/Google.Protobuf.dll</HintPath><Private>true</Private></Reference>
+        <Reference Include="Microsoft.ML.Tokenizers"><HintPath>$(HartsyLocalBin)/Microsoft.ML.Tokenizers.dll</HintPath><Private>true</Private></Reference>
+        <!-- CUDA PTX kernels (the NuGet copies these via its targets; replicate for local). -->
+        <Content Include="$(HartsyRepo)/src/HartsyInference.Cuda/Ptx/*.ptx" Link="Ptx/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" Condition="Exists('$(HartsyRepo)/src/HartsyInference.Cuda/Ptx')" />
+        <Content Include="$(HartsyRepo)/src/HartsyInference.Vulkan/Spv/*.spv" Link="Spirv/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" Condition="Exists('$(HartsyRepo)/src/HartsyInference.Vulkan/Spv')" />
     </ItemGroup>
 
     <!-- Ideogram 4's magic-prompt system prompt, ported verbatim from upstream

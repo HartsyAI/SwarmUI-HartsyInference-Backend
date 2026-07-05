@@ -33,46 +33,10 @@ namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 /// </summary>
 public static class BooguImageLoader
 {
-    public const string BooguImageCompatClassId = "boogu-image";
-
-    /// <summary>Registers the Boogu-Image model + compat classes. SwarmUI core has no Boogu detector, so
-    /// without this the transformer files scan as unclassified (or collide with the OmniGen2 lineage they
-    /// share <c>context_refiner.*</c> keys with) and the backend never dispatches here. The probe keys off
-    /// <c>double_stream_layers.*.img_instruct_attn.*</c> — Boogu's TI2I instruct-attention stream, present in
-    /// no other supported arch (OmniGen2 uses flat <c>layers.*</c>; verified against both headers). Call once
-    /// at extension init, before model folders are scanned.</summary>
-    public static void RegisterModelClass()
-    {
-        T2IModelCompatClass compat = T2IModelClassSorter.RegisterCompat(new()
-        {
-            ID = BooguImageCompatClassId,
-            ShortCode = "Boogu",
-            LorasTargetTextEnc = false,
-            VaeFamily = T2IModelClassSorter.VaeFlux1, // Boogu reuses the Flux.1 KL VAE
-        });
-        T2IModelClassSorter.Register(new T2IModelClass
-        {
-            ID = BooguImageCompatClassId,
-            CompatClass = compat,
-            Name = "Boogu Image",
-            StandardWidth = 1024,
-            StandardHeight = 1024,
-            IsThisModelOfClass = (model, header) =>
-                header.ContainsKey("double_stream_layers.0.img_instruct_attn.processor.img_to_q.weight"),
-        });
-
-        // Class resolution is first-match in registration order and core classes register before extension
-        // ones — Boogu's OmniGen2-lineage keys (`context_refiner.*`, `time_caption_embed.*`) satisfy core's
-        // omnigen-2 probe, so Boogu files were classifying as OmniGen 2 and dispatching to the refusal path.
-        // Refine core's probe in place to exclude Boogu's unique double-stream instruct-attention keys.
-        if (T2IModelClassSorter.ModelClasses.TryGetValue("omnigen-2", out T2IModelClass omni)
-            && omni.IsThisModelOfClass is not null)
-        {
-            var origProbe = omni.IsThisModelOfClass;
-            omni.IsThisModelOfClass = (m, h) =>
-                !h.ContainsKey("double_stream_layers.0.img_instruct_attn.processor.img_to_q.weight") && origProbe(m, h);
-        }
-    }
+    /// <summary>Core's Boogu compat-class ID (<see cref="T2IModelClassSorter.CompatBoogu"/>). Core now detects
+    /// Boogu and excludes it from the OmniGen2 probe, so the extension no longer registers its own class — it
+    /// reuses core's classification and dispatches on this compat ID.</summary>
+    public const string BooguImageCompatClassId = "boogu";
 
     /// <summary>Boogu T2I system prompt (verbatim from <c>pipeline_boogu.py</c> <c>SYSTEM_PROMPT_4_T2I_UNIFIED</c>).</summary>
     private const string SystemPromptT2I =
