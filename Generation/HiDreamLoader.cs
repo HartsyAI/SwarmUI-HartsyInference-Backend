@@ -2,6 +2,7 @@ using System.IO;
 using SwarmUI.Text2Image;
 using SwarmUI.Utils;
 using HartsyInference.Core.Backends;
+using HartsyInference.ModelHandler.CheckpointConverters.Utils;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
@@ -298,7 +299,12 @@ public static class HiDreamLoader
             string k = kv.Key;
             if (k.StartsWith("vae.", StringComparison.Ordinal)) k = k["vae.".Length..];
             else if (k.StartsWith("first_stage_model.", StringComparison.Ordinal)) k = k["first_stage_model.".Length..];
-            result[k] = kv.Value;
+            // The auto-downloaded flux_ae.safetensors is BFL-native LDM (decoder.mid.block_1.*); VaeDecoder wants
+            // diffusers naming (decoder.mid_block.resnets.0.*). ConvertVaeKey remaps LDM→diffusers and passes
+            // already-diffusers keys through unchanged (null = drop non-VAE keys). Prefix-strip alone left LDM keys
+            // → KeyNotFound on decoder.mid_block.resnets.0.norm1.weight (same fix as BooguImageLoader).
+            string mapped = CheckpointConvertUtils.ConvertVaeKey(k);
+            if (mapped is not null) result[mapped] = kv.Value;
         }
         return result;
     }

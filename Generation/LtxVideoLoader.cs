@@ -151,8 +151,8 @@ public static class LtxVideoLoader
         Action<GenerationProgress> onProgress,
         CancellationToken cancel)
     {
-        string prompt = input.Get(T2IParamTypes.Prompt) ?? "";
-        string negative = input.Get(T2IParamTypes.NegativePrompt) ?? "";
+        string prompt = PromptConditioningResolver.VideoText(input.Get(T2IParamTypes.Prompt));
+        string negative = PromptConditioningResolver.BaseText(input.Get(T2IParamTypes.NegativePrompt));
         int steps = SamplingParamResolver.ResolveSteps(input, fallback: entry.Config.NumInferenceSteps);
         var (width, height) = VideoParamResolver.ResolveResolution(input, multiple: entry.Config.VaeSpatialCompression);
         int numFrames = VideoParamResolver.ResolveFrames(input, modelDefault: 97, step: entry.Config.VaeTemporalCompression);

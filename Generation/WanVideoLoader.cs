@@ -220,8 +220,8 @@ public static class WanVideoLoader
         WanVideoPipeline pipeline, WanVideoCacheEntry entry, IBackend backend, T2IParamInput input,
         Action<GenerationProgress> onProgress, CancellationToken cancel)
     {
-        string prompt = input.Get(T2IParamTypes.Prompt) ?? "";
-        string negative = input.Get(T2IParamTypes.NegativePrompt) ?? "";
+        string prompt = PromptConditioningResolver.VideoText(input.Get(T2IParamTypes.Prompt));
+        string negative = PromptConditioningResolver.BaseText(input.Get(T2IParamTypes.NegativePrompt));
         int steps = SamplingParamResolver.ResolveSteps(input, fallback: entry.Config.NumInferenceSteps);
         int numFrames = VideoParamResolver.ResolveFrames(input, modelDefault: 81, step: entry.Config.VaeTemporalCompression);
         long seedLong = input.Get(T2IParamTypes.Seed);

@@ -58,9 +58,10 @@ public static class Ideogram4Loader
 {
     public const string Ideogram4CompatClassId = "ideogram-4";
 
-    /// <summary>Minimum free VRAM to attempt a CUDA load — both DiTs + headroom.
-    /// Matches the upstream E2E test's floor.</summary>
-    private const double MinRequiredVramGb = 22.0;
+    /// <summary>Minimum free VRAM to attempt a CUDA load. With nvfp4→fp8 dequant (see the transformer loads below)
+    /// both 9.3B DiTs are ~18.6 GB resident; per-step FreeActivations caps the activation working set at a few GB,
+    /// so ~20 GB free is enough. (The old 22 GB floor assumed the nvfp4→F16 path at 35.9 GB, which never fit.)</summary>
+    private const double MinRequiredVramGb = 20.0;
 
     public static Ideogram4CacheEntry Load(
         IBackend backend,
@@ -107,14 +108,17 @@ public static class Ideogram4Loader
         List<SafeTensorsLoader> loaders = [];
         try
         {
-            log($"Loading conditional transformer (9.3B): {Path.GetFileName(model.RawFilePath)}");
+            // nvfp4ToFp8: the DiTs are ~93% nvfp4 (8.66B of 9.3B params each). Dequantizing nvfp4→F16 makes each DiT
+            // 17.9 GB → 35.9 GB for both, impossible on a 24 GB card. →fp8 (block scale folded into the value, global
+            // scale on Fp8ScaleFactor) keeps each at 9.3 GB → 18.6 GB for both, fitting with room for activations.
+            log($"Loading conditional transformer (9.3B, nvfp4→fp8): {Path.GetFileName(model.RawFilePath)}");
             (Dictionary<string, Tensor> condW, SafeTensorsLoader condL) =
-                LoadComponent(model.RawFilePath, StripTransformerPrefix, applyFp8Dequant: true);
+                LoadComponent(model.RawFilePath, StripTransformerPrefix, applyFp8Dequant: true, nvfp4ToFp8: true);
             loaders.Add(condL);
 
-            log($"Loading unconditional transformer (9.3B): {uncondModel.Name}");
+            log($"Loading unconditional transformer (9.3B, nvfp4→fp8): {uncondModel.Name}");
             (Dictionary<string, Tensor> uncondW, SafeTensorsLoader uncondL) =
-                LoadComponent(uncondModel.RawFilePath, StripTransformerPrefix, applyFp8Dequant: true);
+                LoadComponent(uncondModel.RawFilePath, StripTransformerPrefix, applyFp8Dequant: true, nvfp4ToFp8: true);
             loaders.Add(uncondL);
 
             log($"Loading Qwen3-VL-8B text encoder: {teModel.Name}");
@@ -205,25 +209,41 @@ public static class Ideogram4Loader
             Logs.Info("[HartsyInference][Ideogram4] Negative prompt is ignored — Ideogram 4's asymmetric CFG runs the unconditional branch with zeroed text features.");
         }
 
-        // Optional magic prompt: rewrite the plain prompt into Ideogram 4's structured JSON caption via a
-        // running LLM backend (opt-in). Ideogram 4 also accepts plain text, so when off we tokenize as-is.
-        string promptForEncode = prompt;
-        if (input.Get(SwarmUIHartsyInference.Ideogram4MagicPromptParam, false))
+        // Prompt → Ideogram 4's structured JSON caption. Ideogram 4 was trained ONLY on structured JSON
+        // captions; feeding raw plain text is out-of-distribution and makes the model's built-in safety filter
+        // false-trigger constantly (it renders a grey "Image blocked by safety filter" placeholder). So we
+        // ALWAYS convert a plain prompt to the JSON shape:
+        //   1. already-structured (pasted JSON / prompt-builder UI) → feed verbatim (keep user bboxes).
+        //   2. magic prompt ON + an LLM backend available → rich LLM expansion (best quality; falls back to #3
+        //      when the LLM path is gated off on this core build — Expand() returns the prompt unchanged there).
+        //   3. otherwise → lightweight LLM-free wrap (whole idea in high_level_description).
+        string promptForEncode;
+        if (Ideogram4MagicPrompt.LooksLikeStructuredCaption(prompt))
         {
-            if (Ideogram4MagicPrompt.LooksLikeStructuredCaption(prompt))
-            {
-                // Already a structured caption (e.g. from a prompt-builder UI / pasted JSON) — feed as-is
-                // so its user-drawn bboxes survive instead of being re-expanded and stripped by the LLM.
-                Logs.Info("[HartsyInference][Ideogram4] Prompt is already a structured caption; skipping magic-prompt expansion.");
-            }
-            else
-            {
-                cancel.ThrowIfCancellationRequested();
-                string magicModel = input.Get(SwarmUIHartsyInference.Ideogram4MagicPromptModelParam);
-                promptForEncode = Ideogram4MagicPrompt.Expand(
-                    prompt, snappedW, snappedH, magicModel, input.SourceSession,
-                    msg => Logs.Info($"[HartsyInference][Ideogram4] {msg}"));
-            }
+            promptForEncode = prompt;
+            Logs.Info("[HartsyInference][Ideogram4] Prompt is already a structured caption; feeding verbatim.");
+        }
+        else if (input.Get(SwarmUIHartsyInference.Ideogram4MagicPromptParam, false))
+        {
+            cancel.ThrowIfCancellationRequested();
+            string magicModel = input.Get(SwarmUIHartsyInference.Ideogram4MagicPromptModelParam);
+            string expanded = Ideogram4MagicPrompt.Expand(
+                prompt, snappedW, snappedH, magicModel, input.SourceSession,
+                msg => Logs.Info($"[HartsyInference][Ideogram4] {msg}"));
+            // Expand() no-ops (returns the plain prompt) when the LLM path is gated off — detect that and still
+            // JSON-wrap so we never send raw plain text to the safety-sensitive model.
+            promptForEncode = Ideogram4MagicPrompt.LooksLikeStructuredCaption(expanded)
+                ? expanded
+                : Ideogram4MagicPrompt.WrapPlainAsJson(prompt);
+        }
+        else
+        {
+            promptForEncode = Ideogram4MagicPrompt.WrapPlainAsJson(prompt);
+            Logs.Warning("[HartsyInference][Ideogram4] Plain prompt given — Ideogram 4 was trained on structured JSON "
+                + "captions and its built-in safety filter frequently false-triggers on bare prompts (grey 'Image "
+                + "blocked by safety filter' output). For reliable results, provide a structured JSON caption "
+                + "(high_level_description + compositional_deconstruction with a populated background and elements) "
+                + "as the prompt, or enable an LLM-backed magic-prompt path. Best-effort JSON wrap applied.");
         }
 
         // Chat-template tokenize, then trim the right-pad run (EncodeChat pads to
@@ -282,7 +302,7 @@ public static class Ideogram4Loader
     /// returned <see cref="SafeTensorsLoader"/> owns the tensor memory and must stay alive (and be disposed)
     /// for as long as the weights are used.</summary>
     private static (Dictionary<string, Tensor> Weights, SafeTensorsLoader Loader) LoadComponent(
-        string filePath, Func<string, string> keyTransform, bool applyFp8Dequant)
+        string filePath, Func<string, string> keyTransform, bool applyFp8Dequant, bool nvfp4ToFp8 = false)
     {
         SafeTensorsLoader loader = new();
         loader.Load(filePath);
@@ -297,7 +317,7 @@ public static class Ideogram4Loader
                 if (mapped is not null)
                     merged[mapped] = kvp.Value;
             }
-            return (applyFp8Dequant ? CheckpointConvertUtils.ApplyFp8ScaledDequant(merged) : merged, loader);
+            return (applyFp8Dequant ? CheckpointConvertUtils.ApplyFp8ScaledDequant(merged, nvfp4ToFp8) : merged, loader);
         }
         catch
         {

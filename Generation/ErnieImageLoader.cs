@@ -1,4 +1,5 @@
 using System.IO;
+using System.Text.RegularExpressions;
 using SwarmUI.Core;
 using SwarmUI.Text2Image;
 using SwarmUI.Utils;
@@ -61,9 +62,12 @@ public static class ErnieImageLoader
         try
         {
             log($"Loading ERNIE-Image transformer: {Path.GetFileName(model.RawFilePath)}");
-            (Dictionary<string, Tensor> transformerWeights, SafeTensorsLoader transformerLoader) =
-                LoadComponent(model.RawFilePath, applyFp8Dequant: true);
-            loaders.Add(transformerLoader);
+            // ERNIE-Image ships the transformer as a sharded diffusers set (diffusion_pytorch_model-00001-of-00002
+            // .safetensors etc.); loading only the picked shard leaves half the keys missing (final_norm.linear.weight
+            // lives in shard 2). Load + merge every shard when the filename matches the `-NNNNN-of-MMMMM` pattern.
+            (Dictionary<string, Tensor> transformerWeights, List<SafeTensorsLoader> transformerLoaders) =
+                LoadShardedComponent(model.RawFilePath, applyFp8Dequant: true);
+            loaders.AddRange(transformerLoaders);
 
             log($"Loading Ministral-3-3B text encoder: {teModel.Name}");
             (Dictionary<string, Tensor> teWeights, SafeTensorsLoader teLoader) =
@@ -175,6 +179,57 @@ public static class ErnieImageLoader
     /// optionally folds fp8 <c>*.scale_weight</c> companions (harmless no-op on plain bf16/fp16). Mirrors
     /// <c>ErnieImageCheckpointConverter</c> (which does no key remapping), but reads an exact resolved file —
     /// each component is its own registered side-model. The loader owns the tensor memory; keep it alive.</summary>
+    /// <summary>Loads a component that may be split across multiple diffusers shards. If <paramref name="filePath"/>
+    /// matches the <c>&lt;base&gt;-NNNNN-of-MMMMM.safetensors</c> convention, every sibling shard (1..MMMMM) is loaded
+    /// and their tensors merged; otherwise it degrades to a single-file load. Returns all loaders so the caller can
+    /// keep the mmaps alive for the tensors' lifetime.</summary>
+    private static (Dictionary<string, Tensor> Weights, List<SafeTensorsLoader> Loaders) LoadShardedComponent(
+        string filePath, bool applyFp8Dequant)
+    {
+        List<string> files;
+        Match m = Regex.Match(Path.GetFileName(filePath), @"^(.*)-(\d+)-of-(\d+)\.safetensors$");
+        if (m.Success)
+        {
+            string dir = Path.GetDirectoryName(filePath);
+            string prefix = m.Groups[1].Value;
+            int width = m.Groups[2].Value.Length;
+            int total = int.Parse(m.Groups[3].Value);
+            files = Enumerable.Range(1, total)
+                .Select(i => Path.Combine(dir, $"{prefix}-{i.ToString().PadLeft(width, '0')}-of-{total.ToString().PadLeft(width, '0')}.safetensors"))
+                .ToList();
+        }
+        else
+        {
+            files = [filePath];
+        }
+
+        List<SafeTensorsLoader> loaders = [];
+        Dictionary<string, Tensor> merged = new();
+        try
+        {
+            foreach (string f in files)
+            {
+                if (!File.Exists(f))
+                    throw new FileNotFoundException($"ERNIE-Image transformer shard missing: {f}");
+                SafeTensorsLoader l = new();
+                l.Load(f);
+                loaders.Add(l);
+                foreach (KeyValuePair<string, Tensor> kvp in l.GetAllTensors())
+                {
+                    if (kvp.Key.EndsWith(".scaled_fp8", StringComparison.Ordinal) || kvp.Key == "scaled_fp8")
+                        continue;
+                    merged[kvp.Key] = kvp.Value;
+                }
+            }
+            return (applyFp8Dequant ? CheckpointConvertUtils.ApplyFp8ScaledDequant(merged) : merged, loaders);
+        }
+        catch
+        {
+            foreach (SafeTensorsLoader l in loaders) l.Dispose();
+            throw;
+        }
+    }
+
     private static (Dictionary<string, Tensor> Weights, SafeTensorsLoader Loader) LoadComponent(
         string filePath, bool applyFp8Dequant)
     {

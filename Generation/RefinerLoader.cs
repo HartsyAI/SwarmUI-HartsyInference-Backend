@@ -122,8 +122,11 @@ public static class RefinerLoader
 
         try
         {
-            string prompt = PromptConditioningResolver.BaseText(input.Get(T2IParamTypes.Prompt));
-            string negative = PromptConditioningResolver.BaseText(input.Get(T2IParamTypes.NegativePrompt));
+            // <refiner> sub-prompt: when the prompt carries a <refiner> section, the refiner pass
+            // cross-attends to it instead of the base prompt (Swarm parity). Empty → reuse base text.
+            // Applies on PostApply too, not just StepSwap — PostApply is the default refiner method.
+            string prompt = RefinerText(input.Get(T2IParamTypes.Prompt));
+            string negative = RefinerText(input.Get(T2IParamTypes.NegativePrompt));
             long seedLong = input.Get(T2IParamTypes.Seed);
 
             // CLIP-G tokenization (refiner uses ONLY CLIP-G).
@@ -162,6 +165,17 @@ public static class RefinerLoader
         {
             sourceTensor.Dispose();
         }
+    }
+
+    /// <summary>Returns the <c>&lt;refiner&gt;</c> sub-prompt when the raw prompt has one, else the base
+    /// (global) prompt with all region tags stripped. Mirrors <see cref="SdxlLoader"/>'s StepSwap handling
+    /// so PostApply and StepSwap resolve the refiner prompt identically.</summary>
+    private static string RefinerText(string raw)
+    {
+        if (string.IsNullOrEmpty(raw)) return "";
+        PromptRegion region = new(raw);
+        string refinerPrompt = region.RefinerPrompt;
+        return string.IsNullOrWhiteSpace(refinerPrompt) ? region.GlobalPrompt : refinerPrompt;
     }
 }
 

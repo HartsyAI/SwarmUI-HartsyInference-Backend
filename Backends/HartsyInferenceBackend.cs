@@ -973,7 +973,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                         ?? throw new InvalidOperationException("SDXL model loaded but not in cache.");
                     return loras.Count > 0
                         ? SdxlLoader.GenerateWithLoras(entry, loras, _backend, input, progressBridge, cancel, refinerSwapForSdxl, ipaSpec?.Conditionings)
-                        : SdxlLoader.Generate(entry, input, progressBridge, cancel, refinerSwapForSdxl, ipaSpec?.Conditionings);
+                        : SdxlLoader.Generate(entry, _backend, input, progressBridge, cancel, refinerSwapForSdxl, ipaSpec?.Conditionings);
                 }
                 if (Sd3Loader.IsSd3Compat(compat))
                 {
@@ -1185,9 +1185,9 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 images = await Task.Run(() => RefinePass(images, refinerSpec, input, progressBridge, cancel), cancel);
             }
 
-            // Segment refinement (<segment:yolo-...>): detect → mask → re-denoise the region with
-            // the segment's prompt via the arch's existing img2img+inpaint path. Validation has
-            // already guaranteed the arch is inpaint-capable and all targets are YOLO.
+            // Segment refinement (<segment:...>): detect/segment → mask → re-denoise the region with
+            // the segment's prompt via the arch's existing img2img+inpaint path. YOLO targets use the
+            // detector; free-text targets use CLIPSeg. Validation guaranteed the arch is inpaint-capable.
             if (SegmentRefiner.HasSegments(input))
             {
                 Image[] preSegment = images;
@@ -1278,7 +1278,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         {
             SdxlCacheEntry entry = _cache.TryGetSdxl(model.Name)
                 ?? throw new InvalidOperationException("SDXL model not in cache for segment re-denoise.");
-            return SdxlLoader.Generate(entry, segInput, NoProgress, cancel, refinerSwap: null, ipAdapters: null);
+            return SdxlLoader.Generate(entry, _backend, segInput, NoProgress, cancel, refinerSwap: null, ipAdapters: null);
         }
         if (compat == FluxLoader.Flux1CompatClassId)
         {
@@ -1330,14 +1330,19 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         // Prompt-syntax features we can't service yet: refuse with the tag named rather
         // than silently feeding the tag text into the tokenizer (silent bad output is
         // worse than a clean refusal that routes the request to a Comfy backend if one
-        // is configured).
+        // is configured). Exception: regional conditioning (<region>/<object>) is implemented
+        // for Z-Image (RegionalPromptResolver → engine RegionalPlan), so allow it there.
+        bool regionsOk = compat == ZImageLoader.ZImageCompatClassId;
         foreach (string promptText in new[] { input.Get(T2IParamTypes.Prompt), input.Get(T2IParamTypes.NegativePrompt) })
         {
             if (string.IsNullOrEmpty(promptText)) continue;
-            System.Text.RegularExpressions.Match match = UnsupportedPromptSyntax.Match(promptText);
-            if (match.Success)
+            foreach (System.Text.RegularExpressions.Match match in UnsupportedPromptSyntax.Matches(promptText))
             {
                 string tag = match.Value.TrimStart('<').TrimEnd(':', '>', ' ');
+                if (regionsOk && (tag == "region" || tag == "object"))
+                {
+                    continue; // handled by RegionalPromptResolver for Z-Image
+                }
                 input.RefusalReasons.Add(
                     $"HartsyInference: the '<{tag}:...>' prompt syntax isn't supported yet "
                     + "(needs regional-conditioning machinery). Remove the tag, "
@@ -1357,13 +1362,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                     + $"(SDXL, Flux, or SD3); got '{compat}'. Remove the segment tag or switch models.");
                 return false;
             }
-            if (!SegmentRefiner.AllSegmentsAreYolo(input))
-            {
-                input.RefusalReasons.Add(
-                    "HartsyInference: only '<segment:yolo-MODEL>' targets are supported (the engine has YOLO "
-                    + "detection but no CLIP-Seg/text segmentation head). Use a yolo- target, or a ComfyUI backend.");
-                return false;
-            }
+            // Both target kinds are supported: 'yolo-...' via the YOLO detector, any other text via CLIPSeg.
         }
 
         // Variation seed: wired for SD 1.5 + SDXL (spatial [1,4,H/8,W/8]) and Flux
@@ -1583,8 +1582,11 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                     "Use 'PostApply' (any base) or 'StepSwap' (SDXL base only).");
                 return false;
             }
+            // RefinerUpscale has IgnoreIf:"1", so the default (1.0 = no upscale) is stripped from the
+            // input and reads back as 0. Treat 0 as "absent → 1.0"; only refuse a real upscale (>1) or
+            // downscale (<1) that we don't implement yet.
             double refinerUpscale = input.Get(T2IParamTypes.RefinerUpscale);
-            if (Math.Abs(refinerUpscale - 1.0) > 1e-6)
+            if (refinerUpscale > 1e-6 && Math.Abs(refinerUpscale - 1.0) > 1e-6)
             {
                 input.RefusalReasons.Add(
                     $"HartsyInference: Refiner Upscale != 1.0 (got {refinerUpscale}) isn't supported yet. " +

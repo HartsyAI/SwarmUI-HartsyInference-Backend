@@ -22,8 +22,8 @@ namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 /// <see cref="T2IParamTypes.SegmentSortOrder"/> order, and CLASS filters by COCO label substring.
 /// A negative strength inverts the mask.</para>
 ///
-/// <para>Only the <c>yolo-</c> target is supported. Text/CLIP-Seg targets need a segmentation
-/// head the engine doesn't ship, so they're refused upfront in the backend validator.</para>
+/// <para>This handles the <c>yolo-</c> target only; free-text targets are routed to
+/// <see cref="ClipSegResolver"/> (CLIPSeg) by <see cref="SegmentRefiner"/>.</para>
 ///
 /// <para>YOLO weights are resolved as <c>.safetensors</c> from a <c>yolov8/</c> models folder
 /// (engine loads safetensors, not Ultralytics <c>.pt</c>). The model architecture variant
@@ -147,7 +147,7 @@ public static class SegmentResolver
 
     /// <summary>Separable max-filter dilation (grows the white region by ~radius px, Chebyshev),
     /// matching Comfy's GrowMask intent. Two 1-D passes, same approach as MaskResolver.</summary>
-    private static void DilateInPlaceSeparable(byte[] mask, int w, int h, int radius)
+    internal static void DilateInPlaceSeparable(byte[] mask, int w, int h, int radius)
     {
         byte[] tmp = new byte[mask.Length];
         for (int y = 0; y < h; y++)

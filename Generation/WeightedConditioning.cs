@@ -2,6 +2,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Prompting;
+using HartsyInference.Diffusion.Utilities;
 using HartsyInference.Tokenizers;
 
 namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
@@ -73,6 +74,63 @@ public static class WeightedConditioning
             Variants = [batched],
             IndexForStep = static (_, _) => 0,
         };
+    }
+
+    /// <summary>Dual-CLIP (SDXL) weighted conditioning. Returns a one-variant schedule whose tensor is
+    /// <c>[2, 77*chunks, 2048]</c> (negative, positive) — penultimate CLIP-L (768) concatenated with penultimate
+    /// CLIP-G (1280) on the last dim, byte-matching <see cref="SwarmUI"/>-less <c>SdxlPipeline</c>'s plain
+    /// <c>textEmbeddings</c>. Returns null when there's no weighting/break syntax. The pooled vector is left to the
+    /// pipeline's own plain encode (the schedule only overrides the cross-attention hidden states; weighting's
+    /// effect on the pooled ADM vector is negligible and the pipeline sources it separately).
+    /// <para>CLIP-L and CLIP-G share SDXL's single BPE tokenizer, so both encode the SAME token/weight chunks and
+    /// their per-chunk seqLen matches — the last-dim concat aligns without padding.</para>
+    /// <paramref name="layersFromEnd"/> is the CLIP-skip (2 = penultimate, SDXL's spec default).</summary>
+    public static ConditioningSchedule BuildDualClip(
+        IBackend backend, ClipTextEncoder clipL, ClipTextEncoder clipG, ClipTokenizer tokenizer,
+        string positive, string negative, int layersFromEnd)
+    {
+        if (!HasWeightingSyntax(positive, negative))
+        {
+            return null;
+        }
+        (IReadOnlyList<int[]> posIds, IReadOnlyList<float[]> posW) = WeightedPromptTokenizer.Tokenize(tokenizer, positive ?? "");
+        (IReadOnlyList<int[]> negIds, IReadOnlyList<float[]> negW) = WeightedPromptTokenizer.Tokenize(tokenizer, negative ?? "");
+        EqualizeChunkCount(tokenizer, ref posIds, ref posW, ref negIds, ref negW);
+
+        Tensor posL = EncodePenultimateHidden(backend, clipL, posIds, posW, layersFromEnd);  // [1, S, 768]
+        Tensor negL = EncodePenultimateHidden(backend, clipL, negIds, negW, layersFromEnd);
+        Tensor posG = EncodePenultimateHidden(backend, clipG, posIds, posW, layersFromEnd);  // [1, S, 1280]
+        Tensor negG = EncodePenultimateHidden(backend, clipG, negIds, negW, layersFromEnd);
+
+        Tensor posConcat = CfgHelper.ConcatLastDim(posL, posG);  // [1, S, 2048]
+        Tensor negConcat = CfgHelper.ConcatLastDim(negL, negG);
+        posL.Dispose(); negL.Dispose(); posG.Dispose(); negG.Dispose();
+
+        Tensor batched;
+        try
+        {
+            batched = StackBatch2(negConcat, posConcat);          // [2, S, 2048]
+        }
+        finally
+        {
+            posConcat.Dispose();
+            negConcat.Dispose();
+        }
+        return new ConditioningSchedule
+        {
+            Variants = [batched],
+            IndexForStep = static (_, _) => 0,
+        };
+    }
+
+    /// <summary>Weighted penultimate hidden states for one prompt, pooled discarded (the SDXL pipeline sources
+    /// pooled from its own plain encode). Returns <c>[1, seqLen*chunks, hiddenSize]</c>.</summary>
+    private static Tensor EncodePenultimateHidden(IBackend backend, ClipTextEncoder encoder,
+        IReadOnlyList<int[]> ids, IReadOnlyList<float[]> weights, int layersFromEnd)
+    {
+        (Tensor hidden, Tensor pooled) = encoder.EncodeWeightedPenultimate(backend, ids, weights, ReadOnlySpan<int>.Empty, layersFromEnd);
+        pooled?.Dispose();
+        return hidden;
     }
 
     /// <summary>Pads the shorter of (positive, negative) chunk lists with empty SOT..EOT chunks so both

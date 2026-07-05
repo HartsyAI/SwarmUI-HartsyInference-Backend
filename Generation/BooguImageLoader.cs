@@ -106,8 +106,18 @@ public static class BooguImageLoader
             if (hasVision) loaders.Add(visionL); else visionL.Dispose();
 
             log($"Loading FLUX.1 VAE: {vaeModel.Name}");
+            // The auto-downloaded flux_ae.safetensors ships BFL-native LDM keys (decoder.mid.block_1.*);
+            // VaeDecoder/VaeEncoder expect diffusers naming (decoder.mid_block.resnets.*). ConvertVaeKey
+            // remaps LDM → diffusers and passes already-diffusers keys through unchanged — same normalization
+            // FluxLoader applies to standalone VAEs (a raw load threw KeyNotFound on mid_block.resnets.0).
             (Dictionary<string, Tensor> vaeW, SafeTensorsLoader vaeL) =
-                LoadComponent(vaeModel.RawFilePath, key => key, applyFp8Dequant: false);
+                LoadComponent(vaeModel.RawFilePath, key =>
+                {
+                    string ldmKey = key.StartsWith("first_stage_model.", StringComparison.Ordinal) ? key["first_stage_model.".Length..]
+                        : key.StartsWith("vae.", StringComparison.Ordinal) ? key["vae.".Length..]
+                        : key;
+                    return CheckpointConvertUtils.ConvertVaeKey(ldmKey);
+                }, applyFp8Dequant: false);
             loaders.Add(vaeL);
 
             BooguImageConfig config = BooguImageConfig.V01;
