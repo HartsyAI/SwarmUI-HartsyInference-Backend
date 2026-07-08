@@ -149,30 +149,68 @@ public static class ZImageLoader
         double cfgRaw = input.Get(T2IParamTypes.CFGScale);
         float cfg = cfgRaw <= 0 ? 1.0f : (float)cfgRaw;
 
-        int[] tokenIds = entry.Tokenizer.EncodeChat(prompt);
-        int realLen = ComputeRealLength(tokenIds);
-
+        // Prompt-embedding cache (the Krea2Pipeline pattern, extension-side because the Z-Image TE lives here):
+        // identical prompt strings reuse the previous gen's Qwen3 hidden states — the whole TE phase vanishes
+        // for repeat prompts (seed-only changes), matching ComfyUI's conditioning cache. Reusing the SAME tensor
+        // reference also keeps the transformer's refined-caption cache warm (keyed on the encoder-output ref).
+        // The cached tensor is host-materialized by the pipeline's cross-step materialize pass, so it survives
+        // activation frees; a new prompt evicts + disposes. On any cache miss the TE weights are bulk-preloaded,
+        // used, and FREED — their ~8 GB is exactly the headroom the VAE's full-res decode im2col needs at 1024².
+        string rawPrompt = input.Get(T2IParamTypes.Prompt) ?? "";
+        bool needNegative = cfg > 1.0f;
+        bool condHit = entry.CachedCond is not null && entry.CachedCondKey == prompt;
+        bool uncondHit = !needNegative || (entry.CachedUncond is not null && entry.CachedUncondKey == negative);
+        bool hasRegions = RegionalPromptResolver.HasRegionParts(rawPrompt);
         int penultimateIdx = entry.Qwen.NumLayers - 1;
-        Tensor encodedFull = entry.Qwen.EncodeMultiLayer(backend, new[] { tokenIds }, new[] { penultimateIdx });
-        Tensor positiveEmbeddings = SliceFirstSeqF32(encodedFull, realLen);
+        if (!(condHit && uncondHit) || hasRegions)
+        {
+            backend.PreloadWeights(entry.Qwen.EnumerateWeights());
+        }
+
+        Tensor positiveEmbeddings;
+        if (condHit)
+        {
+            positiveEmbeddings = entry.CachedCond;
+        }
+        else
+        {
+            int[] tokenIds = entry.Tokenizer.EncodeChat(prompt);
+            int realLen = ComputeRealLength(tokenIds);
+            Tensor encodedFull = entry.Qwen.EncodeMultiLayer(backend, new[] { tokenIds }, new[] { penultimateIdx });
+            positiveEmbeddings = SliceFirstSeqF32(encodedFull, realLen);
+            encodedFull.Dispose();
+            entry.CachedCond?.Dispose();
+            entry.CachedCond = positiveEmbeddings;
+            entry.CachedCondKey = prompt;
+        }
 
         Tensor negativeEmbeddings = null;
-        if (cfg > 1.0f)
+        if (needNegative)
         {
-            // Encode even when the negative is empty — Comfy does the same (passes "" through
-            // the text encoder), which yields a short but valid unconditional embedding that
-            // CFG needs. Z-Image-Base requires this; Z-Image-Turbo runs at cfg=1.0 and skips it.
-            int[] negTokens = entry.Tokenizer.EncodeChat(negative);
-            int negRealLen = ComputeRealLength(negTokens);
-            Tensor negEncodedFull = entry.Qwen.EncodeMultiLayer(backend, new[] { negTokens }, new[] { penultimateIdx });
-            negativeEmbeddings = SliceFirstSeqF32(negEncodedFull, negRealLen);
+            if (uncondHit)
+            {
+                negativeEmbeddings = entry.CachedUncond;
+            }
+            else
+            {
+                // Encode even when the negative is empty — Comfy does the same (passes "" through
+                // the text encoder), which yields a short but valid unconditional embedding that
+                // CFG needs. Z-Image-Base requires this; Z-Image-Turbo runs at cfg=1.0 and skips it.
+                int[] negTokens = entry.Tokenizer.EncodeChat(negative);
+                int negRealLen = ComputeRealLength(negTokens);
+                Tensor negEncodedFull = entry.Qwen.EncodeMultiLayer(backend, new[] { negTokens }, new[] { penultimateIdx });
+                negativeEmbeddings = SliceFirstSeqF32(negEncodedFull, negRealLen);
+                negEncodedFull.Dispose();
+                entry.CachedUncond?.Dispose();
+                entry.CachedUncond = negativeEmbeddings;
+                entry.CachedUncondKey = negative;
+            }
         }
 
         // Regional prompting: <region:x,y,w,h,strength> / <object:…> parts each get their own Qwen3 encode +
         // spatial mask, assembled into a RegionalPlan the transformer turns into a per-step attention bias. Null
         // (no such parts) keeps the plain single-conditioning path unchanged. Uses the RAW prompt — BaseText above
         // stripped the tags. Region encodes reuse the exact global encode path (EncodeChat → penultimate → slice).
-        string rawPrompt = input.Get(T2IParamTypes.Prompt) ?? "";
         RegionalPlan regionalPlan = RegionalPromptResolver.Resolve(
             rawPrompt, positiveEmbeddings, width, height, steps,
             regionText =>
@@ -184,6 +222,11 @@ public static class ZImageLoader
                 rFull.Dispose();
                 return rCond;
             });
+
+        if (!(condHit && uncondHit) || hasRegions)
+        {
+            backend.FreeWeights(entry.Qwen.EnumerateWeights());
+        }
 
         // Img2img: build an ImageToImageRequest if an init image is provided. The
         // upstream pipeline detects this on runtime type and switches behavior.
@@ -338,12 +381,25 @@ public sealed class ZImageCacheEntry : IDisposable
     public required SafeTensorsLoader VaeLoader { get; init; }
 
     public DateTime LastUsedUtc { get; set; } = DateTime.UtcNow;
+
+    /// <summary>Prompt-embedding cache (last-used cond + uncond, keyed on the exact prompt string): repeat
+    /// prompts skip the whole Qwen3-4B encode. The tensors are host-materialized by the pipeline and safe to
+    /// hold across gens; a new prompt evicts + disposes (see <see cref="ZImageLoader.Generate"/>).</summary>
+    public string CachedCondKey { get; set; }
+    public Tensor CachedCond { get; set; }
+    public string CachedUncondKey { get; set; }
+    public Tensor CachedUncond { get; set; }
+
     private bool _disposed;
 
     public void Dispose()
     {
         if (_disposed) return;
         _disposed = true;
+        CachedCond?.Dispose();
+        CachedCond = null;
+        CachedUncond?.Dispose();
+        CachedUncond = null;
         (Pipeline as IDisposable)?.Dispose();
         Tokenizer?.Dispose();
         Qwen?.Dispose();

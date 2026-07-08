@@ -55,6 +55,25 @@ public static class RegionalPromptResolver
         return new RegionalPlan { BaseCond = baseCond, Regions = regions };
     }
 
+    /// <summary>True when the raw prompt carries region/object parts. Cheap pre-check so callers can decide TE
+    /// weight residency (region encodes need the encoder even when the global conditioning is cached).</summary>
+    public static bool HasRegionParts(string rawPrompt)
+    {
+        if (string.IsNullOrEmpty(rawPrompt) || !rawPrompt.Contains('<'))
+        {
+            return false;
+        }
+        PromptRegion parsed = new PromptRegion(rawPrompt);
+        foreach (PromptRegion.Part part in parsed.Parts)
+        {
+            if (part.Type == PromptRegion.PartType.Region || part.Type == PromptRegion.PartType.Object)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /// <summary>Disposes the per-region conditioning tensors owned by a plan (call after the gen completes). Null-safe.</summary>
     public static void DisposeRegions(RegionalPlan plan)
     {
