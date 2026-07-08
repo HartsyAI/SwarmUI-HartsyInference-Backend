@@ -58,9 +58,30 @@ public class SwarmUIHartsyInference : Extension
     public static T2IRegisteredParam<bool> Ideogram4MagicPromptParam;
     public static T2IRegisteredParam<string> Ideogram4MagicPromptModelParam;
 
+    // The engine's proven standard perf config (cuDNN fused SDPA, fp8-native GEMM, F16 DiT activations,
+    // DiT weights resident across gens, raised mem-pool release threshold). The engine reads these as env
+    // flags at CudaBackend construction, so they must exist BEFORE any backend spins up — and they must NOT
+    // depend on whoever launched Swarm remembering to export them (a bare relaunch without them silently
+    // reverts the engine to defaults: cuDNN off, Chroma OOMs in the materialized SDPA it no longer needs).
+    // A flag already present in the environment — any value, including "0" — is respected as an operator
+    // override/kill-switch; only unset flags get the standard default.
+    private static readonly string[] StandardEnginePerfFlags =
+        ["HARTSY_SDPA_CUDNN", "HARTSY_FP8_NATIVE", "HARTSY_DIT_F16", "HARTSY_KEEP_MODELS", "HARTSY_MEMPOOL_KEEP"];
+
     public override void OnPreInit()
     {
         Logs.Init("HartsyInference extension pre-init");
+
+        foreach (string flag in StandardEnginePerfFlags)
+        {
+            if (Environment.GetEnvironmentVariable(flag) is null)
+            {
+                Environment.SetEnvironmentVariable(flag, "1");
+            }
+        }
+        Logs.Init("[HartsyInference] engine perf flags: "
+            + string.Join(" ", StandardEnginePerfFlags.Select(f => $"{f}={Environment.GetEnvironmentVariable(f)}")));
+
         // Register feature flags here if needed before settings load.
         // Most feature flags are advertised dynamically via HartsyInferenceBackend.SupportedFeatures.
 
