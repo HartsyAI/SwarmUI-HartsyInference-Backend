@@ -55,12 +55,13 @@
                         (alpha.37 was burned by a pre-fix pack; bumped to dodge the immutable NuGet cache.)
              alpha.43 = query-tiled CUDA SDPA for long sequences (Wan-Video full-res self-attention no
                         longer materializes the ~49GB score matrix), Wan VAE + variant work, LTX fixes.
-             PENDING (not yet packed anywhere, do not pin until published): WanVideoConfig.CfgRescale +
-                        MoE expert swap + umT5/T5 AttentionScale=1.0 fix (the flat-video root cause) + fp8 GEMM
-                        precision knobs. nuget.config's hartsy-local feed path doesn't exist on this machine and
-                        no alpha.43.1-local package has actually been packed — pin to it once it's really built,
-                        or once published as a real CI alpha. -->
-        <PackageReference Include="HartsyInference" Version="1.0.0-alpha.43.123-local" />
+             alpha.44 = WanVideoConfig.CfgRescale + MoE expert swap + umT5/T5 AttentionScale=1.0 fix
+                        (the flat-video root cause). Confirmed present in the published package's source
+                        commit (a32c707), so the previous "PENDING, don't pin" note here was stale — it
+                        already shipped. A prior "-local" pin (meant for a locally-packed engine build via
+                        the hartsy-local nuget.config feed) was never actually packed on this machine and
+                        broke restore with NU1301; pin the real published version instead. -->
+        <PackageReference Include="HartsyInference" Version="1.0.0-alpha.44" />
     </ItemGroup>
 
     <!-- LOCAL ENGINE: prebuilt DLLs from the SharpInference Cli bin (its full runtime closure). Referenced
