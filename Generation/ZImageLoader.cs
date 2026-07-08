@@ -104,7 +104,11 @@ public static class ZImageLoader
             throw new InvalidOperationException($"VAE file '{vaeModel.Name}' has no usable VAE tensors.");
         }
 
-        log("Building VAE decoder (Flux config)...");
+        // BF16 on Ampere+ (the SDXL policy — F32-equivalent range, cannot overflow): halves the full-res
+        // decode's im2col workspace (9.2 → 4.6 GB at 1024²) and runs the conv GEMMs on 16-bit tensor cores.
+        DType vaeDtype = VaePrecisionHelper.PreferredSdxlVaeDtype(backend);
+        vaeWeights = VaePrecisionHelper.CastVaeWeights(vaeWeights, vaeDtype);
+        log($"Building VAE decoder (Flux config, dtype={vaeDtype})...");
         VaeDecoder vae = new VaeDecoder(VaeConfig.ZImage);
         vae.LoadWeights(vaeWeights);
 

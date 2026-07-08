@@ -61,7 +61,7 @@
                         already shipped. A prior "-local" pin (meant for a locally-packed engine build via
                         the hartsy-local nuget.config feed) was never actually packed on this machine and
                         broke restore with NU1301; pin the real published version instead. -->
-        <PackageReference Include="HartsyInference" Version="1.0.0-alpha.44" />
+        <PackageReference Include="HartsyInference" Version="1.0.0-alpha.44.2-local" />
     </ItemGroup>
 
     <!-- LOCAL ENGINE: prebuilt DLLs from the SharpInference Cli bin (its full runtime closure). Referenced
