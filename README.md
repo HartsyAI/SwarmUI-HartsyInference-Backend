@@ -1,13 +1,17 @@
 # SwarmUI HartsyInference Backend
 
-> **Status:** Working beta. 14 image architectures + 5 video architectures (Wan TI2V,
-> Wan VACE control-video, Wan Animate, Wan S2V speech-to-video, LTX) dispatch
-> end-to-end, with Flux and Z-Image verified at 1024×1024 on a 12 GB consumer GPU
-> (RTX 3060). Img2img, inpaint, LoRA, refiner, ControlNet (SDXL+Canny), IP-Adapter
-> (SD1.5/SDXL), live previews, and cancellation all work. There are still rough edges
-> (slow VAE under memory pressure, several architectures wired but unverified
-> post-bring-up) — see [Known limitations](#known-limitations) and the
-> [parity matrix](./docs/02-Comfy-Feature-Parity-Matrix.md).
+> **Status:** Working beta, broadly verified. The model fleet has been verified
+> end-to-end with real weights (57 architectures across image/video/audio via
+> coordinated verification passes), and a sustained performance campaign now has
+> **three image models generating faster than ComfyUI on the same GPU** (RTX 4090,
+> identical request through the SwarmUI API): Z-Image-Turbo 2.95s vs 3.1s,
+> Krea2-Turbo 4.50s vs 6.5s, Qwen-Image 40.9s vs 54.8s. Video is live in production
+> (Wan 2.x T2V/I2V/VACE/Animate/S2V, LTX incl. LTX-2 with audio, HunyuanVideo,
+> Kandinsky-5). Img2img, inpaint, LoRA, refiner (verified live), ControlNet
+> (SDXL+Canny), IP-Adapter, GGUF checkpoints, live previews, and cancellation all
+> work. Remaining gaps are tracked in [Known limitations](#known-limitations), the
+> [parity matrix](./docs/02-Comfy-Feature-Parity-Matrix.md), and the engine's
+> [benchmark log](https://github.com/HartsyAI/HartsyInference/blob/main/benchmarks/results/).
 
 ## What this is
 
@@ -34,35 +38,56 @@ and direct access to Swarm's image/parameter/cache types.
 
 ### Architectures
 
-| Architecture | Compat IDs | Status | Per-arch features |
-|---|---|---|---|
-| Flux.1 (Schnell, Dev, Krea) + FLUX.1 Canny | `flux-1` | **✅ Verified** at 1024² on 12 GB | LoRA, img2img, inpaint |
-| Z-Image (Turbo, Base) | `z-image` | **✅ Verified** on CUDA | img2img |
-| SD 1.5 | `stable-diffusion-v1` | ⚠ Wired-untested since memory overhaul | LoRA, img2img, IP-Adapter |
-| SDXL + official Refiner | `stable-diffusion-xl-v1` | ⚠ Wired-untested since memory overhaul | LoRA, img2img, inpaint, IP-Adapter, ControlNet (Canny), refiner PostApply/StepSwap |
-| SD 3 / 3.5 (Medium, Large) | `stable-diffusion-v3*` | ⚠ Wired-untested | img2img, inpaint |
-| Flux.2 (base, Klein 4B) | `flux-2`, `flux-2-klein-4b` | ⚠ Wired-untested; Klein 9B/Dev refused (FP4 GEMM) | t2i |
-| Chroma V1 | `chroma` | ⚠ Wired-untested | t2i |
-| Chroma Radiance / Zeta-Chroma | `chroma-radiance`, `zeta-chroma` | ⚠ Wired-untested (pixel-space, no VAE; mid-pretraining upstream) | t2i |
-| AuraFlow v0.2/v0.3 | `auraflow-v1` | ⚠ Wired-untested | t2i |
-| F-Lite v1 | `f-lite` | ⚠ Wired-untested (diffusers-folder layout) | t2i |
-| Anima (Cosmos-Predict2 2B) | `anima` | ⚠ Wired-untested | t2i |
-| HiDream-I1 | `hidream-i1` | ⚠ Wired; needs Llama-3.1 tokenizer assets | t2i |
-| Qwen-Image | `qwen-image` | ⚠ Wired-untested | t2i |
-| **Wan 2.2 TI2V-5B (video)** | `wan-22-5b` | ⚠ Wired | T2V, I2V (init image), LoRA |
-| **Wan 2.1 VACE (14B / 1.3B, video)** | `wan-2_1-vace-14b`, `wan-2_1-vace-1_3b` | ⚠ Wired; numerics validation-pending | **Control-video → video** (pose/depth/edge/sketch clip via Init Image), FPS/format/boomerang/trim. More capable than Comfy's reference-image-only VACE wiring. |
-| **Wan Animate (14B, video)** | `wan-21-14b` (Animate weights) | ⚠ Wired; numerics validation-pending | **Driving-video → animation** (Init Image = pose/motion video; face clip derived at 512²). Reference/background conditioning not modeled; supply a pre-rendered pose video. |
-| **Wan 2.2 S2V (14B, video)** | `wan-21-14b` (S2V weights) | ⚠ Best-effort; engine converter + hyperparams validation-pending | **Speech → video** (Video Audio Input → Wav2Vec2 → frames). Refuses cleanly until the engine ships the S2V checkpoint-converter keys; Wav2Vec2 side-model + audio-inject layers are provisional. |
-| **LTX-Video 0.9 (video)** | `lightricks-ltx-video` | ⚠ Wired | T2V |
-| **Ideogram 4 (9.3B dual-DiT)** | `ideogram-4` | ⚠ Wired-untested; **needs ≥22 GB free VRAM** (gated at load) | t2i; Steps→official presets (12/20/48); negative prompt + CFG ignored by design (asymmetric CFG). **Non-commercial license.** |
+All benchmark times are end-to-end wall clock through the SwarmUI API — the identical
+request routed to the ComfyUI backend, then this backend, on the same GPU. Warm median
+of 3 runs, randomized seeds, outputs visually verified. "—" = no same-configuration
+ComfyUI baseline recorded yet.
 
-Refused with a clear in-UI message (blockers tracked in
-[the punchlist](./docs/11-Comfy-Parity-Punchlist.md)): Ernie Image (no tokenizer
-upstream), HunyuanImage 2.1 (encoder stand-in not faithful), Chroma Radiance /
-Zeta-Chroma (config presets), Flux.2 Klein 9B / Dev (FP4 GEMM). **Wan Animate** and
-**Wan S2V** are now wired (see the matrix above) — detected by their signature weights
-and routed to dedicated loaders; S2V refuses cleanly until the engine ships its
-checkpoint-converter keys.
+#### Image models (1024×1024)
+
+| Model | Compat IDs | Status | Steps | Hartsy | ComfyUI | GPU |
+|---|---|---|---:|---:|---:|---|
+| Z-Image (Turbo, Base) | `z-image` | ✅ Verified | 8 | **2.95 s** | 3.1 s | RTX 4090 |
+| Krea 2 (Turbo, Base) | `krea-2` | ✅ Verified | 8 | **4.50 s** | 6.5 s | RTX 4090 |
+| Flux.1 Schnell | `flux-1` | ✅ Verified | 4 | 10.5 s | — | RTX 4090 |
+| Flux.2 Klein 4B | `flux-2-klein-4b` | ✅ Verified | 10 | 15.1 s | — | RTX 4090 |
+| Ideogram 4 (9.3B dual-DiT) | `ideogram-4` | ✅ Verified (≥22 GB VRAM; non-commercial license) | 20 | 19.5 s | 17.0 s | RTX 4090 |
+| Flux.1 Dev / Krea / Canny / Kontext | `flux-1` | ✅ Verified (grind ongoing — was 72.4 s) | 20 | 31.0 s | 12.5 s | RTX 4090 |
+| AuraFlow v0.2/v0.3 | `auraflow-v1` | ✅ e2e; perf round queued | 20 | 31.4 s | 14.0 s | RTX 4090 |
+| SDXL + official Refiner | `stable-diffusion-xl-v1` | ✅ Verified incl. live refiner (scheduler-op work queued) | 20 | 33.0 s | 3.7 s | RTX 4090 |
+| Qwen-Image (20B, GGUF) | `qwen-image` | ✅ Verified | 20 | **40.9 s** | 54.8 s | RTX 4090 |
+| ERNIE-Image (8B fp8) | `ernie-image` | ✅ Verified (grind queued) | 20 | 50.6 s | 24.0 s | RTX 4090 |
+| Chroma V1 | `chroma` | ✅ Verified (grind ongoing — was 550 s) | 20 | 63.2 s | 16.6 s | RTX 4090 |
+| SD 1.5 / SD 3 / 3.5 | `stable-diffusion-v1`, `-v3*` | ✅ Verified (fleet pass) | — | not benched | — | — |
+| Boogu (Base/Turbo/Edit) | `boogu` | ✅ e2e (needs current Swarm core for detection) | — | not benched | — | — |
+| Flux.2 Dev (32B, Q4 GGUF) | `flux-2` | 🔧 Loader GGUF branch in progress | — | — | — | — |
+| HiDream-I1 | `hidream-i1` | 🔧 Correctness debug in progress | — | — | — | — |
+| Chroma Radiance / Zeta, F-Lite, Anima, OmniGen2, Lumina2 | various | ✅ e2e (fleet pass) / 🔧 detection pending (OmniGen2, Lumina2) | — | not benched | — | — |
+
+#### Video models
+
+| Model | Compat IDs | Status | Hartsy | ComfyUI | GPU |
+|---|---|---|---:|---:|---|
+| Wan 2.1 T2V 14B | `wan-21-14b` | ✅ Verified in production | **37 s** | ~30.6 s (1.2×) | RTX 4090 |
+| Wan 2.2 TI2V-5B | `wan-22-5b` | ✅ Verified in production | 22 s | — | RTX 4090 |
+| Wan 2.1 T2V 1.3B | `wan-2_1-*` | ✅ Verified in production | 17 s | — | RTX 4090 |
+| Wan VACE / Animate / S2V / I2V | `wan-*` | ✅ Verified (control-video, driving-video, speech→video) | — | — | RTX 4090 |
+| LTX-2.3 (with audio) | LTX-2 | ✅ Verified in production (was 451 s) | 57–105 s | — | RTX 4090 |
+| LTX-Video 0.9 | `lightricks-ltx-video` | ✅ Verified | — | — | RTX 4090 |
+| HunyuanVideo 13B | `hunyuan-video` | ✅ Verified (1.29 s/step) | — | — | RTX 4090 |
+| Kandinsky-5 T2V | `kandinsky-5` | ✅ Verified (0.83 s/step) | — | — | RTX 4090 |
+
+Per-architecture features (LoRA, img2img, inpaint, IP-Adapter, ControlNet, Kontext
+reference images, FPS/format/boomerang/trim for video) are listed in
+[Cross-cutting features](#cross-cutting-features) and the
+[parity matrix](./docs/02-Comfy-Feature-Parity-Matrix.md).
+
+Every published number is reproducible: methodology, request parameters, and the
+living scoreboard are in the engine's
+[Performance Guide](https://github.com/HartsyAI/HartsyInference/blob/main/docs/PERFORMANCE.md);
+per-round narratives live in `benchmarks/results/`. The numbers require no
+configuration — the engine's standard performance profile is default-on
+(see [Performance out of the box](#performance-out-of-the-box)).
 
 ### Cross-cutting features
 
@@ -81,9 +106,10 @@ live previews, mid-gen cancel, FreeMemory, multi-GPU via one backend per GPU,
 Not yet — needs upstream HartsyInference engine work first (Category B): hires-fix
 2-pass upscale + ESRGAN (tiled VaeEncoder + upscaler), guidance variants
 (FreeU/SAG/PAG/NAG/RescaleCFG/CFGZero★), LoRA on SD3/Z-Image/Flux.2, ControlNet
-Depth/OpenPose preprocessors + Flux/SD1.5 ControlNet, IP-Adapter FaceID, SAM2 /
-CLIP-Seg segment targets, seamless tiling, batch>1, variation seed on SD3,
-Qwen Image Edit, Wan 14B, FP4 (Flux.2 Klein 9B / Ideogram nf4).
+Depth/OpenPose preprocessors + Flux/SD1.5 ControlNet, IP-Adapter FaceID, SAM2
+segment targets, seamless tiling, batch>1, variation seed on SD3,
+Qwen Image Edit, FP4 (Flux.2 Klein 9B / Ideogram nf4). (CLIP-Seg text segments
+and Wan 14B have since shipped — see the architecture table.)
 
 Not planned for v1: workflow editor, textual-inversion embeddings, InstantID,
 Flux Redux, rembg, face restore, TensorRT. TTS/STT (engine has Whisper/Bark/
