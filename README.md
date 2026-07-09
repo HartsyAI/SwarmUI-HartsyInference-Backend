@@ -90,6 +90,18 @@ Flux Redux, rembg, face restore, TensorRT. TTS/STT (engine has Whisper/Bark/
 Kokoro/F5/CosyVoice/etc) is deferred pending a Swarm UI surface for voice/
 reference inputs — the current audio params are music-only.
 
+## Performance out of the box
+
+The engine's **standard performance profile** (cuDNN fused flash attention, fp8 tensor-core GEMM on
+Ada+, F16 DiT activations, resident DiT weights, warm activation pool) is **default-on inside the
+engine** — the extension configures nothing, and every install reproduces the published benchmark
+times (several flagship image models faster than ComfyUI on the same GPU). Features degrade
+gracefully on hardware that can't run them and each has a `HARTSY_<FEATURE>=0` kill-switch. The
+authoritative specification — feature table, cuDNN/cuBLAS requirements and resolution order,
+verification log lines, benchmark methodology — is the engine's
+[Performance Guide](https://github.com/HartsyAI/HartsyInference/blob/main/docs/PERFORMANCE.md);
+see also [docs/07-Parameters-And-Feature-Flags.md](docs/07-Parameters-And-Feature-Flags.md).
+
 ## How memory management works (current architecture)
 
 The default backend runs Flux fp8 (~11.3 GB of weights) on a 12 GB GPU through a

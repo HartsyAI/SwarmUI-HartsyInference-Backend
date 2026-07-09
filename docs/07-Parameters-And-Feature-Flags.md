@@ -248,3 +248,23 @@ descriptive errors that Swarm surfaces to the user.
 Parameter validation that's input-shape (e.g., "width must be multiple of 8") lives
 where Swarm core puts it — at the `T2IParamType` level, with a `Validator`. We don't
 override.
+
+## Engine performance profile
+
+The engine ships a **standard performance profile** — cuDNN fused flash attention, fp8 tensor-core GEMM
+(SM 8.9+), F16 DiT activations for audited architectures, resident DiT weights, and a warm activation
+pool — that is **default-on inside the engine** (since `1.0.0-alpha.45`). The extension sets nothing:
+every install reproduces the published benchmark times with zero configuration, and the same defaults
+apply to any other engine host.
+
+Operators can disable an individual feature by exporting `HARTSY_<FEATURE>=0` in the SwarmUI launcher
+environment (e.g. `HARTSY_SDPA_CUDNN=0`); the engine logs the resolved set at backend init:
+
+```
+[Cuda] perf flags: SdpaCudnn=True NativeFp8Gemm=True MempoolKeep=True ...
+```
+
+Feature table, hardware/library requirements (cuDNN ≥ 9.21, resolution order for the CUDA userspace
+libraries), verification log lines, and benchmark methodology are specified in the engine's
+[`docs/PERFORMANCE.md`](https://github.com/HartsyAI/HartsyInference/blob/main/docs/PERFORMANCE.md) —
+that document is the single source of truth; this section is intentionally only a pointer.

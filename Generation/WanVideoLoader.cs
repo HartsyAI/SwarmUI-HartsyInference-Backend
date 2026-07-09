@@ -76,13 +76,10 @@ public static class WanVideoLoader
         bool isClipI2V = conv.Transformer.ContainsKey("condition_embedder.image_embedder.norm1.weight");
         int inChannels = conv.Transformer.TryGetValue("patch_embedding.weight", out Tensor pe) ? (int)pe.Shape[1] : 0;
         WanVideoConfig config = ResolveConfig(compat, isClipI2V, inChannels);
-        // fp8 checkpoints carry a small velocity DC bias that CFG>=5 amplifies into a color-drifting /
-        // dark trajectory over the clip; CFG renormalization (~0.7) corrects it. Mirrors the engine's
-        // WanConfigDetector fp8 auto-detect, which the preset-based ResolveConfig path bypasses.
-        if (conv.Transformer.TryGetValue("blocks.0.ffn.net.0.proj.weight", out Tensor ffn0) && ffn0.DType.IsFp8)
-        {
-            config = config with { CfgRescale = 0.7f };
-        }
+        // No CFG renormalization: ComfyUI runs the same fp8 checkpoints with plain CFG and stays clean.
+        // The forced 0.7 renorm (2026-07-08, fp8 "DC bias" band-aid) std-matched the whole velocity tensor
+        // and shifted the palette/texture without fixing the collapse — the real divergence was the sampling
+        // shift (3.0 vs Comfy's 8.0, now the FlowShift default below).
         string mode = isClipI2V ? "CLIP-I2V" : config.InChannels > config.VaeLatentChannels ? "concat-I2V" : "T2V/TI2V";
         log($"  Converted: {conv.Transformer.Count} transformer keys ({mode}, in {inChannels}, inner {config.InnerDim}{(config.CfgRescale > 0 ? $", cfg-renorm {config.CfgRescale}" : "")})");
 
@@ -259,10 +256,16 @@ public static class WanVideoLoader
         backend.Sync();
         backend.FreeWeights(entry.Umt5.EnumerateWeights());
 
-        TextToImageRequest request = new TextToImageRequest
+        // Sigma Shift: honor the user's param when set; otherwise default to ComfyUI's Wan sampling shift
+        // (8.0, comfy supported_models WAN21_T2V — inherited by I2V/VACE) rather than the official-repo
+        // 3.0/5.0 presets. At Swarm's default step counts (15-20) the lower shift under-forms structure and
+        // prints high-frequency comb texture; 8.0 is the reference look Wan users get through ComfyUI.
+        float flowShift = input.TryGet(T2IParamTypes.SigmaShift, out double sigmaShift) ? (float)sigmaShift : 8f;
+        VideoGenerationRequest request = new VideoGenerationRequest
         {
             Prompt = prompt, NegativePrompt = negative, Width = width, Height = height,
             Steps = steps, CfgScale = cfgScale, Seed = seedLong < 0 ? null : (int?)(int)(seedLong & 0x7FFFFFFF),
+            FlowShift = flowShift,
         };
 
         long start = Environment.TickCount64;
