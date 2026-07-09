@@ -30,8 +30,10 @@ namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 /// control" model as VACE. The face clip is decoded to <c>numFrames−1</c> frames so the face encoder's 4× temporal
 /// downsample (+1 pad) lands exactly on the <c>gt</c> latent frames the face adapter cross-attends per-frame.</para>
 ///
-/// <para><b>Status:</b> the engine flags Animate numerics as first-run-validation pending, and reference-image /
-/// background / replace-mode conditioning is not modeled (pose + face only). The SwarmUI wiring here is complete.</para>
+/// <para><b>Inputs:</b> Init Image = the driving pose/motion video; <c>Animate Reference Image</c> (HartsyInference
+/// param group) = the character identity image, VAE-encoded to the reference latent + (when the checkpoint ships the
+/// i2v embedder) CLIP-ViT-H context. Background/replace-mode conditioning is not modeled (animate mode only), and
+/// <c>continue_motion</c> chunked extension is not wired.</para>
 /// </summary>
 public static class WanAnimateLoader
 {
@@ -52,10 +54,6 @@ public static class WanAnimateLoader
             throw new FileNotFoundException($"Wan Animate checkpoint not found: {model.RawFilePath}");
 
         string compat = model.ModelClass?.CompatClass?.ID ?? WanVideoLoader.Wan21_14BCompatClassId;
-        // Animate ships as a Wan2.1-14B backbone; honor the 1.3B compat if a small variant ever appears.
-        WanVideoConfig config = compat == WanVideoLoader.Wan21_1_3BCompatClassId
-            ? WanVideoConfig.T2V_1_3B
-            : WanVideoConfig.T2V_14B;
 
         T2IModel umt5Model = ModelAutoDownloader.EnsureSideModel(
             userPick: input?.Get(T2IParamTypes.T5XXLModel), entry: SideModels.Umt5Xxl, log: log);
@@ -72,7 +70,12 @@ public static class WanAnimateLoader
                 $"HartsyInference: '{model.Name}' is tagged as Wan Animate but has no 'pose_patch_embedding' weights "
                 + "after conversion — it may be a plain Wan checkpoint, or a layout the converter doesn't map yet.");
         }
-        log($"  Converted: {conv.Transformer.Count} transformer keys (Animate: pose + face/motion pathway, inner {config.InnerDim})");
+        // Weight-derived config via the engine's detector (sets IsAnimate, dims, ImageDim for the i2v CLIP
+        // embedder, and the CFG defaults) — matches the engine harness that validated Animate e2e.
+        WanVideoConfig config = WanConfigDetector.Detect(conv.Transformer);
+        bool hasClipEmbedder = conv.Transformer.ContainsKey("condition_embedder.image_embedder.norm1.weight");
+        log($"  Converted: {conv.Transformer.Count} transformer keys (Animate: pose + face/motion pathway, "
+            + $"inner {config.InnerDim}{(hasClipEmbedder ? ", i2v CLIP" : "")})");
 
         // Engine API (c9603f1): the face/motion/pose hyperparameters moved into the transformer's
         // internal weight-derived setup; the ctor takes the config alone.
@@ -87,6 +90,20 @@ public static class WanAnimateLoader
             Dictionary<string, Tensor> vaeWeights = VaePrecisionHelper.CastVaeWeights(vaeWeightsRaw, DType.F32);
             Wan21VaeDecoder vaeDecoder = new Wan21VaeDecoder(); vaeDecoder.LoadWeights(vaeWeights);
             Wan21VaeEncoder vaeEncoder = new Wan21VaeEncoder(); vaeEncoder.LoadWeights(vaeWeights);
+
+            // ── 2b. CLIP-ViT-H image encoder (Animate ships the i2v image embedder — reference-identity context) ──
+            ClipVisionEncoder clipVision = null;
+            SafeTensorsLoader clipLoader = null;
+            if (hasClipEmbedder)
+            {
+                T2IModel clipModel = ModelAutoDownloader.EnsureSideModel(
+                    userPick: input?.Get(T2IParamTypes.ClipVisionModel), entry: SideModels.ClipVisionH14, log: log);
+                log($"Loading CLIP-ViT-H image encoder: {clipModel.Name}");
+                clipLoader = new SafeTensorsLoader();
+                clipLoader.Load(clipModel.RawFilePath);
+                clipVision = new ClipVisionEncoder(ClipVisionEncoderConfig.ViTH14);
+                clipVision.LoadWeights(clipLoader.GetAllTensors());
+            }
 
             // ── 3. umT5-XXL + tokenizer ──
             log($"Loading umT5-XXL: {umt5Model.Name}");
@@ -112,6 +129,8 @@ public static class WanAnimateLoader
                 Transformer = transformer,
                 Vae = vaeDecoder,
                 VaeEncoder = vaeEncoder,
+                ClipVision = clipVision,
+                ClipLoader = clipLoader,
                 CheckpointLoader = ditLoader,
                 VaeLoaders = vaeLoaders,
                 Umt5Loader = umt5Loader,
@@ -159,31 +178,51 @@ public static class WanAnimateLoader
         Tensor promptEmbeds = CfgHelper.SliceBatchElement(batch, 0, TokenLength, entry.Config.TextDim);
         Tensor negEmbeds = CfgHelper.SliceBatchElement(batch, 1, TokenLength, entry.Config.TextDim);
         batch.Dispose();
+        // Wan cross-attends all 512 context rows with NO text mask — umT5 pad rows are garbage that drowns
+        // the prompt (same fix as WanVideoLoader; this loader predates it).
+        WanVideoLoader.ZeroPaddedRows(promptEmbeds, promptTokens, entry.Config.TextDim);
+        WanVideoLoader.ZeroPaddedRows(negEmbeds, negTokens, entry.Config.TextDim);
         backend.Sync();
         backend.FreeWeights(entry.Umt5.EnumerateWeights());
 
-        TextToImageRequest request = new TextToImageRequest
+        // Reference identity: who performs the driving motion. Required by the conditioning
+        // (reference latent frame + mask concat + optional CLIP context), matching ComfyUI's WanAnimateToVideo.
+        Image refImage = input.Get(SwarmUIHartsyInference.AnimateReferenceImageParam)
+            ?? throw new SwarmUserErrorException(
+                "HartsyInference: Wan Animate needs a character image in the 'Animate Reference Image' param "
+                + "(HartsyInference group) — the Init Image slot carries the driving pose/motion video.");
+        Tensor referenceRgb = RefImageToTensor(refImage, width, height);
+
+        Tensor clipEmbeds = null;
+        if (entry.ClipVision is not null)
+        {
+            backend.PreloadWeights(entry.ClipVision.EnumerateWeights());
+            Tensor pixels = ClipImagePreprocessor.Process(refImage, imageSize: 224);
+            Tensor clipBatched = entry.ClipVision.EncodeHiddenStates(backend, pixels);   // [1, 257, 1280]
+            pixels.Dispose();
+            backend.Sync();
+            backend.FreeWeights(entry.ClipVision.EnumerateWeights());
+            clipEmbeds = WanVideoLoader.DropBatch(clipBatched);
+            clipBatched.Dispose();
+        }
+
+        // Sigma Shift: honor the user's param; default 8.0 = ComfyUI's Wan sampling shift (WAN22_Animate
+        // inherits WAN21_T2V's sampling_settings).
+        float flowShift = input.TryGet(T2IParamTypes.SigmaShift, out double sigmaShift) ? (float)sigmaShift : 8f;
+        VideoGenerationRequest request = new VideoGenerationRequest
         {
             Prompt = prompt, NegativePrompt = negative, Width = width, Height = height,
             Steps = steps, CfgScale = cfgScale, Seed = seedLong < 0 ? null : (int?)(int)(seedLong & 0x7FFFFFFF),
+            FlowShift = flowShift,
         };
 
         long start = Environment.TickCount64;
         Action<GenerationProgress> bridge = p => { cancel.ThrowIfCancellationRequested(); onProgress(p); };
         try
         {
-            // Engine API (c9603f1): GenerateAnimation now REQUIRES a reference identity image (referenceRgb)
-            // matching ComfyUI's WanAnimate conditioning. The extension has no reference-image parameter wired
-            // for Animate yet (the driving video occupies Init Image) — refuse with a clear message instead of
-            // fabricating conditioning. Runtime wiring lands with the engine-side Animate parity work.
-            throw new SwarmUserErrorException(
-                "HartsyInference: Wan Animate needs the new reference-image conditioning wiring (engine API "
-                + "changed to require an identity reference alongside the pose/face clips). This path is being "
-                + "reworked for ComfyUI parity — use the ComfyUI backend for Wan Animate in the meantime.");
-#pragma warning disable CS0162 // unreachable — kept for the pending rewire
             var (frames, outW, outH, _) = entry.Pipeline.GenerateAnimation(
-                promptEmbeds, negEmbeds, referenceRgb: null, poseClip, faceClip, request, onProgress: bridge);
-#pragma warning restore CS0162
+                promptEmbeds, negEmbeds, referenceRgb, poseClip, faceClip, request,
+                clipImageEmbeds: clipEmbeds, onProgress: bridge);
             Logs.Verbose($"[HartsyInference][Animate] Pipeline returned {frames.Length} frames {outW}x{outH} "
                 + $"({numFrames}f pose / {numFrames - 1}f face) in {Environment.TickCount64 - start}ms.");
             return new[] { VideoParamResolver.FinishVideo(frames, outW, outH, input, cancel) };
@@ -192,9 +231,25 @@ public static class WanAnimateLoader
         {
             poseClip.Dispose();
             faceClip.Dispose();
+            referenceRgb.Dispose();
+            clipEmbeds?.Dispose();
             promptEmbeds.Dispose();
             negEmbeds.Dispose();
         }
+    }
+
+    /// <summary>Decodes a reference image to the pipeline's <c>[1, 3, 1, H, W]</c> tensor in [-1, 1], resized to
+    /// the pose clip's resolution (the engine requires reference and pose sizes to match).</summary>
+    private static unsafe Tensor RefImageToTensor(Image image, int width, int height)
+    {
+        byte[] rgb24 = RgbToImage.ToHwcRgbResized(image, width, height);
+        Tensor t = new Tensor(new TensorShape([1L, 3, 1, height, width]), DType.F32);
+        float* p = (float*)t.DataPointer;
+        long frame = (long)height * width;
+        for (long pix = 0; pix < frame; pix++)
+            for (int c = 0; c < 3; c++)
+                p[c * frame + pix] = rgb24[(int)(pix * 3 + c)] / 127.5f - 1f;
+        return t;
     }
 }
 
@@ -209,6 +264,9 @@ public sealed class WanAnimateCacheEntry : IDisposable
     public required WanAnimateTransformer Transformer { get; init; }
     public required IWanVaeDecoder Vae { get; init; }
     public required IWanVaeEncoder VaeEncoder { get; init; }
+    /// <summary>CLIP-ViT-H reference-image encoder; null when the checkpoint has no i2v image embedder.</summary>
+    public ClipVisionEncoder ClipVision { get; init; }
+    public SafeTensorsLoader ClipLoader { get; init; }
     public required SafeTensorsLoader CheckpointLoader { get; init; }
     public required IReadOnlyList<SafeTensorsLoader> VaeLoaders { get; init; }
     public required SafeTensorsLoader Umt5Loader { get; init; }
@@ -224,6 +282,8 @@ public sealed class WanAnimateCacheEntry : IDisposable
         Tokenizer?.Dispose();
         Umt5?.Dispose();
         Transformer?.Dispose();
+        (ClipVision as object as IDisposable)?.Dispose();
+        ClipLoader?.Dispose();
         CheckpointLoader?.Dispose();
         Umt5Loader?.Dispose();
         if (VaeLoaders is not null)

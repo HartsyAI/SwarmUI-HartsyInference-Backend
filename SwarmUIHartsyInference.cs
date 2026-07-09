@@ -49,6 +49,7 @@ public class SwarmUIHartsyInference : Extension
 
     // HartsyInference-specific params. Registered under feature flag "hartsyinference"
     // so they only show when our backend is the active target.
+    public static T2IRegisteredParam<Image> AnimateReferenceImageParam;
     public static T2IRegisteredParam<string> DtypeOverrideParam;
     public static T2IRegisteredParam<int> TileVaeThresholdParam;
     public static T2IRegisteredParam<string> SamplerParam;
@@ -92,6 +93,15 @@ public class SwarmUIHartsyInference : Extension
 
         // 1. Param group + HartsyInference-specific params.
         HartsyInferenceParamGroup = new("HartsyInference", Toggles: false, Open: false, IsAdvanced: true);
+
+        AnimateReferenceImageParam = T2IParamTypes.Register<Image>(new(
+            "Animate Reference Image",
+            "Wan-Animate: the character/identity image to animate.\nThe Init Image slot carries the driving (pose/motion) video; this image is who performs that motion.\nRequired for Wan-Animate generations on the HartsyInference backend.",
+            null,
+            Toggleable: true,
+            Group: HartsyInferenceParamGroup,
+            FeatureFlag: "hartsyinference",
+            ChangeWeight: 2));
 
         DtypeOverrideParam = T2IParamTypes.Register<string>(new(
             "HartsyInference Dtype",

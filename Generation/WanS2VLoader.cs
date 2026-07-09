@@ -25,16 +25,14 @@ namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 /// injector (<c>audio_injector.*</c>) and a causal audio encoder (<c>audio_encoder.*</c>) over stacked Wav2Vec2
 /// features. <see cref="WanModelVariants.Detect"/> routes it here off those signature weights.
 ///
-/// <para><b>Best-effort / validation-pending.</b> The engine builds S2V structurally (CPU-tested with synthetic
-/// weights) but its own docs flag several things as unconfirmed vs the real checkpoint: the
-/// <c>WanVideoCheckpointConverter</c> has no S2V key mapping yet, and the audio-inject block indices, the Wav2Vec2
-/// variant, and the harvested-layer count are provisional. This loader derives every structural value it can from
-/// the checkpoint's own audio-encoder weight shapes, picks the Wav2Vec2 preset from the derived feature dim, and
-/// <b>refuses cleanly</b> if the converted checkpoint lacks the audio keys (i.e. until the engine's converter maps
-/// them). The audio-inject layer indices are still a provisional "every-Nth" guess — see <see cref="DeriveInjectLayers"/>.</para>
+/// <para><b>Config source:</b> <see cref="WanConfigDetector.Detect"/> — the engine's parity-proven S2V layout
+/// (numerically verified layer-by-layer vs the ComfyUI reference on the real fp8 checkpoint), including the
+/// non-uniform audio-inject block indices and the empirical S2V CFG defaults. Refuses cleanly if the converted
+/// checkpoint lacks the audio keys.</para>
 ///
-/// <para><b>Input:</b> the driving speech goes in the <c>Video Audio Input</c> param; the single-clip path
-/// (audio + text, no reference identity / multi-chunk) is used.</para>
+/// <para><b>Inputs:</b> the driving speech goes in the <c>Video Audio Input</c> param; an optional identity
+/// reference portrait goes in the <c>Init Image</c> slot (VAE-encoded to appended reference tokens). Single-clip
+/// path (multi-chunk FramePackMotioner extension not wired).</para>
 /// </summary>
 public static class WanS2VLoader
 {
@@ -64,56 +62,42 @@ public static class WanS2VLoader
         var (conv, ditLoader) = WanVideoCheckpointConverter.LoadAndConvert(model.RawFilePath);
         Dictionary<string, Tensor> w = conv.Transformer;
 
-        // Graceful guard: the engine converter doesn't map S2V keys yet — refuse precisely rather than crash deep in LoadWeights.
-        if (!w.ContainsKey("audio_encoder.layer_weights") || !w.ContainsKey("audio_encoder.conv1.weight"))
+        // The engine's WanConfigDetector carries the PARITY-PROVEN S2V layout — notably the non-uniform
+        // audio-inject indices ([0,4,8,...,24,27,30,...,39] for 40/12, verified layer-by-layer vs the ComfyUI
+        // reference), the audio-encoder dims from the raw `casual_audio_encoder.*` keys (the original Wan
+        // repo's spelling, passed through the converter unchanged), and the empirical S2V CFG defaults.
+        // This exactly mirrors the engine's validated WanS2V_Gpu_E2E harness.
+        config = WanConfigDetector.Detect(w);
+        if (!config.HasAudioConditioning)
         {
             ditLoader.Dispose();
             throw new SwarmUserErrorException(
                 $"HartsyInference: '{model.Name}' is tagged as Wan S2V but the converted checkpoint has no "
-                + "'audio_encoder.*' weights. S2V is validation-pending — the HartsyInference checkpoint converter "
-                + "doesn't map the S2V audio keys yet. This will work once the engine ships the S2V converter pass.");
+                + "'casual_audio_encoder.*'/'audio_injector.*' weights — it may be a plain Wan checkpoint, or a "
+                + "layout the converter doesn't map yet.");
         }
-        int injectCount = CountInjectors(w);
-        if (injectCount == 0)
-        {
-            ditLoader.Dispose();
-            throw new SwarmUserErrorException(
-                $"HartsyInference: '{model.Name}' has S2V audio-encoder weights but no 'audio_injector.*' blocks after "
-                + "conversion — the converter's S2V key mapping is incomplete. S2V is validation-pending.");
-        }
-
-        // Derive the audio-encoder structure from its own weight shapes (robust to base-768 vs large-1024 etc.).
-        Tensor conv1 = w["audio_encoder.conv1.weight"];   // Conv1d [dim, audioDim, kernel]
-        int audioDim = (int)conv1.Shape[1];
-        int audioKernel = (int)conv1.Shape[2];
-        int numAudioLayers = (int)w["audio_encoder.layer_weights"].Shape[0];
-        int tokensPerFrame = w.TryGetValue("audio_encoder.conv2.weight", out Tensor conv2) && config.InnerDim > 0
-            ? Math.Max(1, (int)conv2.Shape[0] / config.InnerDim) : 1;
-        int[] injectLayers = DeriveInjectLayers(injectCount, config.NumLayers);
-        log($"  Converted: {w.Count} keys (S2V audio injector ×{injectCount} @ [{string.Join(",", injectLayers)}], "
-            + $"audioDim {audioDim}, {numAudioLayers} harvested layers, {tokensPerFrame} tok/frame)");
-
-        // Engine API (c9603f1): inject layers moved onto WanVideoConfig (record `with` copy); the
-        // transformer ctor takes the config alone.
-        config = config with { AudioInjectLayers = injectLayers };
+        int audioDim = config.AudioDim;
+        log($"  Converted: {w.Count} keys (S2V audio injector ×{config.AudioInjectLayers.Length} @ "
+            + $"[{string.Join(",", config.AudioInjectLayers)}], audioDim {audioDim}, {config.AudioLayers} harvested "
+            + $"layers, {config.AudioTokens} tok/frame, cfg {config.GuidanceScale}"
+            + $"{(config.CfgRescale > 0 ? $" renorm {config.CfgRescale}" : "")})");
         WanS2VTransformer transformer = new WanS2VTransformer(config);
         transformer.LoadWeights(w);
-        // Engine API (c9603f1): `tokensPerFrame:` renamed to `numTokens:`; the conv kernel size is now
-        // derived from the checkpoint weights inside LoadWeights (no ctor param).
-        WanS2VAudioEncoder audioEncoder = new WanS2VAudioEncoder(numAudioLayers, audioDim, config.InnerDim,
-            numTokens: tokensPerFrame);
-        audioEncoder.LoadWeights(w, "audio_encoder");
+        WanS2VAudioEncoder audioEncoder = new WanS2VAudioEncoder(config.AudioLayers, config.AudioDim,
+            config.InnerDim, config.AudioTokens);
+        audioEncoder.LoadWeights(w);   // default prefix: the raw `casual_audio_encoder` keys
 
         Wav2Vec2Encoder wav2vec2 = null;
         SafeTensorsLoader wav2vec2Loader = null;
         SafeTensorsLoader umt5Loader = null;
         try
         {
-            // ── 2. Wan2.1 VAE (decoder only — single-clip path doesn't encode) ──
+            // ── 2. Wan2.1 VAE (decoder + encoder — the encoder feeds the reference-identity latent) ──
             log($"Loading Wan2.1 VAE: {vaeModel.Name}");
             var (vaeWeightsRaw, vaeLoaders) = LanceCheckpointConverter.LoadVae(vaeModel.RawFilePath);
             Dictionary<string, Tensor> vaeWeights = VaePrecisionHelper.CastVaeWeights(vaeWeightsRaw, DType.F32);
             Wan21VaeDecoder vaeDecoder = new Wan21VaeDecoder(); vaeDecoder.LoadWeights(vaeWeights);
+            Wan21VaeEncoder vaeEncoder = new Wan21VaeEncoder(); vaeEncoder.LoadWeights(vaeWeights);
 
             // ── 3. Wav2Vec2 audio front-end (variant chosen from the derived feature dim) ──
             Wav2Vec2EncoderConfig w2vConfig = audioDim >= 1024 ? Wav2Vec2EncoderConfig.Large : Wav2Vec2EncoderConfig.Base;
@@ -123,7 +107,13 @@ public static class WanS2VLoader
             wav2vec2Loader = new SafeTensorsLoader();
             wav2vec2Loader.Load(w2vModel.RawFilePath);
             wav2vec2 = new Wav2Vec2Encoder(w2vConfig);
-            wav2vec2.LoadWeights(wav2vec2Loader.GetAllTensors());
+            // The Comfy-Org audio-encoder file prefixes every key with "wav2vec2." (plus an unused lm_head) —
+            // strip it, mirroring the engine's validated S2V harness.
+            Dictionary<string, Tensor> wavW = new();
+            foreach (var kvp in wav2vec2Loader.GetAllTensors())
+                if (kvp.Key.StartsWith("wav2vec2.", StringComparison.Ordinal)) wavW[kvp.Key["wav2vec2.".Length..]] = kvp.Value;
+            if (wavW.Count == 0) wavW = new Dictionary<string, Tensor>(wav2vec2Loader.GetAllTensors());   // unprefixed distribution
+            wav2vec2.LoadWeights(wavW);
 
             // ── 4. umT5-XXL + tokenizer ──
             log($"Loading umT5-XXL: {umt5Model.Name}");
@@ -135,9 +125,9 @@ public static class WanS2VLoader
             T5Tokenizer tokenizer = T5Tokenizer.CreateUmt5(maxLength: TokenLength);
 
             log("Building Wan S2V pipeline...");
-            WanS2VPipeline pipeline = new WanS2VPipeline(backend, transformer, audioEncoder, vaeDecoder, config);
+            WanS2VPipeline pipeline = new WanS2VPipeline(backend, transformer, audioEncoder, vaeDecoder, config, encoder: vaeEncoder);
 
-            log($"Wan S2V ready ({compat}, audio+text single-clip). Numerics validation-pending.");
+            log($"Wan S2V ready ({compat}, audio+text, reference-identity capable).");
             return new WanS2VCacheEntry
             {
                 ModelName = model.Name,
@@ -194,13 +184,26 @@ public static class WanS2VLoader
         Tensor promptEmbeds = CfgHelper.SliceBatchElement(batch, 0, TokenLength, entry.Config.TextDim);
         Tensor negEmbeds = CfgHelper.SliceBatchElement(batch, 1, TokenLength, entry.Config.TextDim);
         batch.Dispose();
+        // Wan cross-attends all 512 context rows with NO text mask — umT5 pad rows are garbage that drowns
+        // the prompt (same fix as WanVideoLoader; this loader predates it).
+        WanVideoLoader.ZeroPaddedRows(promptEmbeds, promptTokens, entry.Config.TextDim);
+        WanVideoLoader.ZeroPaddedRows(negEmbeds, negTokens, entry.Config.TextDim);
         backend.Sync();
         backend.FreeWeights(entry.Umt5.EnumerateWeights());
 
-        TextToImageRequest request = new TextToImageRequest
+        // Optional identity anchor: the Init Image slot carries the reference portrait (VAE-encoded to appended
+        // reference tokens by the pipeline — ComfyUI WanSoundImageToVideo's ref_image path).
+        Image initImage = input.Get(T2IParamTypes.InitImage);
+        byte[] referenceRgb24 = initImage is not null ? RgbToImage.ToHwcRgbResized(initImage, width, height) : null;
+
+        // Sigma Shift: honor the user's param; default 8.0 = ComfyUI's Wan sampling shift (WAN22_S2V inherits
+        // WAN21_T2V's sampling_settings).
+        float flowShift = input.TryGet(T2IParamTypes.SigmaShift, out double sigmaShift) ? (float)sigmaShift : 8f;
+        VideoGenerationRequest request = new VideoGenerationRequest
         {
             Prompt = prompt, NegativePrompt = negative, Width = width, Height = height,
             Steps = steps, CfgScale = cfgScale, Seed = seedLong < 0 ? null : (int?)(int)(seedLong & 0x7FFFFFFF),
+            FlowShift = flowShift,
         };
 
         long start = Environment.TickCount64;
@@ -212,9 +215,18 @@ public static class WanS2VLoader
         try
         {
             var (frames, outW, outH, _) = entry.Pipeline.GenerateFromWaveform(
-                promptEmbeds, negEmbeds, waveform, entry.Wav2Vec2, request, numFrames, onProgress: bridge);
+                promptEmbeds, negEmbeds, waveform, entry.Wav2Vec2, request, numFrames,
+                referenceRgb24: referenceRgb24 ?? default(ReadOnlySpan<byte>), onProgress: bridge);
             Logs.Verbose($"[HartsyInference][S2V] Pipeline returned {frames.Length} frames {outW}x{outH} in {Environment.TickCount64 - start}ms.");
-            return new[] { VideoParamResolver.FinishVideo(frames, outW, outH, input, cancel) };
+            // Mux the driving speech into the container, trimmed to the clip's duration at Wan's native
+            // 16 fps (the rate the audio features were bucketed at — see FinishVideo's defaultFps).
+            int audioSamples = (int)Math.Min(waveform.Length, (long)Math.Ceiling(frames.Length / 16.0 * 16000));
+            VideoOutputEncoder.AudioTrack speechTrack = new()
+            {
+                Left = waveform.AsSpan(0, audioSamples).ToArray(),
+                SampleRate = 16000,
+            };
+            return new[] { VideoParamResolver.FinishVideo(frames, outW, outH, input, cancel, audio: speechTrack, defaultFps: 16) };
         }
         finally
         {
@@ -242,17 +254,6 @@ public static class WanS2VLoader
         return max + 1;
     }
 
-    /// <summary>Provisional "every-Nth block" inject-layer indices for <paramref name="count"/> injectors over
-    /// <paramref name="numLayers"/> DiT blocks. The exact indices are unconfirmed vs the real checkpoint (engine TODO);
-    /// this matches the documented "every Nth of the 40 blocks" pattern.</summary>
-    private static int[] DeriveInjectLayers(int count, int numLayers)
-    {
-        if (count <= 0) return [];
-        int stride = Math.Max(1, numLayers / count);
-        int[] layers = new int[count];
-        for (int i = 0; i < count; i++) layers[i] = Math.Min(numLayers - 1, i * stride);
-        return layers;
-    }
 }
 
 public sealed class WanS2VCacheEntry : IDisposable

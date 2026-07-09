@@ -57,6 +57,16 @@ public static class BooguImageLoader
     /// <summary>Qwen3-VL-8B language-tower hidden size — distinguishes the 8B encoder from the 4B/0.6B variants.</summary>
     private const long Qwen3Vl8BHiddenSize = 4096;
 
+    // T2I prompt-embedding cache: repeat prompts skip the whole Qwen3-VL-8B encode (and, under
+    // HARTSY_KEEP_MODELS, avoid evicting the resident ~10 GB DiT to make room for the ~10 GB TE — the two
+    // cannot coexist beside activations on 24 GB). Reusing the SAME tensor references also keeps the
+    // transformer's ref-keyed refined-caption cache warm. Embeddings are model-agnostic (all Boogu variants
+    // share the Qwen3-VL-8B side model), so one static slot pair serves Base/Turbo.
+    private static string _cachedInstrKey;
+    private static Tensor _cachedInstr;
+    private static string _cachedNegKey;
+    private static Tensor _cachedNeg;
+
     public static BooguImageCacheEntry Load(IBackend backend, T2IModel model, T2IParamInput input, Action<string> log)
     {
         if (string.IsNullOrWhiteSpace(model?.RawFilePath))
@@ -180,7 +190,7 @@ public static class BooguImageLoader
         }
     }
 
-    public static Image[] Generate(
+    public static unsafe Image[] Generate(
         BooguImageCacheEntry entry,
         IBackend backend,
         T2IParamInput input,
@@ -229,25 +239,48 @@ public static class BooguImageLoader
         }
 
         // ── Text-to-image ──
-        int[] tokens = BuildTemplatedTokens(entry.Tokenizer, SystemPromptT2I, prompt, numImagePad: 0);
-        using Tensor instr = entry.TextEncoder.Encode(backend, [tokens]);
-
-        Tensor negEmb = null;
-        try
+        // Prompt-embedding cache with TE ⇄ DiT staging: on a miss, evict the resident DiT first (the ~10 GB
+        // Qwen3-VL-8B and the ~10 GB fp8 DiT can't coexist beside activations on 24 GB), encode, then free the
+        // TE weights so the pipeline's PreloadWeights gets the VRAM back. Cache-hit gens skip all of it.
+        bool needNeg = textGuidance > 1.0f;
+        bool instrHit = _cachedInstr is not null && _cachedInstrKey == prompt;
+        bool negHit = !needNeg || (_cachedNeg is not null && _cachedNegKey == negative);
+        if (!instrHit || !negHit)
         {
-            if (textGuidance > 1.0f)
+            entry.Pipeline.EvictResidentWeights();
+            long teTick = Environment.TickCount64;
+            if (!instrHit)
+            {
+                int[] tokens = BuildTemplatedTokens(entry.Tokenizer, SystemPromptT2I, prompt, numImagePad: 0);
+                Tensor instrNew = entry.TextEncoder.Encode(backend, [tokens]);
+                _ = instrNew.DataPointer;   // host-materialize: survives FreeActivations
+                _cachedInstr?.Dispose();
+                _cachedInstr = instrNew;
+                _cachedInstrKey = prompt;
+            }
+            if (needNeg && (_cachedNeg is null || _cachedNegKey != negative))
             {
                 int[] negTokens = BuildTemplatedTokens(entry.Tokenizer, SystemPromptT2I, negative, numImagePad: 0);
-                negEmb = entry.TextEncoder.Encode(backend, [negTokens]);
+                Tensor negNew = entry.TextEncoder.Encode(backend, [negTokens]);
+                _ = negNew.DataPointer;
+                _cachedNeg?.Dispose();
+                _cachedNeg = negNew;
+                _cachedNegKey = negative;
             }
-            var (rgbBytes, outW, outH, _) = entry.Pipeline.GenerateFromEmbeddings(instr, request, textGuidance, negEmb, bridge);
-            Logs.Verbose($"[HartsyInference][Boogu] T2I {outW}x{outH} in {Environment.TickCount64 - startTick}ms.");
-            return [RgbToImage.FromHwcRgb(rgbBytes, outW, outH)];
+            backend.Sync();
+            backend.FreeWeights(entry.TextEncoder.EnumerateWeights());
+            backend.FreeActivations();
+            Logs.Verbose($"[HartsyInference][Boogu] TE encode {Environment.TickCount64 - teTick}ms (prompt-cache miss).");
         }
-        finally
+        else
         {
-            negEmb?.Dispose();
+            Logs.Verbose("[HartsyInference][Boogu] prompt-embedding cache hit — TE phase skipped.");
         }
+
+        var (rgbBytes, outW, outH, _) = entry.Pipeline.GenerateFromEmbeddings(
+            _cachedInstr, request, textGuidance, needNeg ? _cachedNeg : null, bridge);
+        Logs.Verbose($"[HartsyInference][Boogu] T2I {outW}x{outH} in {Environment.TickCount64 - startTick}ms.");
+        return [RgbToImage.FromHwcRgb(rgbBytes, outW, outH)];
     }
 
     private static Image[] GenerateEdit(

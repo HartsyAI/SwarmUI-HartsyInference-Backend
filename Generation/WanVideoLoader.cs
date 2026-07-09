@@ -330,7 +330,7 @@ public static class WanVideoLoader
     }
 
     /// <summary>Copies a <c>[1, seq, dim]</c> tensor to a <c>[seq, dim]</c> tensor (the pipeline's image-embeds shape).</summary>
-    private static unsafe Tensor DropBatch(Tensor x)
+    internal static unsafe Tensor DropBatch(Tensor x)
     {
         int seq = (int)x.Shape[1], dim = (int)x.Shape[2];
         Tensor o = new Tensor(new TensorShape(seq, dim), DType.F32);

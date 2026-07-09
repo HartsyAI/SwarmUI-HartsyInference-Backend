@@ -333,14 +333,16 @@ public static class SideModels
         Hash: "",
         DisplayName: "Wav2Vec2 (chinese-base, S2V audio front-end)");
 
-    /// <summary>wav2vec2-large variant (hidden 1024, 24 layers) for S2V checkpoints whose audio encoder expects 1024-dim
-    /// features. Best-effort/unverified — see <see cref="Wav2Vec2Base"/>.</summary>
+    /// <summary>wav2vec2-large variant (hidden 1024, 24 layers, stable-layer-norm) for S2V checkpoints whose audio
+    /// encoder expects 1024-dim features. The Comfy-Org Wan 2.2 repackage — the exact file ComfyUI pairs with
+    /// wan2.2_s2v and the one the engine's S2V parity harness validated against. (The previous
+    /// facebook/wav2vec2-large-960h URL 404'd: that repo ships no safetensors.)</summary>
     public static readonly Entry Wav2Vec2Large = new(
-        CanonicalName: "Wav2Vec2/wav2vec2-large.safetensors",
+        CanonicalName: "Wav2Vec2/wav2vec2_large_english_fp16.safetensors",
         FolderType: "Clip",
-        Url: "https://huggingface.co/facebook/wav2vec2-large-960h/resolve/main/model.safetensors",
+        Url: "https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/audio_encoders/wav2vec2_large_english_fp16.safetensors",
         Hash: "",
-        DisplayName: "Wav2Vec2 (large, S2V audio front-end)");
+        DisplayName: "Wav2Vec2 (large english, S2V audio front-end)");
 
     /// <summary>ACE-Step 1.5 Oobleck audio VAE (48 kHz stereo ↔ 64-ch 25 Hz latents). Canonical
     /// path, URL, and hash match SwarmUI core's <c>CommonModels.Known["ace-step-15-vae"]</c> so a

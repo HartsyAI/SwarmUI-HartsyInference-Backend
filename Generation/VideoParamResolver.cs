@@ -50,14 +50,18 @@ public static class VideoParamResolver
     /// final step every video loader's Generate ends with. When <paramref name="audio"/> is supplied
     /// (LTX-2's generated soundtrack, or a Wan S2V driving clip), it is muxed into the container so the
     /// output is a single video-with-sound file — see <see cref="VideoOutputEncoder.Encode"/>.</summary>
-    public static SwarmUI.Utils.Image FinishVideo(byte[][] frames, int width, int height, T2IParamInput input, CancellationToken cancel, VideoOutputEncoder.AudioTrack audio = null)
+    public static SwarmUI.Utils.Image FinishVideo(byte[][] frames, int width, int height, T2IParamInput input, CancellationToken cancel, VideoOutputEncoder.AudioTrack audio = null, int? defaultFps = null)
     {
         frames = VideoOutputEncoder.ApplyFrameEdits(
             frames,
             trimStart: input.Get(T2IParamTypes.TrimVideoStartFrames, 0),
             trimEnd: input.Get(T2IParamTypes.TrimVideoEndFrames, 0),
             boomerang: input.Get(T2IParamTypes.VideoBoomerang, false));
-        return VideoOutputEncoder.Encode(frames, width, height, ResolveFps(input), ResolveFormat(input), cancel, audio);
+        // A model-native default fps (e.g. Wan S2V's 16 — its audio features are bucketed at 16 fps, so any
+        // other rate desyncs the muxed speech) beats the global 24; an explicit user Video FPS beats both.
+        int fps = input.TryGet(T2IParamTypes.VideoFPS, out int userFps) && userFps > 0
+            ? userFps : (defaultFps ?? ResolveFps(input));
+        return VideoOutputEncoder.Encode(frames, width, height, fps, ResolveFormat(input), cancel, audio);
     }
 
     /// <summary>Image-to-video target resolution per the <c>VideoResolution</c> param's documented modes
