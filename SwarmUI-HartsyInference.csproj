@@ -54,12 +54,21 @@
              alpha.43 = query-tiled CUDA SDPA for long sequences (Wan-Video full-res self-attention no
                         longer materializes the ~49GB score matrix), Wan VAE + variant work, LTX fixes.
              alpha.44 = WanVideoConfig.CfgRescale + MoE expert swap + umT5/T5 AttentionScale=1.0 fix
-                        (the flat-video root cause). Latest published on nuget.org as of this pin.
+                        (the flat-video root cause).
+             alpha.45 = engine-side work (TTS perf, Yue vocal decoder); the "HartsyInference" META-PACKAGE
+                        itself was never actually published at this version — its automated publish step
+                        didn't exist yet (see alpha.46 note). Sub-packages only.
+             alpha.46 = Boogu-Image DiT residency fix (EvictResidentWeights) + the meta-package publish
+                        gap fixed: "HartsyInference" is now packed via a real project
+                        (src/HartsyInference.Meta) wired into publish-nuget.yml, instead of a manual,
+                        easily-forgotten `dotnet pack`+push that had been stuck at alpha.44 for weeks.
+                        Latest published on nuget.org as of this pin (verified via a from-scratch
+                        restore against nuget.org only, not just the version index).
              NEVER pin a "-local" suffix here: those are locally-packed builds that live only on the
              dev machine's nuget.config feed and are NOT on nuget.org, so any downloaded copy of this
              extension fails restore with NU1301. Always pin an EXACT version that appears in
              https://api.nuget.org/v3-flatcontainer/hartsyinference/index.json. -->
-        <PackageReference Include="HartsyInference" Version="1.0.0-alpha.44" />
+        <PackageReference Include="HartsyInference" Version="1.0.0-alpha.46" />
     </ItemGroup>
 
     <!-- LOCAL ENGINE: prebuilt DLLs from the SharpInference Cli bin (its full runtime closure). Referenced
