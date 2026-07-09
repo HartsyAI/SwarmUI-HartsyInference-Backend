@@ -16,11 +16,9 @@
              unaffected). Pin Version below to a specific alpha.N if you ever need an offline build. -->
         <RestoreNoHttpCache>true</RestoreNoHttpCache>
         <!-- Engine source toggle (same pattern as SwarmUI-AudioLab): false = published NuGet;
-             true = prebuilt local SharpInference DLLs. Temporarily defaulted true because the pinned
-             NuGet (1.0.0-alpha.43.7-local) was never packed and no published alpha contains the current
-             engine types (LtxVideo2/WanAnimate/WanS2V/WanVace/Boogu/Krea2/Qwen3-VL/…) — restoring the
-             pin silently falls back to alpha.4-dev and the build fails. Revert to false once a real
-             alpha.N carrying these ships and the pin below is bumped to it. -->
+             true = prebuilt local SharpInference DLLs. MUST default false — this extension is shipped to
+             end users who only have nuget.org, so the pin below must always be a REAL published version.
+             Only flip true (via -p:UseLocalHartsy=true) for local engine dev against unpublished DLLs. -->
         <UseLocalHartsy Condition="'$(UseLocalHartsy)' == ''">false</UseLocalHartsy>
         <HartsyRepo Condition="'$(HartsyRepo)' == ''">$(MSBuildThisFileDirectory)../../../../SharpInference</HartsyRepo>
         <!-- Cli bin is the full engine closure: every HartsyInference.* assembly + Google.Protobuf +
@@ -56,12 +54,12 @@
              alpha.43 = query-tiled CUDA SDPA for long sequences (Wan-Video full-res self-attention no
                         longer materializes the ~49GB score matrix), Wan VAE + variant work, LTX fixes.
              alpha.44 = WanVideoConfig.CfgRescale + MoE expert swap + umT5/T5 AttentionScale=1.0 fix
-                        (the flat-video root cause). Confirmed present in the published package's source
-                        commit (a32c707), so the previous "PENDING, don't pin" note here was stale — it
-                        already shipped. A prior "-local" pin (meant for a locally-packed engine build via
-                        the hartsy-local nuget.config feed) was never actually packed on this machine and
-                        broke restore with NU1301; pin the real published version instead. -->
-        <PackageReference Include="HartsyInference" Version="1.0.0-alpha.44.2-local" />
+                        (the flat-video root cause). Latest published on nuget.org as of this pin.
+             NEVER pin a "-local" suffix here: those are locally-packed builds that live only on the
+             dev machine's nuget.config feed and are NOT on nuget.org, so any downloaded copy of this
+             extension fails restore with NU1301. Always pin an EXACT version that appears in
+             https://api.nuget.org/v3-flatcontainer/hartsyinference/index.json. -->
+        <PackageReference Include="HartsyInference" Version="1.0.0-alpha.44" />
     </ItemGroup>
 
     <!-- LOCAL ENGINE: prebuilt DLLs from the SharpInference Cli bin (its full runtime closure). Referenced
