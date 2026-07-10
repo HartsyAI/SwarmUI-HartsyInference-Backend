@@ -651,6 +651,22 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                     _cache.PutErnieImage(entry);
                 });
             }
+            else if (compat == Lumina2Loader.Lumina2CompatClassId)
+            {
+                await Task.Run(() =>
+                {
+                    Lumina2CacheEntry entry = Lumina2Loader.Load(_backend, model, input, msg => AddLoadStatus(msg));
+                    _cache.PutLumina2(entry);
+                });
+            }
+            else if (compat == OmniGen2Loader.OmniGen2CompatClassId)
+            {
+                await Task.Run(() =>
+                {
+                    OmniGen2CacheEntry entry = OmniGen2Loader.Load(_backend, model, input, msg => AddLoadStatus(msg));
+                    _cache.PutOmniGen2(entry);
+                });
+            }
             else if (compat == ZImageLoader.ZImageCompatClassId)
             {
                 await Task.Run(() =>
@@ -1048,6 +1064,18 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                     ErnieImageCacheEntry entry = _cache.TryGetErnieImage(model.Name)
                         ?? throw new InvalidOperationException("ERNIE-Image model loaded but not in cache.");
                     return ErnieImageLoader.Generate(entry, input, progressBridge, cancel);
+                }
+                if (compat == Lumina2Loader.Lumina2CompatClassId)
+                {
+                    Lumina2CacheEntry entry = _cache.TryGetLumina2(model.Name)
+                        ?? throw new InvalidOperationException("Lumina-2 model loaded but not in cache.");
+                    return Lumina2Loader.Generate(entry, _backend, input, progressBridge, cancel);
+                }
+                if (compat == OmniGen2Loader.OmniGen2CompatClassId)
+                {
+                    OmniGen2CacheEntry entry = _cache.TryGetOmniGen2(model.Name)
+                        ?? throw new InvalidOperationException("OmniGen2 model loaded but not in cache.");
+                    return OmniGen2Loader.Generate(entry, _backend, input, progressBridge, cancel);
                 }
                 if (compat == ZImageLoader.ZImageCompatClassId)
                 {
@@ -1811,6 +1839,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             Ideogram4Loader.Ideogram4CompatClassId => _cache.TryGetIdeogram4(modelName) is not null,
             BooguImageLoader.BooguImageCompatClassId => _cache.TryGetBooguImage(modelName) is not null,
             ErnieImageLoader.ErnieImageCompatClassId => _cache.TryGetErnieImage(modelName) is not null,
+            Lumina2Loader.Lumina2CompatClassId => _cache.TryGetLumina2(modelName) is not null,
+            OmniGen2Loader.OmniGen2CompatClassId => _cache.TryGetOmniGen2(modelName) is not null,
             ZImageLoader.ZImageCompatClassId => _cache.TryGetZImage(modelName) is not null,
             AnimaLoader.AnimaCompatClassId => _cache.TryGetAnima(modelName) is not null,
             HiDreamLoader.HiDreamI1CompatClassId => _cache.TryGetHiDream(modelName) is not null,

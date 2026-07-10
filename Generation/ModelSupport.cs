@@ -28,7 +28,9 @@ public static class ModelSupport
         FLiteLoader.FLiteCompatClassId,           // "f-lite" — wired-untested (no E2E test in HartsyInference yet)
         Ideogram4Loader.Ideogram4CompatClassId,   // "ideogram-4" — dual 9.3B DiT; ≥22 GB VRAM gate at load time; non-commercial license
         BooguImageLoader.BooguImageCompatClassId, // "boogu" (core-detected) — 10B OmniGen2/Lumina-2 DiT + Qwen3-VL-8B + FLUX.1 VAE; T2I + reference-image edit (Apache-2.0)
-        ErnieImageLoader.ErnieImageCompatClassId, // "ernie-image" — Baidu ~8B single-stream DiT + Ministral-3-3B TE + Flux.2 VAE (Apache-2.0)
+        ErnieImageLoader.ErnieImageCompatClassId,
+        Lumina2Loader.Lumina2CompatClassId,   // "lumina-2" — Gemma-2-2B live encode (hidden_states[-2])
+        OmniGen2Loader.OmniGen2CompatClassId, // "omnigen-2" — Qwen2.5-VL-3B live encode (ComfyUI-template parity) // "ernie-image" — Baidu ~8B single-stream DiT + Ministral-3-3B TE + Flux.2 VAE (Apache-2.0)
         ZImageLoader.ZImageCompatClassId,         // "z-image"
         AnimaLoader.AnimaCompatClassId,           // "anima" — Cosmos-Predict2-2B family + LlmAdapter
         HiDreamLoader.HiDreamI1CompatClassId,     // "hidream-i1" — MMDiT + 4 text encoders (CLIP-L/G, T5-XXL, Llama-3.1)
@@ -65,8 +67,6 @@ public static class ModelSupport
         // has no Gemma tokenizer at all). Wiring a loader with guessed templates would produce
         // semantically-wrong conditioning — same reason HunyuanImage is refused below.
         ["kandinsky5-imglite"] = "Kandinsky 5 Image Lite (engine pipeline needs pre-computed Qwen2.5-VL + CLIP-L embeddings — live encode path unverified)",
-        ["omnigen-2"] = "OmniGen 2 (engine pipeline needs pre-computed Qwen2.5-VL embeddings — live encode path unverified)",
-        ["lumina-2"] = "Lumina-Image-2.0 (no Gemma-2 tokenizer/encoder path in HartsyInference yet)",
         // ErnieImage: WIRED 2026-06-17 (ErnieImageLoader) — engine shipped ErnieTokenizer in alpha.8, so it
         // moved to _supportedArchs above. (Was blocked on the missing real Ernie tokenizer.)
         // YuE: the extension loader (YueLoader.cs) is fully written, but HartsyInference has no

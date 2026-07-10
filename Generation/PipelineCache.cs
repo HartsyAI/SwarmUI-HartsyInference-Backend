@@ -20,6 +20,8 @@ public sealed class PipelineCache
     private readonly Dictionary<string, Ideogram4CacheEntry> _ideogram4 = new();
     private readonly Dictionary<string, BooguImageCacheEntry> _booguImage = new();
     private readonly Dictionary<string, ErnieImageCacheEntry> _ernieImage = new();
+    private readonly Dictionary<string, Lumina2CacheEntry> _lumina2 = new();
+    private readonly Dictionary<string, OmniGen2CacheEntry> _omniGen2 = new();
     private readonly Dictionary<string, ChromaRadianceCacheEntry> _chromaRadiance = new();
     private readonly Dictionary<string, ZetaChromaCacheEntry> _zetaChroma = new();
     private readonly Dictionary<string, ZImageCacheEntry> _zImage = new();
@@ -60,6 +62,8 @@ public sealed class PipelineCache
     public Ideogram4CacheEntry TryGetIdeogram4(string modelName) => Touch(_ideogram4, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
     public BooguImageCacheEntry TryGetBooguImage(string modelName) => Touch(_booguImage, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
     public ErnieImageCacheEntry TryGetErnieImage(string modelName) => Touch(_ernieImage, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
+    public Lumina2CacheEntry TryGetLumina2(string modelName) => Touch(_lumina2, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
+    public OmniGen2CacheEntry TryGetOmniGen2(string modelName) => Touch(_omniGen2, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
     public ChromaRadianceCacheEntry TryGetChromaRadiance(string modelName) => Touch(_chromaRadiance, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
     public ZetaChromaCacheEntry TryGetZetaChroma(string modelName) => Touch(_zetaChroma, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
     public ZImageCacheEntry TryGetZImage(string modelName) => Touch(_zImage, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
@@ -93,6 +97,8 @@ public sealed class PipelineCache
     public void PutIdeogram4(Ideogram4CacheEntry entry) => Put(_ideogram4, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
     public void PutBooguImage(BooguImageCacheEntry entry) => Put(_booguImage, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
     public void PutErnieImage(ErnieImageCacheEntry entry) => Put(_ernieImage, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
+    public void PutLumina2(Lumina2CacheEntry entry) => Put(_lumina2, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
+    public void PutOmniGen2(OmniGen2CacheEntry entry) => Put(_omniGen2, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
     public void PutChromaRadiance(ChromaRadianceCacheEntry entry) => Put(_chromaRadiance, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
     public void PutZetaChroma(ZetaChromaCacheEntry entry) => Put(_zetaChroma, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
     public void PutZImage(ZImageCacheEntry entry) => Put(_zImage, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
@@ -150,7 +156,7 @@ public sealed class PipelineCache
         }
     }
 
-    private int TotalCount => _flux.Count + _flux2.Count + _chroma.Count + _chromaRadiance.Count + _zetaChroma.Count + _auraFlow.Count + _fLite.Count + _ideogram4.Count + _booguImage.Count + _ernieImage.Count + _zImage.Count + _anima.Count + _hiDream.Count + _qwenImage.Count + _sd15.Count + _sdxl.Count + _sd3.Count + _wanVideo.Count + _wanVace.Count + _wanAnimate.Count + _wanS2V.Count + _ltxVideo.Count + _ltxVideo2.Count + _aceStep.Count + _aceStep15.Count + _musicGen.Count + _yue.Count + _lance.Count + _lens.Count + _krea2.Count + _refiner.Count + _ipAdapter.Count;
+    private int TotalCount => _flux.Count + _flux2.Count + _chroma.Count + _chromaRadiance.Count + _zetaChroma.Count + _auraFlow.Count + _fLite.Count + _ideogram4.Count + _booguImage.Count + _ernieImage.Count + _lumina2.Count + _omniGen2.Count + _zImage.Count + _anima.Count + _hiDream.Count + _qwenImage.Count + _sd15.Count + _sdxl.Count + _sd3.Count + _wanVideo.Count + _wanVace.Count + _wanAnimate.Count + _wanS2V.Count + _ltxVideo.Count + _ltxVideo2.Count + _aceStep.Count + _aceStep15.Count + _musicGen.Count + _yue.Count + _lance.Count + _lens.Count + _krea2.Count + _refiner.Count + _ipAdapter.Count;
 
     /// <summary>Evict the globally-oldest entry across all architecture maps until we're
     /// at or under <see cref="_maxEntries"/>.</summary>
@@ -250,6 +256,24 @@ public sealed class PipelineCache
                     oldestTime = kv.Value.LastUsedUtc;
                     string key = kv.Key;
                     evictAction = () => { _ernieImage[key].Dispose(); _ernieImage.Remove(key); };
+                }
+            }
+            foreach (KeyValuePair<string, Lumina2CacheEntry> kv in _lumina2)
+            {
+                if (kv.Value.LastUsedUtc < oldestTime)
+                {
+                    oldestTime = kv.Value.LastUsedUtc;
+                    string key = kv.Key;
+                    evictAction = () => { _lumina2[key].Dispose(); _lumina2.Remove(key); };
+                }
+            }
+            foreach (KeyValuePair<string, OmniGen2CacheEntry> kv in _omniGen2)
+            {
+                if (kv.Value.LastUsedUtc < oldestTime)
+                {
+                    oldestTime = kv.Value.LastUsedUtc;
+                    string key = kv.Key;
+                    evictAction = () => { _omniGen2[key].Dispose(); _omniGen2.Remove(key); };
                 }
             }
             foreach (KeyValuePair<string, ChromaRadianceCacheEntry> kv in _chromaRadiance)
@@ -487,6 +511,8 @@ public sealed class PipelineCache
             foreach (Ideogram4CacheEntry entry in _ideogram4.Values) entry.Dispose();
             foreach (BooguImageCacheEntry entry in _booguImage.Values) entry.Dispose();
             foreach (ErnieImageCacheEntry entry in _ernieImage.Values) entry.Dispose();
+            foreach (Lumina2CacheEntry entry in _lumina2.Values) entry.Dispose();
+            foreach (OmniGen2CacheEntry entry in _omniGen2.Values) entry.Dispose();
             foreach (ChromaRadianceCacheEntry entry in _chromaRadiance.Values) entry.Dispose();
             foreach (ZetaChromaCacheEntry entry in _zetaChroma.Values) entry.Dispose();
             foreach (ZImageCacheEntry entry in _zImage.Values) entry.Dispose();
@@ -519,6 +545,8 @@ public sealed class PipelineCache
             _ideogram4.Clear();
             _booguImage.Clear();
             _ernieImage.Clear();
+            _lumina2.Clear();
+            _omniGen2.Clear();
             _chromaRadiance.Clear();
             _zetaChroma.Clear();
             _zImage.Clear();

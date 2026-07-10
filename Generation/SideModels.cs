@@ -108,6 +108,25 @@ public static class SideModels
         Hash: "cb5636d852a0ea6a9075ab1bef496c0db7aef13c02350571e388aea959c5c0b4",
         DisplayName: "Qwen2.5-VL-7B (fp8 scaled)");
 
+    /// <summary>Qwen2.5-VL-3B (fp16) — OmniGen2's text encoder, run as a feature extractor. Comfy-Org
+    /// repackage naming (this IS the 3B despite the generic filename), so files are shared with ComfyUI
+    /// installs. Shares the embedded Qwen3 tokenizer's base BPE like the 7B.</summary>
+    public static readonly Entry Qwen2_5_VL_3B = new(
+        CanonicalName: "qwen_2.5_vl_fp16.safetensors",
+        FolderType: "Clip",
+        Url: "https://huggingface.co/Comfy-Org/Omnigen2_ComfyUI_repackaged/resolve/main/split_files/text_encoders/qwen_2.5_vl_fp16.safetensors",
+        Hash: "ba05dd266ad6a6aa90f7b2936e4e775d801fb233540585b43933647f8bc4fbc3",
+        DisplayName: "Qwen2.5-VL-3B (fp16, OmniGen2)");
+
+    /// <summary>Gemma-2-2B (fp16) — Lumina-Image-2.0's text encoder (hidden_states[-2] tap). Comfy-Org
+    /// repackage naming so files are shared with ComfyUI installs.</summary>
+    public static readonly Entry Gemma2_2B = new(
+        CanonicalName: "gemma_2_2b_fp16.safetensors",
+        FolderType: "Clip",
+        Url: "https://huggingface.co/Comfy-Org/Lumina_Image_2.0_Repackaged/resolve/main/split_files/text_encoders/gemma_2_2b_fp16.safetensors",
+        Hash: "29761442862f8d064d3f854bb6fabf4379dcff511a7f6ba9405a00bd0f7e2dbd",
+        DisplayName: "Gemma-2-2B (fp16, Lumina 2)");
+
     /// <summary>Qwen3-Embedding-0.6B — ACE-Step 1.5's style + lyric conditioner (1024-d states).
     /// Official Qwen single-file release. TODO: pin the SHA-256 (entry ships hash-less; the
     /// downloader logs a no-verification warning until it's added).</summary>

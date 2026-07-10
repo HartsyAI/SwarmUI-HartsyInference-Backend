@@ -118,17 +118,15 @@ public static class Flux2Loader
                     "Klein 4B (hidden=3072) uses Qwen3-4B which IS shipped as fp8-mixed and works today.");
             }
         }
-        Dictionary<string, Tensor> qwenCast = new(qwenRaw.Count);
-        foreach (KeyValuePair<string, Tensor> kvp in qwenRaw)
-        {
-            DType d = kvp.Value.DType;
-            qwenCast[kvp.Key] = (d == DType.F32 || d == DType.F16) ? kvp.Value : kvp.Value.CastTo(DType.F16);
-        }
-        qwenRaw.Clear();
-
+        // Hand the RAW dict to the encoder: LlamaStyleEncoder.LoadWeights runs it through
+        // TextEncoderQuantNormalizer, which folds fp8 weight_scale companions into Fp8ScaleFactor
+        // (weights stay PACKED on the native fp8 GEMM path), dequantizes U8-packed NVFP4 weights via
+        // their block-scale companions, and drops .comfy_quant metadata blobs. The old cast-everything-
+        // to-F16 loop here crashed on those U8 tensors (comfy-quant mixed fp8/nvfp4 checkpoints like
+        // qwen_3_4b) and upcast fp8 weights BEFORE their scales were folded.
         LlamaStyleEncoder encoder = new LlamaStyleEncoder(encoderConfig);
-        encoder.LoadWeights(qwenCast);
-        qwenCast.Clear();
+        encoder.LoadWeights(qwenRaw);
+        qwenRaw.Clear();
 
         // ── 3. Resolve + load the Flux.2 VAE (separate from Flux.1 ae) ──
         T2IModel vaeModel = ModelAutoDownloader.EnsureSideModel(
