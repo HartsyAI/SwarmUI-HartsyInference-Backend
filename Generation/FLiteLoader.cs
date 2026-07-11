@@ -32,6 +32,24 @@ public static class FLiteLoader
 {
     public const string FLiteCompatClassId = "f-lite";
 
+    /// <summary>Registers the F-Lite model class with SwarmUI's sorter — the core has no built-in f-lite
+    /// detection, and the diffusers-folder shards otherwise scan as architecture-less. Matches on the
+    /// fused cross-attention <c>context_kv</c> key unique to F-Lite's MMDiT.</summary>
+    public static void RegisterModelClass()
+    {
+        T2IModelCompatClass compat = T2IModelClassSorter.RegisterCompat(new() { ID = FLiteCompatClassId, ShortCode = "FLite" });
+        T2IModelClassSorter.Register(new T2IModelClass
+        {
+            ID = FLiteCompatClassId,
+            CompatClass = compat,
+            Name = "F-Lite",
+            StandardWidth = 1024,
+            StandardHeight = 1024,
+            IsThisModelOfClass = (model, header) =>
+                header is not null && header.ContainsKey("blocks.0.cross_attn.context_kv.weight"),
+        });
+    }
+
     public static FLiteCacheEntry Load(
         IBackend backend,
         T2IModel model,
@@ -108,10 +126,13 @@ public static class FLiteLoader
         double cfgRaw = input.Get(T2IParamTypes.CFGScale);
         float cfgScale = cfgRaw <= 0 ? 4.5f : (float)cfgRaw;
 
+        // fal-ai reference passes NO attention mask (T5 attends the full 512-token pad sea, and the
+        // model was trained against that context) and uses a ZERO context for an unset negative.
         int[] promptTokens = entry.Tokenizer.Encode(prompt);
-        int[] negTokens = entry.Tokenizer.Encode(negative);
-        int[] promptMask = T5Tokenizer.CreateAttentionMask(promptTokens);
-        int[] negMask = T5Tokenizer.CreateAttentionMask(negTokens);
+        int[] promptMask = new int[promptTokens.Length];
+        Array.Fill(promptMask, 1);
+        int[] negTokens = string.IsNullOrWhiteSpace(negative) ? null : entry.Tokenizer.Encode(negative);
+        int[] negMask = negTokens is null ? null : promptMask;
 
         TextToImageRequest request = new TextToImageRequest
         {

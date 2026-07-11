@@ -21,6 +21,7 @@ public sealed class PipelineCache
     private readonly Dictionary<string, BooguImageCacheEntry> _booguImage = new();
     private readonly Dictionary<string, ErnieImageCacheEntry> _ernieImage = new();
     private readonly Dictionary<string, Lumina2CacheEntry> _lumina2 = new();
+    private readonly Dictionary<string, HunyuanImageCacheEntry> _hunyuanImage = new();
     private readonly Dictionary<string, OmniGen2CacheEntry> _omniGen2 = new();
     private readonly Dictionary<string, ChromaRadianceCacheEntry> _chromaRadiance = new();
     private readonly Dictionary<string, ZetaChromaCacheEntry> _zetaChroma = new();
@@ -63,6 +64,7 @@ public sealed class PipelineCache
     public BooguImageCacheEntry TryGetBooguImage(string modelName) => Touch(_booguImage, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
     public ErnieImageCacheEntry TryGetErnieImage(string modelName) => Touch(_ernieImage, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
     public Lumina2CacheEntry TryGetLumina2(string modelName) => Touch(_lumina2, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
+    public HunyuanImageCacheEntry TryGetHunyuanImage(string modelName) => Touch(_hunyuanImage, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
     public OmniGen2CacheEntry TryGetOmniGen2(string modelName) => Touch(_omniGen2, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
     public ChromaRadianceCacheEntry TryGetChromaRadiance(string modelName) => Touch(_chromaRadiance, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
     public ZetaChromaCacheEntry TryGetZetaChroma(string modelName) => Touch(_zetaChroma, modelName, e => e.LastUsedUtc, (e, t) => e.LastUsedUtc = t);
@@ -98,6 +100,7 @@ public sealed class PipelineCache
     public void PutBooguImage(BooguImageCacheEntry entry) => Put(_booguImage, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
     public void PutErnieImage(ErnieImageCacheEntry entry) => Put(_ernieImage, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
     public void PutLumina2(Lumina2CacheEntry entry) => Put(_lumina2, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
+    public void PutHunyuanImage(HunyuanImageCacheEntry entry) => Put(_hunyuanImage, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
     public void PutOmniGen2(OmniGen2CacheEntry entry) => Put(_omniGen2, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
     public void PutChromaRadiance(ChromaRadianceCacheEntry entry) => Put(_chromaRadiance, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
     public void PutZetaChroma(ZetaChromaCacheEntry entry) => Put(_zetaChroma, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
@@ -265,6 +268,15 @@ public sealed class PipelineCache
                     oldestTime = kv.Value.LastUsedUtc;
                     string key = kv.Key;
                     evictAction = () => { _lumina2[key].Dispose(); _lumina2.Remove(key); };
+                }
+            }
+            foreach (KeyValuePair<string, HunyuanImageCacheEntry> kv in _hunyuanImage)
+            {
+                if (kv.Value.LastUsedUtc < oldestTime)
+                {
+                    oldestTime = kv.Value.LastUsedUtc;
+                    string key = kv.Key;
+                    evictAction = () => { _hunyuanImage[key].Dispose(); _hunyuanImage.Remove(key); };
                 }
             }
             foreach (KeyValuePair<string, OmniGen2CacheEntry> kv in _omniGen2)
@@ -512,6 +524,7 @@ public sealed class PipelineCache
             foreach (BooguImageCacheEntry entry in _booguImage.Values) entry.Dispose();
             foreach (ErnieImageCacheEntry entry in _ernieImage.Values) entry.Dispose();
             foreach (Lumina2CacheEntry entry in _lumina2.Values) entry.Dispose();
+            foreach (HunyuanImageCacheEntry entry in _hunyuanImage.Values) entry.Dispose();
             foreach (OmniGen2CacheEntry entry in _omniGen2.Values) entry.Dispose();
             foreach (ChromaRadianceCacheEntry entry in _chromaRadiance.Values) entry.Dispose();
             foreach (ZetaChromaCacheEntry entry in _zetaChroma.Values) entry.Dispose();

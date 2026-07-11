@@ -1,4 +1,5 @@
 using System.IO;
+using SwarmUI.Core;
 using SwarmUI.Text2Image;
 using SwarmUI.Utils;
 using HartsyInference.Core.Backends;
@@ -9,6 +10,7 @@ using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.ModelHandler.CheckpointConverters;
+using HartsyInference.ModelHandler.Gguf;
 using HartsyInference.ModelHandler.SafeTensors;
 using HartsyInference.Tokenizers;
 
@@ -58,19 +60,40 @@ public static class Flux2Loader
         log($"Loading Flux.2 transformer: {model.Name} (initial guess: {DescribeConfig(config)})");
 
         // ── 1. Load and convert the transformer (Klein BFL layout → canonical) ──
-        SafeTensorsLoader transformerLoader = new SafeTensorsLoader();
-        transformerLoader.Load(model.RawFilePath);
-        Dictionary<string, Tensor> rawWeights = transformerLoader.GetAllTensors();
-
-        // Pre-cast BF16 → F16 on CPU (CudaBackend doesn't yet have a BF16↔F32 GPU cast for
-        // every op; F16 keeps the same 8 GB footprint as BF16 and F16↔F32 IS supported).
-        Dictionary<string, Tensor> castWeights = new(rawWeights.Count);
-        foreach (KeyValuePair<string, Tensor> kvp in rawWeights)
+        // GGUF checkpoints (Dev 32B ships as Q4_K_S) stay NATIVE quantized: dequantizing 32B to F16 on
+        // the host needs ~64 GB RAM. The engine's Linear path dequantizes per-GEMM on the GPU; the
+        // converter's fused-weight splits are quant-block-aligned (rows never share blocks). Only the
+        // BF16 tensors (embedders/modulations) are cast to F16 — BF16 on the transient path silently
+        // skips weight application (blank image).
+        bool isGguf = model.RawFilePath.EndsWith(".gguf", StringComparison.OrdinalIgnoreCase);
+        SafeTensorsLoader transformerLoader = null;
+        IDisposable ggufHandle = null;
+        Dictionary<string, Tensor> castWeights;
+        if (isGguf)
         {
-            DType d = kvp.Value.DType;
-            castWeights[kvp.Key] = (d == DType.F32 || d == DType.F16) ? kvp.Value : kvp.Value.CastTo(DType.F16);
+            GgufModelLoader.LoadedGgufModel gguf = GgufModelLoader.Load(model.RawFilePath);
+            ggufHandle = gguf;
+            Dictionary<string, Tensor> relabeled = GgufModelLoader.RelabelRank2ToPyTorchOrder(gguf.Weights);
+            castWeights = new(relabeled.Count);
+            foreach (KeyValuePair<string, Tensor> kvp in relabeled)
+                castWeights[kvp.Key] = kvp.Value.DType == DType.BF16 ? kvp.Value.CastTo(DType.F16) : kvp.Value;
         }
-        rawWeights.Clear();
+        else
+        {
+            transformerLoader = new SafeTensorsLoader();
+            transformerLoader.Load(model.RawFilePath);
+            Dictionary<string, Tensor> rawWeights = transformerLoader.GetAllTensors();
+
+            // Pre-cast BF16 → F16 on CPU (CudaBackend doesn't yet have a BF16↔F32 GPU cast for
+            // every op; F16 keeps the same 8 GB footprint as BF16 and F16↔F32 IS supported).
+            castWeights = new(rawWeights.Count);
+            foreach (KeyValuePair<string, Tensor> kvp in rawWeights)
+            {
+                DType d = kvp.Value.DType;
+                castWeights[kvp.Key] = (d == DType.F32 || d == DType.F16) ? kvp.Value : kvp.Value.CastTo(DType.F16);
+            }
+            rawWeights.Clear();
+        }
 
         // Confirm the variant by inspecting the converted hidden size before building the transformer.
         config = DetectConfigFromTransformerWeights(castWeights, config);
@@ -110,7 +133,8 @@ public static class Flux2Loader
             if (dtypeName.StartsWith("F4", StringComparison.Ordinal) || dtypeName.Contains("FP4", StringComparison.Ordinal))
             {
                 qwenLoader.Dispose();
-                transformerLoader.Dispose();
+                transformerLoader?.Dispose();
+                ggufHandle?.Dispose();
                 throw new NotSupportedException(
                     $"{encoderLabel} weights at '{encoderModel.Name}' contain FP4 tensors " +
                     $"(e.g. '{kvp.Key}' is {dtypeName}). HartsyInference doesn't support FP4 GEMM yet — " +
@@ -155,9 +179,22 @@ public static class Flux2Loader
         VaeEncoder vaeEncoder = new VaeEncoder(VaeConfig.Flux2);
         vaeEncoder.LoadWeights(vaeWeights);
 
-        // ── 4. Tokenizer (embedded Qwen3 vocab/merges; same for 4B and 8B) ──
-        log("Loading Qwen3 tokenizer (embedded)...");
-        Qwen3Tokenizer tokenizer = new Qwen3Tokenizer(maxLength: 512);
+        // ── 4. Tokenizer: Klein → embedded Qwen3 vocab/merges; Dev → Mistral tekken (HF tokenizer.json,
+        // official Mistral-Small-3 layout: specials 0-999, BPE vocab at rank+1000; validated id-exact vs
+        // the HF reference for the Flux.2 template) ──
+        Qwen3Tokenizer tokenizer = null;
+        ErnieTokenizer mistralTokenizer = null;
+        if (config.TextEncoderType == Flux2TextEncoderType.Mistral)
+        {
+            string mistralTokPath = EnsureMistralTokenizerJson(log);
+            log($"Loading Mistral tekken tokenizer: {mistralTokPath}");
+            mistralTokenizer = new ErnieTokenizer(mistralTokPath);
+        }
+        else
+        {
+            log("Loading Qwen3 tokenizer (embedded)...");
+            tokenizer = new Qwen3Tokenizer(maxLength: 512);
+        }
 
         log("Building Flux.2 pipeline...");
         Flux2Pipeline pipeline = new Flux2Pipeline(
@@ -174,12 +211,14 @@ public static class Flux2Loader
             Pipeline = pipeline,
             Flux2Config = config,
             Tokenizer = tokenizer,
+            MistralTokenizer = mistralTokenizer,
             Encoder = encoder,
             Transformer = transformer,
             Vae = vaeDecoder,
             BnMean = bnMean,
             BnVar = bnVar,
             CheckpointLoader = transformerLoader,
+            GgufHandle = ggufHandle,
             QwenLoader = qwenLoader,
             VaeLoader = vaeLoader,
         };
@@ -203,7 +242,9 @@ public static class Flux2Loader
         // Klein has no guidance embedding; Dev uses guidance ~3.5 (BFL distillation target).
         float guidance = entry.Flux2Config.GuidanceEmbed ? 3.5f : 0f;
 
-        int[] tokenIds = entry.Tokenizer.EncodeChat(prompt);
+        int[] tokenIds = entry.Flux2Config.TextEncoderType == Flux2TextEncoderType.Mistral
+            ? BuildMistralDevTokenIds(entry.MistralTokenizer, prompt)
+            : entry.Tokenizer.EncodeChat(prompt);
 
         Img2ImgResolver.Img2ImgSpec img2img = Img2ImgResolver.Resolve(input, width, height);
         TextToImageRequest request;
@@ -232,6 +273,7 @@ public static class Flux2Loader
             };
         }
         Logs.Verbose($"[HartsyInference][Flux.2] Tokenized prompt: {tokenIds.Length} tokens, steps={steps}, guidance={guidance:F2}, mode={(img2img is not null ? "img2img" : "txt2img")}");
+        Logs.Verbose($"[HartsyInference][Flux.2] First ids: [{string.Join(",", tokenIds.Take(12))}]");
 
         long start = Environment.TickCount64;
         Action<GenerationProgress> bridge = p =>
@@ -252,6 +294,40 @@ public static class Flux2Loader
         {
             img2img?.SourceTensor?.Dispose();
         }
+    }
+
+    /// <summary>Flux.2 Dev system prompt — verbatim from ComfyUI <c>comfy/text_encoders/flux.py</c> <c>Flux2Tokenizer.llama_template</c> (the newline mid-sentence is in the original).</summary>
+    private const string MistralDevSystemPrompt =
+        "You are an AI that reasons about image descriptions. You give structured responses focusing on object relationships, object\nattribution and actions without speculation.";
+
+    private const string MistralTokenizerJsonUrl =
+        "https://huggingface.co/unsloth/Mistral-Small-3.1-24B-Instruct-2503/resolve/main/tokenizer.json";
+
+    /// <summary>Builds Flux.2 Dev conditioning ids: <c>&lt;s&gt;[SYSTEM_PROMPT]sys[/SYSTEM_PROMPT][INST]prompt[/INST]</c>.
+    /// The special markers are spliced as raw ids (BOS=1, [SYSTEM_PROMPT]=17, [/SYSTEM_PROMPT]=18, [INST]=3,
+    /// [/INST]=4) around byte-level BPE segments — special strings are pre-token boundaries in the HF
+    /// reference, so segment-wise encoding is id-exact. No EOS (ComfyUI <c>has_end_token=False</c>).</summary>
+    private static int[] BuildMistralDevTokenIds(ErnieTokenizer tokenizer, string prompt)
+    {
+        List<int> ids = new(256) { 1, 17 };
+        ids.AddRange(tokenizer.EncodeRaw(ByteLevelCodec.Encode(MistralDevSystemPrompt)));
+        ids.Add(18);
+        ids.Add(3);
+        ids.AddRange(tokenizer.EncodeRaw(ByteLevelCodec.Encode(prompt)));
+        ids.Add(4);
+        return ids.ToArray();
+    }
+
+    /// <summary>Ensures the Mistral-Small-3 HF tokenizer.json is present at <c>Models/clip/mistral3_flux2_tokenizer.json</c>, downloading the official conversion on first use.</summary>
+    private static string EnsureMistralTokenizerJson(Action<string> log)
+    {
+        string path = Path.Combine(Program.T2IModelSets["Clip"].DownloadFolderPath, "mistral3_flux2_tokenizer.json");
+        if (!File.Exists(path))
+        {
+            log($"Downloading Mistral tokenizer.json from {MistralTokenizerJsonUrl}...");
+            Utilities.DownloadFile(MistralTokenizerJsonUrl, path, null).Wait();
+        }
+        return path;
     }
 
     /// <summary>Filename-based variant guess. Used as the initial config to pick which Qwen
@@ -331,13 +407,19 @@ public sealed class Flux2CacheEntry : IDisposable
     public required string CompatClass { get; init; }
     public required Flux2Pipeline Pipeline { get; init; }
     public required Flux2Config Flux2Config { get; init; }
-    public required Qwen3Tokenizer Tokenizer { get; init; }
+    /// <summary>Klein variants only; null for Dev (see <see cref="MistralTokenizer"/>).</summary>
+    public Qwen3Tokenizer Tokenizer { get; init; }
+    /// <summary>Dev only — Mistral tekken as an HF-BPE tokenizer.json; null for Klein.</summary>
+    public ErnieTokenizer MistralTokenizer { get; init; }
     public required LlamaStyleEncoder Encoder { get; init; }
     public required Flux2Transformer Transformer { get; init; }
     public required VaeDecoder Vae { get; init; }
     public required Tensor BnMean { get; init; }
     public required Tensor BnVar { get; init; }
-    public required SafeTensorsLoader CheckpointLoader { get; init; }
+    /// <summary>Null for GGUF checkpoints (see <see cref="GgufHandle"/>).</summary>
+    public SafeTensorsLoader CheckpointLoader { get; init; }
+    /// <summary>Owns the memory-mapped GGUF when the checkpoint was a .gguf; null for safetensors.</summary>
+    public IDisposable GgufHandle { get; init; }
     public required SafeTensorsLoader QwenLoader { get; init; }
     public required SafeTensorsLoader VaeLoader { get; init; }
 
@@ -350,8 +432,10 @@ public sealed class Flux2CacheEntry : IDisposable
         _disposed = true;
         (Pipeline as IDisposable)?.Dispose();
         Tokenizer?.Dispose();
+        MistralTokenizer?.Dispose();
         Encoder?.Dispose();
         CheckpointLoader?.Dispose();
+        GgufHandle?.Dispose();
         QwenLoader?.Dispose();
         VaeLoader?.Dispose();
     }

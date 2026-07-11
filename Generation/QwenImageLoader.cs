@@ -13,6 +13,10 @@ using HartsyInference.ModelHandler.CheckpointConverters;
 using HartsyInference.ModelHandler.Gguf;
 using HartsyInference.ModelHandler.SafeTensors;
 using HartsyInference.Tokenizers;
+using HartsyInference.Diffusion.Utilities;
+using SixLabors.ImageSharp.Processing;
+using ISImage = SixLabors.ImageSharp.Image;
+using SixLabors.ImageSharp.PixelFormats;
 
 namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
@@ -133,8 +137,38 @@ public static class QwenImageLoader
             vaeEncoder.LoadWeights(vaeWeights);
         }
 
+        // 4. Qwen-Image-Edit: load the Qwen2.5-VL VISION tower from the same TE weights (the ComfyUI-style
+        // TE files carry the full `visual.*` tower alongside the language model). Swarm classes the edit
+        // checkpoints as qwen-image-edit (2509, ref "index" method) / qwen-image-edit-plus (2511,
+        // "index_timestep_zero" — detected via the checkpoint's __index_timestep_zero__ marker key).
+        string classId = model.ModelClass?.ID ?? "";
+        bool isEditModel = classId is "qwen-image-edit" or "qwen-image-edit-plus";
+        bool refTimestepZero = classId == "qwen-image-edit-plus";
+        Qwen25VlVisionEncoder visionEncoder = null;
+        Qwen25VlMultimodalEncoder multimodalEncoder = null;
+        if (isEditModel)
+        {
+            IReadOnlyDictionary<string, Tensor> teDict = converted.TextEncoder.Count > 0
+                ? converted.TextEncoder
+                : encoderLoader.GetAllTensors();
+            if (teDict.ContainsKey("visual.patch_embed.proj.weight"))
+            {
+                log("Building Qwen2.5-VL vision tower (edit conditioning)...");
+                Qwen25VlVisionConfig visionConfig = Qwen25VlVisionConfig.Qwen2_5_VL_7B;
+                visionEncoder = new Qwen25VlVisionEncoder(visionConfig);
+                visionEncoder.LoadWeights(teDict);
+                multimodalEncoder = new Qwen25VlMultimodalEncoder(
+                    textEncoder, visionEncoder, new Qwen25VlImageProcessor(visionConfig));
+            }
+            else
+            {
+                log("WARNING: text-encoder weights carry no visual.* tower — edit runs text-only (degraded fidelity).");
+            }
+        }
+
         log("Building Qwen-Image pipeline...");
-        QwenImagePipeline pipeline = new QwenImagePipeline(backend, textEncoder, transformer, vae, vaeEncoder, config);
+        QwenImagePipeline pipeline = new QwenImagePipeline(
+            backend, textEncoder, transformer, vae, vaeEncoder, multimodalEncoder, config);
 
         log("Loading Qwen tokenizer (embedded)...");
         Qwen3Tokenizer tokenizer = new Qwen3Tokenizer(maxLength: 512);
@@ -151,6 +185,9 @@ public static class QwenImageLoader
             Transformer = transformer,
             Vae = vae,
             VaeEncoder = vaeEncoder,
+            VisionEncoder = visionEncoder,
+            MultimodalEncoder = multimodalEncoder,
+            RefTimestepZero = refTimestepZero,
             CheckpointLoader = mainLoader,
             GgufHandle = ggufHandle,
             EncoderLoader = encoderLoader,
@@ -179,13 +216,55 @@ public static class QwenImageLoader
         // pipeline has no attention mask, so padding would pollute conditioning; the encoder is causal
         // so real-token hidden states are unaffected by dropping the (absent) pad positions. Qwen2.5 and
         // Qwen3 share the same base BPE merges, so these IDs match the real Qwen2.5-VL tokenizer.
-        var (promptTokens, promptDrop) = EncodeWithTemplate(entry.Tokenizer, prompt);
-        var (negTokens, negDrop) = EncodeWithTemplate(entry.Tokenizer, negative);
+        // Qwen-Image-Edit with a reference: the Init Image is the EDIT REFERENCE, not an img2img source —
+        // it conditions the generation twice (VAE reference latent appended to the DiT token stream + vision
+        // tokens inside the Qwen2.5-VL chat template), while the output latent starts from pure noise
+        // (ComfyUI TextEncodeQwenImageEdit[Plus] semantics).
+        // Reference images, in Picture order: the Init Image first (the primary edit subject), then any
+        // Prompt Images (Swarm's Image Prompting group / <image:...> prompt syntax). The edit-plus (2511)
+        // checkpoints are trained with up to 3 references; extras are dropped with a log.
+        List<SwarmUI.Utils.Image> refImagesRaw = new(4);
+        SwarmUI.Utils.Image initImageRaw = input.Get(T2IParamTypes.InitImage);
+        if (initImageRaw is not null) refImagesRaw.Add(initImageRaw);
+        List<SwarmUI.Utils.Image> promptImages = input.Get(T2IParamTypes.PromptImages);
+        if (promptImages is not null) refImagesRaw.AddRange(promptImages);
+        if (refImagesRaw.Count > 3)
+        {
+            Logs.Warning($"[HartsyInference][Qwen-Image] {refImagesRaw.Count} reference images given; " +
+                "the edit-plus checkpoints are trained with at most 3 — using the first 3.");
+            refImagesRaw.RemoveRange(3, refImagesRaw.Count - 3);
+        }
+        bool editRoute = entry.MultimodalEncoder is not null && refImagesRaw.Count > 0;
+        List<Tensor> editVaeRefs = null, editVisionRefs = null;
+        int[] promptTokens, negTokens;
+        int promptDrop, negDrop;
+        if (editRoute)
+        {
+            editVaeRefs = new List<Tensor>(refImagesRaw.Count);
+            editVisionRefs = new List<Tensor>(refImagesRaw.Count);
+            int[] padCounts = new int[refImagesRaw.Count];
+            for (int r = 0; r < refImagesRaw.Count; r++)
+            {
+                (Tensor vaeRef, Tensor visionRef) = BuildEditReferences(refImagesRaw[r]);
+                editVaeRefs.Add(vaeRef);
+                editVisionRefs.Add(visionRef);
+                padCounts[r] = entry.MultimodalEncoder.CountImageTokens(visionRef);
+            }
+            (promptTokens, promptDrop) = EncodeWithEditTemplate(entry.Tokenizer, prompt, padCounts);
+            (negTokens, negDrop) = EncodeWithEditTemplate(entry.Tokenizer, negative, padCounts);
+            Logs.Verbose($"[HartsyInference][Qwen-Image] edit route: {refImagesRaw.Count} reference(s), " +
+                $"[{string.Join(", ", padCounts)}] vision tokens, timestepZero={entry.RefTimestepZero}.");
+        }
+        else
+        {
+            (promptTokens, promptDrop) = EncodeWithTemplate(entry.Tokenizer, prompt);
+            (negTokens, negDrop) = EncodeWithTemplate(entry.Tokenizer, negative);
+        }
 
-        // Img2img / edit: an Init Image routes through the Qwen-Image VAE encoder (flow-matching AddNoise at
-        // the strength-selected step); an additional Mask Image enables the blend-on-vanilla inpaint path —
-        // same request contract as Flux.
-        Img2ImgResolver.Img2ImgSpec img2img = Img2ImgResolver.Resolve(input, width, height);
+        // Img2img / inpaint (non-edit models): an Init Image routes through the Qwen-Image VAE encoder
+        // (flow-matching AddNoise at the strength-selected step); an additional Mask Image enables the
+        // blend-on-vanilla inpaint path — same request contract as Flux.
+        Img2ImgResolver.Img2ImgSpec img2img = editRoute ? null : Img2ImgResolver.Resolve(input, width, height);
         int? seed = seedLong < 0 ? null : (int?)(int)(seedLong & 0x7FFFFFFF);
         TextToImageRequest request;
         if (img2img is not null)
@@ -229,7 +308,9 @@ public static class QwenImageLoader
         {
             var (rgbBytes, outW, outH, _) = entry.Pipeline.GenerateFromTokens(
                 promptTokens, negTokens, request, bridge,
-                promptDropIndex: promptDrop, negativeDropIndex: negDrop);
+                promptDropIndex: promptDrop, negativeDropIndex: negDrop,
+                editRefImages: editVaeRefs, editRefTimestepZero: entry.RefTimestepZero,
+                editRefVisionImages: editVisionRefs);
 
             Logs.Verbose($"[HartsyInference][Qwen-Image] Pipeline returned {outW}x{outH} in {Environment.TickCount64 - start}ms.");
             return new[] { RgbToImage.FromHwcRgb(rgbBytes, outW, outH) };
@@ -237,7 +318,103 @@ public static class QwenImageLoader
         finally
         {
             img2img?.Dispose();
+            if (editVaeRefs is not null) foreach (Tensor t in editVaeRefs) t.Dispose();
+            if (editVisionRefs is not null) foreach (Tensor t in editVisionRefs) t.Dispose();
         }
+    }
+
+    /// <summary>Builds the two edit-reference tensors from the init image (ComfyUI
+    /// <c>TextEncodeQwenImageEditPlus</c> recipe): the VAE reference rescaled to ~1MP area (dims rounded to
+    /// 16 — VAE 8× plus 2×2 packing) in the engine's [-1,1] NCHW contract, and the vision-tower reference
+    /// rescaled to ~384² area in the Qwen image-processor's [0,1] contract (it smart-resizes to the
+    /// 28-multiple grid itself). Box resampling ≈ upstream's "area" mode.</summary>
+    private static unsafe (Tensor vaeRef, Tensor visionRef) BuildEditReferences(SwarmUI.Utils.Image initImage)
+    {
+        using var frame = ISImage.Load<Rgb24>(initImage.RawData);
+        int srcW = frame.Width, srcH = frame.Height;
+
+        double vaeScale = Math.Sqrt(1024.0 * 1024.0 / ((double)srcW * srcH));
+        int vaeW = Math.Max(16, (int)Math.Round(srcW * vaeScale / 16.0) * 16);
+        int vaeH = Math.Max(16, (int)Math.Round(srcH * vaeScale / 16.0) * 16);
+        Tensor vaeRef;
+        using (var vaeFrame = frame.Clone(ctx => ctx.Resize(new ResizeOptions
+        {
+            Size = new SixLabors.ImageSharp.Size(vaeW, vaeH),
+            Mode = ResizeMode.Stretch,
+            Sampler = KnownResamplers.Box,
+        })))
+        {
+            byte[] rgb = new byte[vaeW * vaeH * 3];
+            vaeFrame.CopyPixelDataTo(rgb);
+            vaeRef = ImagePostProcessor.RgbBytesToTensor(rgb, vaeW, vaeH);
+        }
+
+        double visScale = Math.Sqrt(384.0 * 384.0 / ((double)srcW * srcH));
+        int visW = Math.Max(28, (int)Math.Round(srcW * visScale));
+        int visH = Math.Max(28, (int)Math.Round(srcH * visScale));
+        Tensor visionRef;
+        using (var visFrame = frame.Clone(ctx => ctx.Resize(new ResizeOptions
+        {
+            Size = new SixLabors.ImageSharp.Size(visW, visH),
+            Mode = ResizeMode.Stretch,
+            Sampler = KnownResamplers.Box,
+        })))
+        {
+            byte[] rgb = new byte[visW * visH * 3];
+            visFrame.CopyPixelDataTo(rgb);
+            visionRef = new Tensor(new HartsyInference.Core.Tensors.TensorShape(1, 3, visH, visW), DType.F32);
+            float* dst = (float*)visionRef.DataPointer;
+            for (int y = 0; y < visH; y++)
+                for (int x = 0; x < visW; x++)
+                {
+                    int po = (y * visW + x) * 3;
+                    for (int c = 0; c < 3; c++)
+                        dst[(long)c * visH * visW + (long)y * visW + x] = rgb[po + c] / 255.0f;
+                }
+        }
+        return (vaeRef, visionRef);
+    }
+
+    /// <summary>The edit-mode system prompt (ComfyUI <c>QwenImageTokenizer.llama_template_images</c> /
+    /// <c>TextEncodeQwenImageEditPlus</c>).</summary>
+    private const string QwenImageEditSystemPrompt =
+        "system\nDescribe the key features of the input image (color, shape, size, texture, objects, " +
+        "background), then explain how the user's text instruction should alter or modify the image. " +
+        "Generate a new image that meets the user's requirements while maintaining consistency with the " +
+        "original input where appropriate.";
+
+    /// <summary>Builds the Qwen-Image-Edit templated token sequence: edit system prompt, then a user turn of
+    /// <c>Picture 1: &lt;|vision_start|&gt;&lt;|image_pad|&gt;×N&lt;|vision_end|&gt;</c> followed by the
+    /// instruction. The drop index lands after the <c>user\n</c> header — the same position ComfyUI's
+    /// dynamic rule (second <c>&lt;|im_start|&gt;</c> + 3) resolves to for this template, so the retained
+    /// hidden states START at the Picture block (vision tokens are kept, template preamble dropped). No
+    /// 512-token cap: the vision run alone is commonly 100-300 tokens.</summary>
+    private static (int[] tokens, int dropIndex) EncodeWithEditTemplate(Qwen3Tokenizer tokenizer, string prompt, int[] imagePadCounts)
+    {
+        int totalPads = 0;
+        foreach (int c in imagePadCounts) totalPads += c;
+        List<int> ids = new(totalPads + 128);
+        ids.Add(Qwen3Tokenizer.ImStartId);
+        ids.AddRange(tokenizer.EncodeRaw(QwenImageEditSystemPrompt));
+        ids.Add(Qwen3Tokenizer.ImEndId);
+        ids.AddRange(tokenizer.EncodeRaw("\n"));
+        ids.Add(Qwen3Tokenizer.ImStartId);
+        ids.AddRange(tokenizer.EncodeRaw("user\n"));
+        int dropIndex = ids.Count;                         // everything above is the discarded prefix
+        for (int img = 0; img < imagePadCounts.Length; img++)
+        {
+            ids.AddRange(tokenizer.EncodeRaw($"Picture {img + 1}: "));
+            ids.Add(Qwen25VlMultimodalEncoder.VisionStartId);
+            for (int i = 0; i < imagePadCounts[img]; i++)
+                ids.Add(Qwen25VlMultimodalEncoder.ImageTokenId);
+            ids.Add(Qwen25VlMultimodalEncoder.VisionEndId);
+        }
+        ids.AddRange(tokenizer.EncodeRaw(prompt));
+        ids.Add(Qwen3Tokenizer.ImEndId);
+        ids.AddRange(tokenizer.EncodeRaw("\n"));
+        ids.Add(Qwen3Tokenizer.ImStartId);
+        ids.AddRange(tokenizer.EncodeRaw("assistant\n"));
+        return (ids.ToArray(), dropIndex);
     }
 
     /// <summary>The exact system prompt Qwen-Image conditions on (diffusers
@@ -299,6 +476,12 @@ public sealed class QwenImageCacheEntry : IDisposable
     public required QwenImageTransformer Transformer { get; init; }
     public required QwenImageVaeDecoder Vae { get; init; }
     public QwenImageVaeEncoder VaeEncoder { get; init; }
+    /// <summary>Qwen2.5-VL vision tower — non-null only for edit checkpoints whose TE file carried <c>visual.*</c>.</summary>
+    public Qwen25VlVisionEncoder VisionEncoder { get; init; }
+    /// <summary>Multimodal (vision-conditioned) encode path; non-null iff <see cref="VisionEncoder"/> is.</summary>
+    public Qwen25VlMultimodalEncoder MultimodalEncoder { get; init; }
+    /// <summary>2511 edit checkpoints modulate reference tokens at t=0 (qwen-image-edit-plus).</summary>
+    public bool RefTimestepZero { get; init; }
     /// <summary>Null for GGUF checkpoints (see <see cref="GgufHandle"/>).</summary>
     public SafeTensorsLoader CheckpointLoader { get; init; }
     /// <summary>Owns the memory-mapped GGUF when the checkpoint was a .gguf; null for safetensors.</summary>
@@ -319,6 +502,7 @@ public sealed class QwenImageCacheEntry : IDisposable
         Transformer?.Dispose();
         // VaeDecoder isn't IDisposable (no owned native handles freed here).
         VaeEncoder?.Dispose();
+        VisionEncoder?.Dispose();
         CheckpointLoader?.Dispose();
         GgufHandle?.Dispose();
         EncoderLoader?.Dispose();

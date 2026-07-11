@@ -659,6 +659,14 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                     _cache.PutLumina2(entry);
                 });
             }
+            else if (compat == HunyuanImageLoader.HunyuanImageCompatClassId)
+            {
+                await Task.Run(() =>
+                {
+                    HunyuanImageCacheEntry entry = HunyuanImageLoader.Load(_backend, model, input, msg => AddLoadStatus(msg));
+                    _cache.PutHunyuanImage(entry);
+                });
+            }
             else if (compat == OmniGen2Loader.OmniGen2CompatClassId)
             {
                 await Task.Run(() =>
@@ -1070,6 +1078,12 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                     Lumina2CacheEntry entry = _cache.TryGetLumina2(model.Name)
                         ?? throw new InvalidOperationException("Lumina-2 model loaded but not in cache.");
                     return Lumina2Loader.Generate(entry, _backend, input, progressBridge, cancel);
+                }
+                if (compat == HunyuanImageLoader.HunyuanImageCompatClassId)
+                {
+                    HunyuanImageCacheEntry entry = _cache.TryGetHunyuanImage(model.Name)
+                        ?? throw new InvalidOperationException("HunyuanImage model loaded but not in cache.");
+                    return HunyuanImageLoader.Generate(entry, input, progressBridge, cancel);
                 }
                 if (compat == OmniGen2Loader.OmniGen2CompatClassId)
                 {
@@ -1840,13 +1854,20 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             BooguImageLoader.BooguImageCompatClassId => _cache.TryGetBooguImage(modelName) is not null,
             ErnieImageLoader.ErnieImageCompatClassId => _cache.TryGetErnieImage(modelName) is not null,
             Lumina2Loader.Lumina2CompatClassId => _cache.TryGetLumina2(modelName) is not null,
+            HunyuanImageLoader.HunyuanImageCompatClassId => _cache.TryGetHunyuanImage(modelName) is not null,
             OmniGen2Loader.OmniGen2CompatClassId => _cache.TryGetOmniGen2(modelName) is not null,
             ZImageLoader.ZImageCompatClassId => _cache.TryGetZImage(modelName) is not null,
             AnimaLoader.AnimaCompatClassId => _cache.TryGetAnima(modelName) is not null,
             HiDreamLoader.HiDreamI1CompatClassId => _cache.TryGetHiDream(modelName) is not null,
             QwenImageLoader.QwenImageCompatClassId => _cache.TryGetQwenImage(modelName) is not null,
+            // Every Wan conditioning variant shares the plain-Wan compat classes but caches in its own slot —
+            // check ALL of them. Only probing TryGetWanVideo made every S2V/VACE/Animate repeat-gen a "Model
+            // cache MISS" that rebuilt the whole pipeline (and re-encoded the TE) despite a warm entry.
             WanVideoLoader.Wan22_5BCompatClassId or WanVideoLoader.Wan21_1_3BCompatClassId
-                or WanVideoLoader.Wan21_14BCompatClassId => _cache.TryGetWanVideo(modelName) is not null,
+                or WanVideoLoader.Wan21_14BCompatClassId => _cache.TryGetWanVideo(modelName) is not null
+                    || _cache.TryGetWanS2V(modelName) is not null
+                    || _cache.TryGetWanVace(modelName) is not null
+                    || _cache.TryGetWanAnimate(modelName) is not null,
             LtxVideoLoader.LtxVideoCompatClassId => _cache.TryGetLtxVideo(modelName) is not null,
             LtxVideo2Loader.LtxVideo2CompatClassId => _cache.TryGetLtxVideo2(modelName) is not null,
             AceStepLoader.AceStepCompatClassId => _cache.TryGetAceStep(modelName) is not null || _cache.TryGetAceStep15(modelName) is not null,

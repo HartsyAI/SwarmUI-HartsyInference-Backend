@@ -30,6 +30,7 @@ public static class ModelSupport
         BooguImageLoader.BooguImageCompatClassId, // "boogu" (core-detected) — 10B OmniGen2/Lumina-2 DiT + Qwen3-VL-8B + FLUX.1 VAE; T2I + reference-image edit (Apache-2.0)
         ErnieImageLoader.ErnieImageCompatClassId,
         Lumina2Loader.Lumina2CompatClassId,   // "lumina-2" — Gemma-2-2B live encode (hidden_states[-2])
+        HunyuanImageLoader.HunyuanImageCompatClassId, // "hunyuan-image-2_1" — Qwen2.5-VL-7B live encode (ByT5 glyph branch pending)
         OmniGen2Loader.OmniGen2CompatClassId, // "omnigen-2" — Qwen2.5-VL-3B live encode (ComfyUI-template parity) // "ernie-image" — Baidu ~8B single-stream DiT + Ministral-3-3B TE + Flux.2 VAE (Apache-2.0)
         ZImageLoader.ZImageCompatClassId,         // "z-image"
         AnimaLoader.AnimaCompatClassId,           // "anima" — Cosmos-Predict2-2B family + LlmAdapter
@@ -77,10 +78,6 @@ public static class ModelSupport
         // MusicGen: extension loader (MusicGenLoader.cs) fully written; engine is missing the
         // EnCodec-32kHz preset, T5-Base preset, and the converter's bundled-text-encoder path.
         [MusicGenLoader.MusicGenCompatClassId] = "MusicGen (engine missing EnCodec-32kHz/T5-Base presets + text-encoder converter path)",
-        // HunyuanImage: the HartsyInference pipeline exists and the E2E test runs, BUT it substitutes
-        // T5-XXL for the real Qwen2.5-VL MLLM primary encoder (and drops the byT5 glyph stream), so
-        // output wouldn't match the real model. Refuse until the engine wires the correct encoders.
-        ["hunyuan-image-2_1"] = "HunyuanImage (HartsyInference pipeline uses T5-XXL as a stand-in for the real Qwen2.5-VL encoder — not faithful yet)",
     };
 
     public static bool IsArchitectureSupported(string compatClass)

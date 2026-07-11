@@ -184,6 +184,10 @@ public static class WanVideoLoader
         WanVideoCacheEntry entry, IReadOnlyList<LoraResolver.LoraSpec> loras, IBackend backend, T2IParamInput input,
         Action<GenerationProgress> onProgress, CancellationToken cancel)
     {
+        // A KEEP_MODELS-resident base DiT from a prior no-LoRA generation can't coexist with the merged
+        // transformer's preload — free it up front (the next no-LoRA generation re-uploads it).
+        backend.FreeWeights(entry.Transformer.EnumerateWeights());
+        backend.TrimMemoryPool();
         Dictionary<string, Tensor> transformerWeights = LoraApplier.ShallowClone(entry.TransformerWeights);
         LoraStack stack = LoraApplier.BuildAndApply(loras, backend, transformerWeights: transformerWeights);
         WanVideoTransformer transformer = new WanVideoTransformer(entry.Config);
@@ -239,22 +243,49 @@ public static class WanVideoLoader
             (width, height) = VideoParamResolver.ResolveResolution(input, multiple: entry.Config.VaeSpatialCompression);
         }
 
-        // Encode the prompt pair, then free the encoder before the DiT preload.
+        // Encode the prompt pair — cached across generations keyed on the token ids (the LTX/Flux
+        // prompt-cache pattern): a HIT skips the whole umT5 phase including its multi-GB weight upload.
+        // The cached tensors are host-materialized (built host-side + ZeroPaddedRows touches them), so
+        // they survive the pipeline's per-step FreeActivations sweeps and re-fault to device on use.
         int[] promptTokens = entry.Tokenizer.Encode(prompt);
         int[] negTokens = entry.Tokenizer.Encode(negative);
-        Tensor batch = entry.Umt5.Encode(backend,
-            [promptTokens, negTokens],
-            [T5Tokenizer.CreateAttentionMask(promptTokens), T5Tokenizer.CreateAttentionMask(negTokens)]);
-        Tensor promptEmbeds = CfgHelper.SliceBatchElement(batch, 0, TokenLength, entry.Config.TextDim);
-        Tensor negEmbeds = CfgHelper.SliceBatchElement(batch, 1, TokenLength, entry.Config.TextDim);
-        batch.Dispose();
-        // Wan's DiT cross-attends over all 512 context rows with NO text mask — the reference
-        // (diffusers WanPipeline / Comfy) zero-pads embeddings past the real tokens. umT5 emits
-        // garbage at pad positions; leaving it in drowns the prompt and denoises to a flat clip.
-        ZeroPaddedRows(promptEmbeds, promptTokens, entry.Config.TextDim);
-        ZeroPaddedRows(negEmbeds, negTokens, entry.Config.TextDim);
-        backend.Sync();
-        backend.FreeWeights(entry.Umt5.EnumerateWeights());
+        bool textHit = entry.CachedPromptTokens is not null && entry.CachedNegTokens is not null
+            && promptTokens.AsSpan().SequenceEqual(entry.CachedPromptTokens)
+            && negTokens.AsSpan().SequenceEqual(entry.CachedNegTokens);
+        Tensor promptEmbeds, negEmbeds;
+        if (textHit)
+        {
+            promptEmbeds = entry.CachedPromptEmbeds;
+            negEmbeds = entry.CachedNegEmbeds;
+            Logs.Info("[HartsyInference][Wan] [wan-phase] umT5 prompt cache HIT — text encode skipped.");
+        }
+        else
+        {
+            long teStart = Environment.TickCount64;
+            // The umT5 upload may not fit beside a KEEP_MODELS-resident DiT from a prior generation —
+            // decide from measured free VRAM and evict the DiT when short (the denoise re-uploads it).
+            EnsureEncoderHeadroom(backend, entry, entry.Umt5.EnumerateWeights(), "umT5");
+            Tensor batch = entry.Umt5.Encode(backend,
+                [promptTokens, negTokens],
+                [T5Tokenizer.CreateAttentionMask(promptTokens), T5Tokenizer.CreateAttentionMask(negTokens)]);
+            promptEmbeds = CfgHelper.SliceBatchElement(batch, 0, TokenLength, entry.Config.TextDim);
+            negEmbeds = CfgHelper.SliceBatchElement(batch, 1, TokenLength, entry.Config.TextDim);
+            batch.Dispose();
+            // Wan's DiT cross-attends over all 512 context rows with NO text mask — the reference
+            // (diffusers WanPipeline / Comfy) zero-pads embeddings past the real tokens. umT5 emits
+            // garbage at pad positions; leaving it in drowns the prompt and denoises to a flat clip.
+            ZeroPaddedRows(promptEmbeds, promptTokens, entry.Config.TextDim);
+            ZeroPaddedRows(negEmbeds, negTokens, entry.Config.TextDim);
+            backend.Sync();
+            backend.FreeWeights(entry.Umt5.EnumerateWeights());
+            entry.CachedPromptEmbeds?.Dispose();
+            entry.CachedNegEmbeds?.Dispose();
+            entry.CachedPromptEmbeds = promptEmbeds;
+            entry.CachedNegEmbeds = negEmbeds;
+            entry.CachedPromptTokens = promptTokens;
+            entry.CachedNegTokens = negTokens;
+            Logs.Info($"[HartsyInference][Wan] [wan-phase] umT5 prompt cache MISS — encode+free {Environment.TickCount64 - teStart}ms.");
+        }
 
         // Sigma Shift: honor the user's param when set; otherwise default to ComfyUI's Wan sampling shift
         // (8.0, comfy supported_models WAN21_T2V — inherited by I2V/VACE) rather than the official-repo
@@ -271,30 +302,49 @@ public static class WanVideoLoader
         long start = Environment.TickCount64;
         Action<GenerationProgress> bridge = p => { cancel.ThrowIfCancellationRequested(); onProgress(p); };
 
-        try
+        // promptEmbeds/negEmbeds/imageEmbeds are intentionally never disposed here — they are the
+        // cross-generation caches (tiny, host-materialized; freed on the next cache miss or in
+        // WanVideoCacheEntry.Dispose).
         {
             // Concat-conditioned I2V (Wan2.1 I2V-14B with CLIP, or Wan2.2 I2V-A14B without): 36-ch
             // [noise, mask, cond-latent] input. CLIP embeds are added only when the variant has an image embedder.
             bool isConcatI2V = entry.Config.InChannels > entry.Config.VaeLatentChannels;
             if (isConcatI2V && initImage is not null)
             {
+                // CLIP image embeddings cached keyed on the raw init-image bytes — a same-image repeat
+                // skips the CLIP-ViT-H upload+encode (the embed depends only on the image; the 224²
+                // preprocess is resolution-independent of the target clip size).
                 Tensor imageEmbeds = null;
                 if (entry.IsClipI2V && entry.ClipVision is not null)
                 {
-                    backend.PreloadWeights(entry.ClipVision.EnumerateWeights());
-                    Tensor pixels = ClipImagePreprocessor.Process(initImage, imageSize: 224);
-                    Tensor imageEmbedsBatched = entry.ClipVision.EncodeHiddenStates(backend, pixels);   // [1, 257, 1280]
-                    pixels.Dispose();
-                    backend.Sync();
-                    backend.FreeWeights(entry.ClipVision.EnumerateWeights());
-                    imageEmbeds = DropBatch(imageEmbedsBatched);
-                    imageEmbedsBatched.Dispose();
+                    string imageKey = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(initImage.RawData));
+                    if (entry.CachedImageEmbeds is not null && imageKey == entry.CachedImageKey)
+                    {
+                        imageEmbeds = entry.CachedImageEmbeds;
+                        Logs.Info("[HartsyInference][Wan] [wan-phase] CLIP image cache HIT — vision encode skipped.");
+                    }
+                    else
+                    {
+                        long clipStart = Environment.TickCount64;
+                        EnsureEncoderHeadroom(backend, entry, entry.ClipVision.EnumerateWeights(), "CLIP-ViT-H");
+                        backend.PreloadWeights(entry.ClipVision.EnumerateWeights());
+                        Tensor pixels = ClipImagePreprocessor.Process(initImage, imageSize: 224);
+                        Tensor imageEmbedsBatched = entry.ClipVision.EncodeHiddenStates(backend, pixels);   // [1, 257, 1280]
+                        pixels.Dispose();
+                        backend.Sync();
+                        backend.FreeWeights(entry.ClipVision.EnumerateWeights());
+                        imageEmbeds = DropBatch(imageEmbedsBatched);   // host copy — survives activation sweeps
+                        imageEmbedsBatched.Dispose();
+                        entry.CachedImageEmbeds?.Dispose();
+                        entry.CachedImageEmbeds = imageEmbeds;
+                        entry.CachedImageKey = imageKey;
+                        Logs.Info($"[HartsyInference][Wan] [wan-phase] CLIP image cache MISS — encode+free {Environment.TickCount64 - clipStart}ms.");
+                    }
                 }
 
                 byte[] frameRgb = RgbToImage.ToHwcRgbResized(initImage, width, height);
                 (byte[][] f2, int w2, int h2, _) = pipeline.GenerateImageToVideoConcat(
                     promptEmbeds, negEmbeds, imageEmbeds, frameRgb, request, numFrames, bridge);
-                imageEmbeds?.Dispose();
                 Logs.Verbose($"[HartsyInference][Wan] Concat-I2V returned {f2.Length} frames {w2}x{h2} in {Environment.TickCount64 - start}ms.");
                 return new[] { VideoParamResolver.FinishVideo(f2, w2, h2, input, cancel) };
             }
@@ -322,10 +372,26 @@ public static class WanVideoLoader
             }
             finally { firstFrameLatent?.Dispose(); }
         }
-        finally
+    }
+
+    /// <summary>Frees the (possibly KEEP_MODELS-resident) DiT device weights before an encoder upload when the encoder doesn't fit beside it (measured free VRAM, 2 GB margin); trims the pool first so slack from the previous generation doesn't make the reading pessimistic.</summary>
+    private static void EnsureEncoderHeadroom(IBackend backend, WanVideoCacheEntry entry, IEnumerable<Tensor> encoderWeights, string label)
+    {
+        backend.TrimMemoryPool();
+        long need = 0;
+        foreach (Tensor t in encoderWeights) need += t.DType.ComputeByteCount(t.ElementCount);
+        long free = backend.FreeMemoryBytes();
+        if (free < need + (2L << 30))
         {
-            promptEmbeds.Dispose();
-            negEmbeds.Dispose();
+            Logs.Info($"[HartsyInference][Wan] [wan-phase] {label} upload: evicting resident DiT " +
+                $"(free {free >> 20} MB < {need >> 20} MB + 2048 MB margin).");
+            backend.FreeWeights(entry.Transformer.EnumerateWeights());
+            backend.TrimMemoryPool();
+        }
+        else
+        {
+            Logs.Verbose($"[HartsyInference][Wan] [wan-phase] {label} fits beside the resident DiT " +
+                $"(free {free >> 20} MB ≥ {need >> 20} MB + 2048 MB margin).");
         }
     }
 
@@ -363,12 +429,26 @@ public sealed class WanVideoCacheEntry : IDisposable
     public SafeTensorsLoader ClipLoader { get; init; }
 
     public DateTime LastUsedUtc { get; set; } = DateTime.UtcNow;
+
+    /// <summary>Cross-generation umT5 prompt cache: token-id keys plus the two zero-padded host embedding tensors. A hit skips the whole umT5 upload+encode phase.</summary>
+    public int[] CachedPromptTokens { get; set; }
+    public int[] CachedNegTokens { get; set; }
+    public Tensor CachedPromptEmbeds { get; set; }
+    public Tensor CachedNegEmbeds { get; set; }
+
+    /// <summary>Cross-generation CLIP image-embedding cache keyed on the SHA-256 of the raw init-image bytes (Wan2.1 CLIP-I2V only).</summary>
+    public string CachedImageKey { get; set; }
+    public Tensor CachedImageEmbeds { get; set; }
+
     private bool _disposed;
 
     public void Dispose()
     {
         if (_disposed) return;
         _disposed = true;
+        CachedPromptEmbeds?.Dispose();
+        CachedNegEmbeds?.Dispose();
+        CachedImageEmbeds?.Dispose();
         (Pipeline as IDisposable)?.Dispose();
         Tokenizer?.Dispose();
         Umt5?.Dispose();

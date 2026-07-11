@@ -176,25 +176,102 @@ public static class WanS2VLoader
 
         var (width, height) = VideoParamResolver.ResolveResolution(input, multiple: entry.Config.VaeSpatialCompression);
 
+        // ── umT5 prompt cache keyed on the (pos, neg) token ids (the WanVideoLoader round-6 pattern): a HIT
+        // skips the whole umT5 phase including its multi-GB weight upload. Cached tensors are host-materialized
+        // (ZeroPaddedRows touches them), so they survive activation sweeps and re-fault to device on use. ──
         int[] promptTokens = entry.Tokenizer.Encode(prompt);
         int[] negTokens = entry.Tokenizer.Encode(negative);
-        Tensor batch = entry.Umt5.Encode(backend,
-            [promptTokens, negTokens],
-            [T5Tokenizer.CreateAttentionMask(promptTokens), T5Tokenizer.CreateAttentionMask(negTokens)]);
-        Tensor promptEmbeds = CfgHelper.SliceBatchElement(batch, 0, TokenLength, entry.Config.TextDim);
-        Tensor negEmbeds = CfgHelper.SliceBatchElement(batch, 1, TokenLength, entry.Config.TextDim);
-        batch.Dispose();
-        // Wan cross-attends all 512 context rows with NO text mask — umT5 pad rows are garbage that drowns
-        // the prompt (same fix as WanVideoLoader; this loader predates it).
-        WanVideoLoader.ZeroPaddedRows(promptEmbeds, promptTokens, entry.Config.TextDim);
-        WanVideoLoader.ZeroPaddedRows(negEmbeds, negTokens, entry.Config.TextDim);
-        backend.Sync();
-        backend.FreeWeights(entry.Umt5.EnumerateWeights());
+        bool textHit = entry.CachedPromptTokens is not null && entry.CachedNegTokens is not null
+            && promptTokens.AsSpan().SequenceEqual(entry.CachedPromptTokens)
+            && negTokens.AsSpan().SequenceEqual(entry.CachedNegTokens);
+        Tensor promptEmbeds, negEmbeds;
+        if (textHit)
+        {
+            promptEmbeds = entry.CachedPromptEmbeds;
+            negEmbeds = entry.CachedNegEmbeds;
+            Logs.Info("[HartsyInference][S2V] [wan-phase] umT5 prompt cache HIT — text encode skipped.");
+        }
+        else
+        {
+            long teStart = Environment.TickCount64;
+            // The umT5 upload may not fit beside a KEEP_MODELS-resident DiT from a prior generation — decide
+            // from measured free VRAM and evict the DiT when short (the denoise re-uploads it).
+            EnsureEncoderHeadroom(backend, entry, entry.Umt5.EnumerateWeights(), "umT5");
+            Tensor batch = entry.Umt5.Encode(backend,
+                [promptTokens, negTokens],
+                [T5Tokenizer.CreateAttentionMask(promptTokens), T5Tokenizer.CreateAttentionMask(negTokens)]);
+            promptEmbeds = CfgHelper.SliceBatchElement(batch, 0, TokenLength, entry.Config.TextDim);
+            negEmbeds = CfgHelper.SliceBatchElement(batch, 1, TokenLength, entry.Config.TextDim);
+            batch.Dispose();
+            // Wan cross-attends all 512 context rows with NO text mask — umT5 pad rows are garbage that drowns
+            // the prompt (same fix as WanVideoLoader; this loader predates it).
+            WanVideoLoader.ZeroPaddedRows(promptEmbeds, promptTokens, entry.Config.TextDim);
+            WanVideoLoader.ZeroPaddedRows(negEmbeds, negTokens, entry.Config.TextDim);
+            backend.Sync();
+            backend.FreeWeights(entry.Umt5.EnumerateWeights());
+            entry.CachedPromptEmbeds?.Dispose();
+            entry.CachedNegEmbeds?.Dispose();
+            entry.CachedPromptEmbeds = promptEmbeds;
+            entry.CachedNegEmbeds = negEmbeds;
+            entry.CachedPromptTokens = promptTokens;
+            entry.CachedNegTokens = negTokens;
+            Logs.Info($"[HartsyInference][S2V] [wan-phase] umT5 prompt cache MISS — encode+free {Environment.TickCount64 - teStart}ms.");
+        }
 
-        // Optional identity anchor: the Init Image slot carries the reference portrait (VAE-encoded to appended
-        // reference tokens by the pipeline — ComfyUI WanSoundImageToVideo's ref_image path).
+        // ── Wav2Vec2 stacked-feature cache keyed on the decoded waveform bytes: the features depend only on the
+        // audio (frame-count-independent — the cheap host-side 50 Hz→16 fps resample runs per gen below), so a
+        // same-audio repeat skips the whole Wav2Vec2 upload+encode. Host copy → survives activation sweeps. ──
+        string audioKey = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+            System.Runtime.InteropServices.MemoryMarshal.AsBytes(waveform.AsSpan())));
+        Tensor audioLayers;
+        if (entry.CachedAudioLayers is not null && audioKey == entry.CachedAudioKey)
+        {
+            audioLayers = entry.CachedAudioLayers;
+            Logs.Info("[HartsyInference][S2V] [wan-phase] Wav2Vec2 audio cache HIT — audio encode skipped.");
+        }
+        else
+        {
+            long audioStart = Environment.TickCount64;
+            EnsureEncoderHeadroom(backend, entry, entry.Wav2Vec2.EnumerateWeights(), "Wav2Vec2");
+            backend.PreloadWeights(entry.Wav2Vec2.EnumerateWeights());
+            Tensor allLayers = entry.Wav2Vec2.EncodeAllLayers(backend, waveform);   // [T50, layers, dim]
+            backend.Sync();
+            backend.FreeWeights(entry.Wav2Vec2.EnumerateWeights());
+            audioLayers = HostCopy(allLayers);
+            allLayers.Dispose();
+            entry.CachedAudioLayers?.Dispose();
+            entry.CachedAudioLayers = audioLayers;
+            entry.CachedAudioKey = audioKey;
+            Logs.Info($"[HartsyInference][S2V] [wan-phase] Wav2Vec2 audio cache MISS — encode+free {Environment.TickCount64 - audioStart}ms.");
+        }
+
+        // ── Optional identity anchor: the Init Image slot carries the reference portrait (VAE-encoded to appended
+        // reference tokens — ComfyUI WanSoundImageToVideo's ref_image path). The latent is cached keyed on the raw
+        // image bytes + target resolution (the encode resizes to the clip size), mirroring round 6's CLIP cache. ──
         Image initImage = input.Get(T2IParamTypes.InitImage);
-        byte[] referenceRgb24 = initImage is not null ? RgbToImage.ToHwcRgbResized(initImage, width, height) : null;
+        Tensor refLatent = null;
+        if (initImage is not null)
+        {
+            string refKey = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(initImage.RawData))
+                + $":{width}x{height}";
+            if (entry.CachedRefLatent is not null && refKey == entry.CachedRefKey)
+            {
+                refLatent = entry.CachedRefLatent;
+                Logs.Info("[HartsyInference][S2V] [wan-phase] reference-latent cache HIT — VAE encode skipped.");
+            }
+            else
+            {
+                long refStart = Environment.TickCount64;
+                byte[] referenceRgb24 = RgbToImage.ToHwcRgbResized(initImage, width, height);
+                Tensor refDev = entry.Pipeline.EncodeReferenceImage(referenceRgb24, width, height);   // [1, z, 1, hLat, wLat]
+                refLatent = HostCopy(refDev);
+                refDev.Dispose();
+                entry.CachedRefLatent?.Dispose();
+                entry.CachedRefLatent = refLatent;
+                entry.CachedRefKey = refKey;
+                Logs.Info($"[HartsyInference][S2V] [wan-phase] reference-latent cache MISS — encode+free {Environment.TickCount64 - refStart}ms.");
+            }
+        }
 
         // Sigma Shift: honor the user's param; default 8.0 = ComfyUI's Wan sampling shift (WAN22_S2V inherits
         // WAN21_T2V's sampling_settings).
@@ -208,15 +285,19 @@ public static class WanS2VLoader
 
         long start = Environment.TickCount64;
         Action<GenerationProgress> bridge = p => { cancel.ThrowIfCancellationRequested(); onProgress(p); };
-        // The pipeline runs Wav2Vec2 + the audio encoder before the DiT; their weights must be resident first
-        // (the pipeline only preloads the DiT itself).
-        backend.PreloadWeights(entry.Wav2Vec2.EnumerateWeights());
+        // Cheap host-side 50 Hz → 16 fps resample of the cached stacked features to this clip's frame count.
+        int tLat = (numFrames - 1) / entry.Config.VaeTemporalCompression + 1;
+        Tensor resampled = WanS2VPipeline.ResampleAudioFeatures(audioLayers, tLat * 4);
+        // The pipeline runs the causal audio encoder before the DiT; its weights must be resident first
+        // (the pipeline only preloads the DiT itself). Wav2Vec2 is handled by the audio cache above.
         backend.PreloadWeights(entry.AudioEncoder.EnumerateWeights());
         try
         {
-            var (frames, outW, outH, _) = entry.Pipeline.GenerateFromWaveform(
-                promptEmbeds, negEmbeds, waveform, entry.Wav2Vec2, request, numFrames,
-                referenceRgb24: referenceRgb24 ?? default(ReadOnlySpan<byte>), onProgress: bridge);
+            // promptEmbeds/negEmbeds/audioLayers/refLatent are intentionally never disposed here — they are the
+            // cross-generation caches (host-materialized; freed on the next cache miss or in WanS2VCacheEntry.Dispose).
+            var (frames, outW, outH, _) = entry.Pipeline.GenerateFromAudioFeatures(
+                promptEmbeds, negEmbeds, resampled, request, numFrames,
+                onProgress: bridge, referenceLatent: refLatent);
             Logs.Verbose($"[HartsyInference][S2V] Pipeline returned {frames.Length} frames {outW}x{outH} in {Environment.TickCount64 - start}ms.");
             // Mux the driving speech into the container, trimmed to the clip's duration at Wan's native
             // 16 fps (the rate the audio features were bucketed at — see FinishVideo's defaultFps).
@@ -231,11 +312,42 @@ public static class WanS2VLoader
         finally
         {
             backend.Sync();
-            backend.FreeWeights(entry.Wav2Vec2.EnumerateWeights());
             backend.FreeWeights(entry.AudioEncoder.EnumerateWeights());
-            promptEmbeds.Dispose();
-            negEmbeds.Dispose();
+            resampled.Dispose();
         }
+    }
+
+    /// <summary>Frees the (possibly KEEP_MODELS-resident) DiT device weights before an encoder upload when the
+    /// encoder doesn't fit beside it (measured free VRAM, 2 GB margin); trims the pool first so slack from the
+    /// previous generation doesn't make the reading pessimistic. Mirrors <see cref="WanVideoLoader"/>'s staging.</summary>
+    private static void EnsureEncoderHeadroom(IBackend backend, WanS2VCacheEntry entry, IEnumerable<Tensor> encoderWeights, string label)
+    {
+        backend.TrimMemoryPool();
+        long need = 0;
+        foreach (Tensor t in encoderWeights) need += t.DType.ComputeByteCount(t.ElementCount);
+        long free = backend.FreeMemoryBytes();
+        if (free < need + (2L << 30))
+        {
+            Logs.Info($"[HartsyInference][S2V] [wan-phase] {label} upload: evicting resident DiT " +
+                $"(free {free >> 20} MB < {need >> 20} MB + 2048 MB margin).");
+            backend.FreeWeights(entry.Transformer.EnumerateWeights());
+            backend.TrimMemoryPool();
+        }
+        else
+        {
+            Logs.Verbose($"[HartsyInference][S2V] [wan-phase] {label} fits beside the resident DiT " +
+                $"(free {free >> 20} MB ≥ {need >> 20} MB + 2048 MB margin).");
+        }
+    }
+
+    /// <summary>Fresh host-materialized F32 copy of a device-produced tensor (call after <c>backend.Sync()</c>) —
+    /// the cross-generation cache form that survives per-step activation sweeps and re-faults to device on use.</summary>
+    private static unsafe Tensor HostCopy(Tensor x)
+    {
+        Tensor o = new Tensor(x.Shape, DType.F32);
+        long bytes = x.Shape.ElementCount * 4;
+        Buffer.MemoryCopy((void*)x.DataPointer, (void*)o.DataPointer, bytes, bytes);
+        return o;
     }
 
     /// <summary>Counts distinct <c>audio_injector.{i}.</c> indices in the converted weights.</summary>
@@ -274,12 +386,31 @@ public sealed class WanS2VCacheEntry : IDisposable
     public required SafeTensorsLoader Wav2Vec2Loader { get; init; }
 
     public DateTime LastUsedUtc { get; set; } = DateTime.UtcNow;
+
+    /// <summary>Cross-generation umT5 prompt cache: token-id keys plus the two zero-padded host embedding tensors. A hit skips the whole umT5 upload+encode phase.</summary>
+    public int[] CachedPromptTokens { get; set; }
+    public int[] CachedNegTokens { get; set; }
+    public Tensor CachedPromptEmbeds { get; set; }
+    public Tensor CachedNegEmbeds { get; set; }
+
+    /// <summary>Cross-generation Wav2Vec2 stacked-feature cache (<c>[T50, layers, dim]</c>, frame-count-independent) keyed on the SHA-256 of the decoded 16 kHz waveform.</summary>
+    public string CachedAudioKey { get; set; }
+    public Tensor CachedAudioLayers { get; set; }
+
+    /// <summary>Cross-generation reference-identity latent cache keyed on the SHA-256 of the raw init-image bytes plus the target resolution.</summary>
+    public string CachedRefKey { get; set; }
+    public Tensor CachedRefLatent { get; set; }
+
     private bool _disposed;
 
     public void Dispose()
     {
         if (_disposed) return;
         _disposed = true;
+        CachedPromptEmbeds?.Dispose();
+        CachedNegEmbeds?.Dispose();
+        CachedAudioLayers?.Dispose();
+        CachedRefLatent?.Dispose();
         (Pipeline as IDisposable)?.Dispose();
         Tokenizer?.Dispose();
         Umt5?.Dispose();

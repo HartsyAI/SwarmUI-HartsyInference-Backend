@@ -184,13 +184,32 @@ public static class SideModels
         Hash: "54bd5144df0bbc25dd6ccadfcb826b521445a1b06ae5a42570bdd2974ca87094",
         DisplayName: "Qwen3-VL-4B (Krea 2)");
 
-    /// <summary>Mistral 3 Small for Flux.2 Dev. Same FP4 caveat as Qwen3-8B above.</summary>
+    /// <summary>Mistral 3 Small for Flux.2 Dev. MUST be the fp8 variant: the fp4_mixed file dequants
+    /// (nvfp4 → F16) with the BOS-row activation outliers crushed → garbage conditioning →
+    /// structured-noise images. A stray fp4_mixed copy under the old canonical name shadowing the
+    /// fp8 file was THE Flux.2 Dev noise bug (2026-07-10).</summary>
     public static readonly Entry MistralSmallFlux2 = new(
-        CanonicalName: "mistral_3_small_flux2.safetensors",
+        CanonicalName: "mistral_3_small_flux2_fp8.safetensors",
         FolderType: "Clip",
-        Url: "https://huggingface.co/Comfy-Org/flux2-dev/resolve/main/split_files/text_encoders/mistral_3_small_flux2_fp4_mixed.safetensors",
-        Hash: "1ee1ff334d78228d73049ef0ee4fcd21c1700536b5a45c06547af057f92463a7",
-        DisplayName: "Mistral 3 Small (fp4 mixed) — Flux.2 Dev");
+        Url: "https://huggingface.co/Comfy-Org/flux2-dev/resolve/main/split_files/text_encoders/mistral_3_small_flux2_fp8.safetensors",
+        Hash: "e3467b7d912a234fb929cdf215dc08efdb011810b44bc21081c4234cc75b370e",
+        DisplayName: "Mistral 3 Small (fp8) — Flux.2 Dev");
+
+    /// <summary>Qwen2.5-VL-7B text stack for HunyuanImage 2.1 (fp8_scaled).</summary>
+    public static readonly Entry Qwen25Vl7BHunyuan = new(
+        CanonicalName: "qwen_2.5_vl_7b_fp8_scaled.safetensors",
+        FolderType: "Clip",
+        Url: "https://huggingface.co/Comfy-Org/HunyuanImage_2.1_ComfyUI/resolve/main/split_files/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors",
+        Hash: "cb5636d852a0ea6a9075ab1bef496c0db7aef13c02350571e388aea959c5c0b4",
+        DisplayName: "Qwen2.5-VL-7B (fp8) — HunyuanImage 2.1");
+
+    /// <summary>HunyuanImage 2.1 VAE (32× downscale, 64-channel latent).</summary>
+    public static readonly Entry HunyuanImageVae = new(
+        CanonicalName: "hunyuan_image_2.1_vae_fp16.safetensors",
+        FolderType: "VAE",
+        Url: "https://huggingface.co/Comfy-Org/HunyuanImage_2.1_ComfyUI/resolve/main/split_files/vae/hunyuan_image_2.1_vae_fp16.safetensors",
+        Hash: "f2ae19863609206196b5e3a86bfd94f67bd3866f5042004e3994f07e3c93b2f9",
+        DisplayName: "HunyuanImage 2.1 VAE");
 
     /// <summary>Ministral 3.3B for Ernie Image. HartsyInference has the encoder preset
     /// (LlamaStyleEncoderConfig.Ministral3B), but no Ernie tokenizer — see
