@@ -68,7 +68,7 @@
              dev machine's nuget.config feed and are NOT on nuget.org, so any downloaded copy of this
              extension fails restore with NU1301. Always pin an EXACT version that appears in
              https://api.nuget.org/v3-flatcontainer/hartsyinference/index.json. -->
-        <PackageReference Include="HartsyInference" Version="1.0.0-alpha.46" />
+        <PackageReference Include="HartsyInference" Version="1.0.0-alpha.48" />
     </ItemGroup>
 
     <!-- LOCAL ENGINE: prebuilt DLLs from the SharpInference Cli bin (its full runtime closure). Referenced
