@@ -50,6 +50,9 @@ public class SwarmUIHartsyInference : Extension
     // HartsyInference-specific params. Registered under feature flag "hartsyinference"
     // so they only show when our backend is the active target.
     public static T2IRegisteredParam<Image> AnimateReferenceImageParam;
+    public static T2IRegisteredParam<bool> AnimateAutoPreprocessParam;
+    public static T2IRegisteredParam<Image> AnimatePoseVideoParam;
+    public static T2IRegisteredParam<Image> AnimateFaceVideoParam;
     public static T2IRegisteredParam<string> DtypeOverrideParam;
     public static T2IRegisteredParam<int> TileVaeThresholdParam;
     public static T2IRegisteredParam<string> SamplerParam;
@@ -98,6 +101,36 @@ public class SwarmUIHartsyInference : Extension
         AnimateReferenceImageParam = T2IParamTypes.Register<Image>(new(
             "Animate Reference Image",
             "Wan-Animate: the character/identity image to animate.\nThe Init Image slot carries the driving (pose/motion) video; this image is who performs that motion.\nRequired for Wan-Animate generations on the HartsyInference backend.",
+            null,
+            Toggleable: true,
+            Group: HartsyInferenceParamGroup,
+            FeatureFlag: "hartsyinference",
+            ChangeWeight: 2));
+
+        // Wan-Animate driving preprocessing. When on (default), the backend auto-derives the pose skeleton +
+        // cropped face from the Init-Image driving clip (the way the checkpoint was trained), instead of feeding
+        // the raw clip. Toggle off (or supply the overrides below) to hand the backend pre-rendered inputs.
+        AnimateAutoPreprocessParam = T2IParamTypes.Register<bool>(new(
+            "Animate Auto-Preprocess Driving",
+            "Wan-Animate: auto-derive the pose skeleton + cropped face from the Init-Image driving video (the format the model was trained on).\nOn (default) = best motion fidelity; off = feed the raw clip (legacy). The pose/face override params below take precedence when set.",
+            "true",
+            Toggleable: true,
+            Group: HartsyInferenceParamGroup,
+            FeatureFlag: "hartsyinference",
+            ChangeWeight: 2));
+
+        AnimatePoseVideoParam = T2IParamTypes.Register<Image>(new(
+            "Animate Pose Video",
+            "Wan-Animate: an already-rendered pose/skeleton driving video (OpenPose/DWPose colored limbs).\nOverrides auto-preprocessing for the pose branch — supply this when you have a pre-rendered skeleton.",
+            null,
+            Toggleable: true,
+            Group: HartsyInferenceParamGroup,
+            FeatureFlag: "hartsyinference",
+            ChangeWeight: 2));
+
+        AnimateFaceVideoParam = T2IParamTypes.Register<Image>(new(
+            "Animate Face Video",
+            "Wan-Animate: an already-cropped, face-centered driving video (square, ~512px) for the facial-motion branch.\nOverrides auto-preprocessing for the face branch.",
             null,
             Toggleable: true,
             Group: HartsyInferenceParamGroup,

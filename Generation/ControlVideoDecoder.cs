@@ -26,21 +26,7 @@ public static class ControlVideoDecoder
     /// <paramref name="numFrames"/> (longer) or padded by repeating its last frame (shorter).</summary>
     public static unsafe Tensor DecodeControlClip(Image control, int width, int height, int numFrames, CancellationToken cancel)
     {
-        if (control is null) throw new ArgumentNullException(nameof(control));
-        if (numFrames < 1) throw new ArgumentOutOfRangeException(nameof(numFrames));
-
-        List<byte[]> frames = control.Type?.MetaType == MediaMetaType.Video
-            ? DecodeVideoFrames(control.RawData, width, height, numFrames, cancel)
-            : new List<byte[]> { RgbToImage.ToHwcRgbResized(control, width, height) };
-
-        if (frames.Count == 0)
-        {
-            throw new SwarmUserErrorException(
-                "HartsyInference: the VACE control video decoded to zero frames. Check the file is a valid video.");
-        }
-        // Truncate-or-pad (repeat last) to exactly numFrames.
-        while (frames.Count < numFrames) frames.Add(frames[^1]);
-        if (frames.Count > numFrames) frames.RemoveRange(numFrames, frames.Count - numFrames);
+        List<byte[]> frames = DecodeFramesRgb(control, width, height, numFrames, cancel);
 
         long perFrame = (long)height * width;
         Tensor clip = new Tensor(new TensorShape([1L, 3, numFrames, height, width]), DType.F32);
@@ -65,6 +51,30 @@ public static class ControlVideoDecoder
         Logs.Verbose($"[HartsyInference][VACE] Control clip decoded: {numFrames}f {width}x{height} ("
             + $"{(control.Type?.MetaType == MediaMetaType.Video ? "video" : "still tiled")}).");
         return clip;
+    }
+
+    /// <summary>Decodes a control input to a list of interleaved HWC rgb24 frames at
+    /// <paramref name="width"/>×<paramref name="height"/>, truncated or padded (repeat last) to exactly
+    /// <paramref name="numFrames"/>. A still image is tiled. Exposed for preprocessors that run per-frame vision
+    /// (the Wan-Animate pose/face preprocessing) before packing into the engine tensor layout.</summary>
+    public static List<byte[]> DecodeFramesRgb(Image control, int width, int height, int numFrames, CancellationToken cancel)
+    {
+        if (control is null) throw new ArgumentNullException(nameof(control));
+        if (numFrames < 1) throw new ArgumentOutOfRangeException(nameof(numFrames));
+
+        List<byte[]> frames = control.Type?.MetaType == MediaMetaType.Video
+            ? DecodeVideoFrames(control.RawData, width, height, numFrames, cancel)
+            : new List<byte[]> { RgbToImage.ToHwcRgbResized(control, width, height) };
+
+        if (frames.Count == 0)
+        {
+            throw new SwarmUserErrorException(
+                "HartsyInference: the driving/control video decoded to zero frames. Check the file is a valid video.");
+        }
+        // Truncate-or-pad (repeat last) to exactly numFrames.
+        while (frames.Count < numFrames) frames.Add(frames[^1]);
+        if (frames.Count > numFrames) frames.RemoveRange(numFrames, frames.Count - numFrames);
+        return frames;
     }
 
     /// <summary>Runs ffmpeg to decode up to <paramref name="numFrames"/> RGB24 frames from a video
