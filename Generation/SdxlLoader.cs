@@ -199,7 +199,7 @@ public static class SdxlLoader
         int negEosG = ClipTokenizer.FindEosPosition(negTokensG);
 
         Img2ImgResolver.Img2ImgSpec img2img = Img2ImgResolver.Resolve(input, width, height);
-        ControlNetResolver.ResolvedSpec controlnets = ControlNetResolver.Resolve(input, UNetConfig.SdxlBase, width, height, msg => Logs.Verbose($"[HartsyInference][SDXL] {msg}"));
+        ControlNetResolver.ResolvedSpec controlnets = ControlNetResolver.Resolve(input, UNetConfig.SdxlBase, width, height, backend, msg => Logs.Verbose($"[HartsyInference][SDXL] {msg}"));
         string schedulerName = SamplingParamResolver.ResolveSchedulerName(input);
         int? seed = seedLong < 0 ? null : (int?)(int)(seedLong & 0x7FFFFFFF);
         // Variation seed: pre-blend the initial noise (pipeline takes ownership of the tensor).

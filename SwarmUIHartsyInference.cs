@@ -91,9 +91,46 @@ public class SwarmUIHartsyInference : Extension
         // the extension reuses core's classification — no registration needed.
     }
 
+    /// <summary>Lists <c>&lt;ModelRoot&gt;/ipadapter/*.safetensors|*.bin</c> into the Comfy extension's IP-Adapter dropdown values.</summary>
+    private static void PopulateIpAdapterModels()
+    {
+        try
+        {
+            string folder = System.IO.Path.Combine(Program.ServerSettings.Paths.ActualModelRoot, "ipadapter");
+            if (!System.IO.Directory.Exists(folder))
+            {
+                return;
+            }
+            List<string> found = [];
+            foreach (string file in System.IO.Directory.EnumerateFiles(folder, "*.*", System.IO.SearchOption.AllDirectories))
+            {
+                if (file.EndsWith(".safetensors", StringComparison.OrdinalIgnoreCase) || file.EndsWith(".bin", StringComparison.OrdinalIgnoreCase))
+                {
+                    found.Add(System.IO.Path.GetRelativePath(folder, file).Replace('\\', '/'));
+                }
+            }
+            if (found.Count > 0)
+            {
+                T2IParamTypes.ConcatDropdownValsClean(ref SwarmUI.Builtin_ComfyUIBackend.ComfyUIBackendExtension.IPAdapterModels, found);
+                Logs.Verbose($"[HartsyInference] IP-Adapter dropdown populated with {found.Count} local file(s).");
+            }
+        }
+        catch (Exception ex)
+        {
+            Logs.Error($"[HartsyInference] Failed to populate IP-Adapter model list: {ex.Message}");
+        }
+    }
+
     public override void OnInit()
     {
         Logs.Init("HartsyInference extension init");
+
+        // The Comfy extension's Use IP-Adapter dropdown normally populates from a live ComfyUI
+        // backend's object_info. When only HartsyInference backends run, populate it from the
+        // ipadapter model folder directly (the same folder-listing approach the style-model
+        // dropdown uses), so IPA works Comfy-free. Refresh keeps it current after downloads.
+        PopulateIpAdapterModels();
+        Program.ModelRefreshEvent += PopulateIpAdapterModels;
 
         // 1. Param group + HartsyInference-specific params.
         HartsyInferenceParamGroup = new("HartsyInference", Toggles: false, Open: false, IsAdvanced: true);

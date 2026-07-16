@@ -27,8 +27,8 @@ public static class DepthPreprocessor
     // The model's weight tensors are owned by the loader — it must stay alive with the cached model.
     private static PytorchPickleLoader s_loader;
 
-    /// <summary>Produces the depth conditioning map for <paramref name="input"/> at the generation resolution.</summary>
-    public static unsafe Tensor Process(Image input, int targetWidth, int targetHeight, IBackend backend, Action<string> log)
+    /// <summary>Produces the depth conditioning map for <paramref name="input"/> at the generation resolution. <paramref name="fluxScaling"/> selects BFL's max-only depth scaling (FLUX.1-Depth checkpoints) instead of the min-max stretch SD ControlNets expect.</summary>
+    public static unsafe Tensor Process(Image input, int targetWidth, int targetHeight, IBackend backend, Action<string> log, bool fluxScaling = false)
     {
         if (input is null) throw new ArgumentNullException(nameof(input));
 
@@ -54,7 +54,7 @@ public static class DepthPreprocessor
         float[] unitDepth;
         try
         {
-            unitDepth = EngineDepthPreprocessor.PostprocessToUnit(depth, targetWidth, targetHeight);
+            unitDepth = EngineDepthPreprocessor.PostprocessToUnit(depth, targetWidth, targetHeight, minMaxNormalize: !fluxScaling);
         }
         finally
         {

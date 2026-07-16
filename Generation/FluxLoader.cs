@@ -339,7 +339,7 @@ public static class FluxLoader
             Tensor controlZeroOne = entry.ToolsMode == FluxToolsMode.Canny
                 ? CannyPreprocessor.Process(cnImage, width, height)
                 : DepthPreprocessor.Process(cnImage, width, height, entry.Backend,
-                    msg => Logs.Verbose($"[HartsyInference][Flux Depth] {msg}"));
+                    msg => Logs.Verbose($"[HartsyInference][Flux Depth] {msg}"), fluxScaling: true);
             try
             {
                 string dumpDir = Environment.GetEnvironmentVariable("HARTSY_DUMP_CONTROL");

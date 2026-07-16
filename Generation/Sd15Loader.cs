@@ -172,6 +172,8 @@ public static class Sd15Loader
         // Img2img: build an ImageToImageRequest when an init image is provided.
         // The pipeline switches behavior based on the runtime type of `request`.
         Img2ImgResolver.Img2ImgSpec img2img = Img2ImgResolver.Resolve(input, width, height);
+        ControlNetResolver.ResolvedSpec controlnets = ControlNetResolver.Resolve(
+            input, UNetConfig.Sd15, width, height, backend, msg => Logs.Verbose($"[HartsyInference][SD15] {msg}"));
         string schedulerName = SamplingParamResolver.ResolveSchedulerName(input);
         int? clipSkip = SamplingParamResolver.ResolveClipSkip(input);
         int? seed = seedLong < 0 ? null : (int?)(int)(seedLong & 0x7FFFFFFF);
@@ -229,7 +231,7 @@ public static class Sd15Loader
                 backend, encoder, tokenizer, prompt, negative, clipSkip ?? 1);
 
             var (rgbBytes, outW, outH, _) = pipeline.GenerateFromTokens(
-                promptTokens, negativeTokens, request, bridge, ipAdapters, weightedSchedule);
+                promptTokens, negativeTokens, request, bridge, controlnets?.Conditionings, ipAdapters, weightedSchedule);
 
             Logs.Verbose($"[HartsyInference][SD15] Pipeline returned {outW}x{outH} in {Environment.TickCount64 - start}ms.");
             return new[] { RgbToImage.FromHwcRgb(rgbBytes, outW, outH) };
@@ -237,6 +239,7 @@ public static class Sd15Loader
         finally
         {
             img2img?.SourceTensor?.Dispose();
+            controlnets?.Dispose();
         }
     }
 }

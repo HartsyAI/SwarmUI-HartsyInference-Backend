@@ -125,7 +125,36 @@ public sealed class PipelineCache
     public void PutLens(LensCacheEntry entry) => Put(_lens, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
     public void PutKrea2(Krea2CacheEntry entry) => Put(_krea2, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
     public void PutRefiner(RefinerCacheEntry entry) => Put(_refiner, entry.ModelName, entry, e => e.LastUsedUtc = DateTime.UtcNow);
-    public void PutIpAdapter(IpAdapterCacheEntry entry) => Put(_ipAdapter, entry.FilePath, entry, e => e.LastUsedUtc = DateTime.UtcNow);
+    /// <summary>IP-Adapter entries are side-adapters serving a base pipeline — they get their own
+    /// small LRU cap instead of counting toward the pipeline capacity (at MaxCachedPipelines=1 the
+    /// old shared accounting evicted the just-loaded SDXL/SD15 pipeline the adapter was for).</summary>
+    public void PutIpAdapter(IpAdapterCacheEntry entry)
+    {
+        lock (_lock)
+        {
+            if (_ipAdapter.TryGetValue(entry.FilePath, out IpAdapterCacheEntry old))
+            {
+                old.Dispose();
+            }
+            _ipAdapter[entry.FilePath] = entry;
+            entry.LastUsedUtc = DateTime.UtcNow;
+            while (_ipAdapter.Count > 2)
+            {
+                string oldestKey = null;
+                DateTime oldestTime = DateTime.MaxValue;
+                foreach (KeyValuePair<string, IpAdapterCacheEntry> kv in _ipAdapter)
+                {
+                    if (kv.Value.LastUsedUtc < oldestTime)
+                    {
+                        oldestTime = kv.Value.LastUsedUtc;
+                        oldestKey = kv.Key;
+                    }
+                }
+                _ipAdapter[oldestKey].Dispose();
+                _ipAdapter.Remove(oldestKey);
+            }
+        }
+    }
 
     private TEntry Touch<TEntry>(Dictionary<string, TEntry> map, string key, Func<TEntry, DateTime> getTime, Action<TEntry, DateTime> setTime)
         where TEntry : class
@@ -159,7 +188,7 @@ public sealed class PipelineCache
         }
     }
 
-    private int TotalCount => _flux.Count + _flux2.Count + _chroma.Count + _chromaRadiance.Count + _zetaChroma.Count + _auraFlow.Count + _fLite.Count + _ideogram4.Count + _booguImage.Count + _ernieImage.Count + _lumina2.Count + _omniGen2.Count + _zImage.Count + _anima.Count + _hiDream.Count + _qwenImage.Count + _sd15.Count + _sdxl.Count + _sd3.Count + _wanVideo.Count + _wanVace.Count + _wanAnimate.Count + _wanS2V.Count + _ltxVideo.Count + _ltxVideo2.Count + _aceStep.Count + _aceStep15.Count + _musicGen.Count + _yue.Count + _lance.Count + _lens.Count + _krea2.Count + _refiner.Count + _ipAdapter.Count;
+    private int TotalCount => _flux.Count + _flux2.Count + _chroma.Count + _chromaRadiance.Count + _zetaChroma.Count + _auraFlow.Count + _fLite.Count + _ideogram4.Count + _booguImage.Count + _ernieImage.Count + _lumina2.Count + _omniGen2.Count + _zImage.Count + _anima.Count + _hiDream.Count + _qwenImage.Count + _sd15.Count + _sdxl.Count + _sd3.Count + _wanVideo.Count + _wanVace.Count + _wanAnimate.Count + _wanS2V.Count + _ltxVideo.Count + _ltxVideo2.Count + _aceStep.Count + _aceStep15.Count + _musicGen.Count + _yue.Count + _lance.Count + _lens.Count + _krea2.Count + _refiner.Count;
 
     /// <summary>Evict the globally-oldest entry across all architecture maps until we're
     /// at or under <see cref="_maxEntries"/>.</summary>
@@ -493,15 +522,6 @@ public sealed class PipelineCache
                     oldestTime = kv.Value.LastUsedUtc;
                     string key = kv.Key;
                     evictAction = () => { _refiner[key].Dispose(); _refiner.Remove(key); };
-                }
-            }
-            foreach (KeyValuePair<string, IpAdapterCacheEntry> kv in _ipAdapter)
-            {
-                if (kv.Value.LastUsedUtc < oldestTime)
-                {
-                    oldestTime = kv.Value.LastUsedUtc;
-                    string key = kv.Key;
-                    evictAction = () => { _ipAdapter[key].Dispose(); _ipAdapter.Remove(key); };
                 }
             }
 

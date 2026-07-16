@@ -1777,11 +1777,11 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                     break;
                 }
             }
-            if (anyCnSelected && compat != SdxlLoader.SdxlCompatClassId)
+            if (anyCnSelected && compat != SdxlLoader.SdxlCompatClassId && compat != Sd15Loader.Sd15CompatClassId)
             {
                 input.RefusalReasons.Add(
-                    $"HartsyInference: ControlNet is currently supported on SDXL only (got '{compat}'). " +
-                    $"Either remove the ControlNet selection or pick an SDXL model.");
+                    $"HartsyInference: ControlNet is currently supported on SDXL and SD 1.5 (got '{compat}'). " +
+                    $"Either remove the ControlNet selection or pick an SDXL / SD 1.5 model.");
                 return false;
             }
         }

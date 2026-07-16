@@ -1,5 +1,6 @@
 using SwarmUI.Text2Image;
 using SwarmUI.Utils;
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Adapters;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -52,6 +53,7 @@ public static class ControlNetResolver
         UNetConfig baseConfig,
         int targetW,
         int targetH,
+        IBackend backend,
         Action<string> log)
     {
         if (input is null) return null;
@@ -90,22 +92,30 @@ public static class ControlNetResolver
                 }
 
                 // Preprocess based on the file's auto-detected mode (filename heuristic).
-                // v1 supports Canny only; refuse other modes with a clear message.
+                // Canny is algorithmic; Depth runs the in-engine Depth-Anything-V2 annotator.
+                // Remaining modes (OpenPose, lineart, softedge, normal, seg) land with the
+                // preprocessor subsystem — refuse with a clear message until then.
                 Tensor condTensor = entry.File.Mode switch
                 {
                     ControlNetMode.Canny => CannyPreprocessor.Process(cnImage, targetW, targetH),
+                    ControlNetMode.Depth => DepthPreprocessor.Process(cnImage, targetW, targetH, backend,
+                        msg => log($"[Depth] {msg}")),
                     _ => throw new NotSupportedException(
                         $"ControlNet[{i}] '{cnModel.Name}' detected as mode '{entry.File.Mode}'. " +
-                        $"Currently supported preprocessors: Canny. Other modes (Depth, OpenPose, etc.) need ONNX runtime + bundled models — see Phase B follow-ups."),
+                        $"Currently supported preprocessors: Canny, Depth. Other modes (OpenPose, lineart, softedge, normal, seg) land with the in-engine preprocessor subsystem."),
                 };
                 images.Add(condTensor);
 
                 double strength = input.Get(holder.Strength);
+                double startFrac = holder.Start is not null ? input.Get(holder.Start) : 0.0;
+                double endFrac = holder.End is not null ? input.Get(holder.End) : 1.0;
                 conditionings.Add(new ControlNetConditioning
                 {
                     Adapter = entry.Adapter,
                     ConditionImage = condTensor,
                     Scale = (float)strength,
+                    StartFraction = (float)Math.Clamp(startFrac, 0.0, 1.0),
+                    EndFraction = (float)Math.Clamp(endFrac, 0.0, 1.0),
                 });
             }
         }
@@ -160,16 +170,20 @@ public static class ControlNetWeightLoader
         ControlNetFile file = ControlNetLoader.Load(model.RawFilePath);
         try
         {
-            // v1: SDXL-only. HartsyInference's ControlNet adapter handles SD15
-            // architecturally but the Swarm side hasn't wired SD15 + pipeline
-            // through yet — refuse with a clear message instead of silently
-            // running with a mismatched base UNet config.
-            if (file.BaseModel != ControlNetBaseModel.Sdxl)
+            // SDXL + SD1.5 are wired through their pipelines; refuse the rest (Flux DiT
+            // ControlNets need the separate Flux adapter class — Wave 2).
+            if (file.BaseModel is not (ControlNetBaseModel.Sdxl or ControlNetBaseModel.Sd15))
             {
                 throw new InvalidOperationException(
                     $"ControlNet '{model.Name}' detected as base={file.BaseModel}. " +
-                    $"This extension currently supports SDXL ControlNets only. " +
-                    $"SD 1.5 ControlNets need the SD 1.5 pipeline wired to accept the adapter — follow-up.");
+                    $"This extension currently supports SDXL and SD 1.5 ControlNets; Flux DiT ControlNets are a follow-up.");
+            }
+            // Guard base/config mismatch (e.g. an SD15 CN selected on an SDXL gen).
+            bool baseIsSdxl = baseConfig.CrossAttentionDim == 2048;
+            if ((file.BaseModel == ControlNetBaseModel.Sdxl) != baseIsSdxl)
+            {
+                throw new InvalidOperationException(
+                    $"ControlNet '{model.Name}' is a {file.BaseModel} ControlNet but the current generation uses a {(baseIsSdxl ? "SDXL" : "SD 1.5")} base model. Pick a matching ControlNet.");
             }
             ControlNet adapter = new ControlNet(file.Config, baseConfig);
             adapter.LoadWeights(file.Weights);
