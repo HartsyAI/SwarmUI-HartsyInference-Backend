@@ -519,8 +519,9 @@ public class HartsyInferenceBackend : AbstractT2IBackend
 
         string compat = model.ModelClass?.CompatClass?.ID;
 
-        // Already cached? Skip.
-        if (CurrentModelName == model.Name && IsCached(compat, model.Name))
+        // Already cached? Skip. Wan MoE pairs cache under an extended key (base + low-noise expert +
+        // boundary) so a pair/split change reloads; EffectiveCacheKey is model.Name for everything else.
+        if (CurrentModelName == model.Name && IsCached(compat, WanVideoLoader.EffectiveCacheKey(model, input)))
         {
             return true;
         }
@@ -877,7 +878,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
 
             // Ensure model is loaded. Log cache hit/miss so the slow first-gen vs fast
             // repeat-gen pattern is obvious in the timeline.
-            bool cacheHit = CurrentModelName == model.Name && IsCached(compat, model.Name);
+            bool cacheHit = CurrentModelName == model.Name && IsCached(compat, WanVideoLoader.EffectiveCacheKey(model, input));
             if (cacheHit)
             {
                 Logs.Verbose($"[HartsyInference] Model cache HIT — '{model.Name}' already resident, skipping load.");
@@ -946,6 +947,12 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             // here on the calling thread so AddLoadStatus diagnostics surface in the UI,
             // then pass the refiner UNet through to the SDXL pipeline.
             RefinerResolver.RefinerSpec refinerSpec = RefinerResolver.Resolve(input);
+            // A Wan-14B model in the Refiner slot is the Wan2.2 MoE low-noise expert — consumed inside
+            // WanVideoLoader (validated in IsValidForThisBackend), never a refine pass over the output.
+            if (refinerSpec is not null && WanVideoLoader.ResolveLowNoiseModel(model, input) is not null)
+            {
+                refinerSpec = null;
+            }
             RefinerSwapConfig refinerSwapForSdxl = null;
             bool refinerHandledInPipeline = false;
             if (refinerSpec is not null
@@ -1146,7 +1153,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                         }
                         default:
                         {
-                            WanVideoCacheEntry entry = _cache.TryGetWanVideo(model.Name)
+                            WanVideoCacheEntry entry = _cache.TryGetWanVideo(WanVideoLoader.EffectiveCacheKey(model, input))
                                 ?? throw new InvalidOperationException("Wan video model loaded but not in cache.");
                             // Video-extend / end-frame not implemented for Wan — refused upfront in IsValidForThisBackend.
                             return loras.Count > 0
@@ -1569,9 +1576,29 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 input.RefusalReasons.Add("HartsyInference: audio-conditioned video isn't supported here (use a Wan S2V model for audio-driven video). Remove the audio input.");
                 return false;
             }
-            if (input.Get(T2IParamTypes.RefinerModel) is not null)
+            // Wan2.2 A14B MoE pairs: a Wan-14B model in the Refiner slot (Swarm's documented Wan 2.2 pair
+            // convention) or in Video Swap Model is the low-noise expert, consumed by WanVideoLoader — any
+            // other refiner/swap selection on a video arch is refused.
+            bool isMoePair = WanVideoLoader.ResolveLowNoiseModel(model, input) is not null;
+            if (isMoePair && wanVariant != WanModelVariants.Variant.Base)
             {
-                input.RefusalReasons.Add("HartsyInference: refiners can't run over video outputs. Remove the Refiner Model selection.");
+                input.RefusalReasons.Add(
+                    "HartsyInference: the Wan2.2 expert pair (low-noise model in the Refiner Model / Video Swap Model slot) "
+                    + "only applies to plain T2V/I2V checkpoints — not VACE/Animate/S2V variants. Remove the pair selection.");
+                return false;
+            }
+            if (!isMoePair && input.Get(T2IParamTypes.RefinerModel) is not null)
+            {
+                input.RefusalReasons.Add(
+                    "HartsyInference: refiners can't run over video outputs. Remove the Refiner Model selection. "
+                    + "(Exception: a Wan-14B low-noise expert paired with a Wan-14B high-noise base model.)");
+                return false;
+            }
+            if (!isMoePair && input.Get(T2IParamTypes.VideoSwapModel) is not null)
+            {
+                input.RefusalReasons.Add(
+                    "HartsyInference: Video Swap Model is only supported as the low-noise expert of a Wan2.2 "
+                    + "14B pair (both models must be Wan-14B class). Remove it or pick a matching pair.");
                 return false;
             }
         }
@@ -1597,6 +1624,12 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         //   - RefinerUpscale != 1.0 (high-res-fix flow not implemented yet)
         //   - RefinerVAE set (we use the refiner's bundled VAE; separate VAE replacement not yet wired)
         T2IModel refinerModel = input.Get(T2IParamTypes.RefinerModel);
+        // A Wan-14B refiner selection on a Wan-14B base is the Wan2.2 MoE low-noise expert (validated in
+        // the video block above, consumed by WanVideoLoader) — not a refine pass; skip the refiner rules.
+        if (refinerModel is not null && WanVideoLoader.ResolveLowNoiseModel(model, input) == refinerModel)
+        {
+            refinerModel = null;
+        }
         if (refinerModel is not null)
         {
             string refinerCompat = refinerModel.ModelClass?.CompatClass?.ID;

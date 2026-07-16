@@ -168,6 +168,20 @@ The only new subsystem — C# twin of `SwarmSaveAnimationWS.py`:
       dict, `WanVideoLoader.GenerateWithLoras` shallow-clones + merges via `LoraApplier` and runs
       a fresh per-gen transformer/pipeline. DiT-only (Wan's class declares LorasTargetTextEnc=false).
       LTX LoRAs remain refused (no engine validation yet).
+- [x] Wan2.2 A14B MoE expert pairs (base A14B, **AnimeGen-T2V**, and other high/low-noise finetune
+      pairs): select the **high-noise** file as the main Model and the **low-noise** file in the
+      **Refiner Model** slot (Swarm's documented Wan 2.2 pair convention — core
+      `docs/Video Model Support.md` §Wan 2.2; any Refiner Method value works here) or via
+      **Video Swap Model** (accepted for API parity — note its dropdown only lists I2V-class files,
+      so the refiner slot is the UI path for T2V pairs like AnimeGen). `WanVideoLoader` loads both
+      DiTs through the same converter and hands `transformer2` to the engine's `WanVideoPipeline`,
+      which runs the real MoE: high-noise expert while `timestep ≥ boundary·1000`, one expert-swap
+      at the crossing (only the active ~expert stays GPU-resident). The boundary defaults to Wan2.2's
+      official 0.875 (T2V) / 0.9 (I2V); a user-moved **Refiner Control Percentage** / **Video Swap
+      Percent** is interpreted as "fraction of steps for the low expert" and mapped through the
+      shifted flow schedule (`boundary = s·p/(1+(s−1)·p)`, s = Sigma Shift, default 8 — p=0.5 ≈ 0.889,
+      consistent with the official defaults). Pairs cache under an extended key
+      (`base::moe::low::b<boundary>`) so pair/split changes reload. LoRAs merge into BOTH experts.
 - [ ] Lance T2V: register a custom `T2IModelClass` (Swarm has none for Lance) + loader.
 - [ ] Video2Video / VideoExtend / audio-input params: explicitly out of scope until the
       base paths are proven.
