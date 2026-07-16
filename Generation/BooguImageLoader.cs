@@ -51,6 +51,14 @@ public static class BooguImageLoader
     private const int VisionEndTokenId = 151653;
     private const int ImagePadTokenId = 151655;
 
+    // Reference-pipeline VLM image budget (`pipeline_boogu.py` defaults, "matching dataset behavior exactly"):
+    // `max_vlm_input_pil_pixels = 384*384`, `max_vlm_input_pil_side_length = 384*2`. The MLLM conditioning was
+    // TRAINED on ≤ ~144 merged vision tokens per image; feeding it native-resolution images (up to 1024 tokens at
+    // the processor's default budget) drowns the instruction text in out-of-distribution vision features and the
+    // DiT falls back to pure reference reconstruction — the edit instruction gets IGNORED (2026-07-16 bug).
+    private const int VlmMaxPixels = 384 * 384;
+    private const int VlmMaxSideLength = 384 * 2;
+
     /// <summary>Minimum free VRAM to attempt a CUDA load — 10B DiT (fp8 ~10 GB) + Qwen3-VL-8B + VAE + headroom.</summary>
     private const double MinRequiredVramGb = 16.0;
 
@@ -283,7 +291,7 @@ public static class BooguImageLoader
         return [RgbToImage.FromHwcRgb(rgbBytes, outW, outH)];
     }
 
-    private static Image[] GenerateEdit(
+    private static unsafe Image[] GenerateEdit(
         BooguImageCacheEntry entry, IBackend backend, TextToImageRequest request,
         string prompt, string negative, Image initImage, int width, int height,
         float textGuidance, Action<GenerationProgress> bridge, CancellationToken cancel, long startTick)
@@ -294,10 +302,17 @@ public static class BooguImageLoader
                 "language-only. Select a vision-capable Qwen3-VL-8B (full model) to edit, or remove the Init Image " +
                 "to run text-to-image.");
 
-        // Reference image in two forms: [3,H0,W0] in [0,1] for the Qwen3-VL vision tower (it smart-resizes
-        // internally), and [1,3,H,W] in [-1,1] at the generation size for the DiT latent stream (VAE-encoded).
+        // Reference image in two forms: [3,Hv,Wv] in [0,1] for the Qwen3-VL vision tower, and [1,3,H,W] in [-1,1]
+        // at the generation size for the DiT latent stream (VAE-encoded). The VLM copy is pre-resized to the
+        // reference pipeline's training budget (≤384·384 px, side ≤768 — `preprocess_vlm_input_pil_images`);
+        // feeding it at native resolution produced up to 1024 vision tokens, drowning the instruction text in
+        // out-of-distribution conditioning and making the DiT IGNORE the edit instruction.
         (byte[] nativeRgb, int nativeW, int nativeH) = RgbToImage.ToHwcRgb(initImage);
-        using Tensor visionRgb = HwcRgbToChw01(nativeRgb, nativeW, nativeH);
+        (int vlmH, int vlmW) = ComputeVlmInputSize(nativeH, nativeW);
+        byte[] vlmRgb = vlmH == nativeH && vlmW == nativeW
+            ? nativeRgb
+            : RgbToImage.ToHwcRgbResized(initImage, vlmW, vlmH);
+        using Tensor visionRgb = HwcRgbToChw01(vlmRgb, vlmW, vlmH);
 
         byte[] genRgb = RgbToImage.ToHwcRgbResized(initImage, width, height);
         using Tensor refLatentInput = ImagePostProcessor.RgbBytesToTensor(genRgb, width, height);
@@ -307,23 +322,39 @@ public static class BooguImageLoader
         // config the multimodal encoder runs internally, so the counts match.
         Qwen3VlVisionConfig visionCfg = Qwen3VlVisionConfig.Qwen3Vl8B;
         Qwen3VlImageProcessor countProc = new(visionCfg);
-        (int resizedH, int resizedW) = countProc.SmartResize(nativeH, nativeW);
+        (int resizedH, int resizedW) = countProc.SmartResize(vlmH, vlmW);
         int mergeFactor = visionCfg.PatchSize * visionCfg.SpatialMergeSize;
         int numMerged = (resizedH / mergeFactor) * (resizedW / mergeFactor);
 
+        // Reference conditioning (`pipeline_boogu.py` defaults): cond = TI2I template + image + instruction; the
+        // drop-text (negative) pass encodes WITHOUT the image (`use_input_images_4_neg_instruct=False`) — the
+        // reference image still conditions that pass through the DiT's VAE ref-latent stream.
         int[] condTokens = BuildTemplatedTokens(entry.Tokenizer, SystemPromptTI2I, prompt, numMerged);
-        int[] dropTextTokens = BuildTemplatedTokens(entry.Tokenizer, SystemPromptTI2I, negative, numMerged);
+        int[] dropTextTokens = BuildTemplatedTokens(entry.Tokenizer, SystemPromptTI2I, negative, numImagePad: 0);
 
         Tensor cond = null, dropText = null;
         try
         {
+            // TE ⇄ DiT staging (the T2I path's pattern): evict the resident ~10 GB DiT so the ~10 GB Qwen3-VL-8B
+            // encode has VRAM, then free the TE weights and host-materialize the embeddings so the pipeline's
+            // FreeActivations can't revert them to stale host memory.
+            entry.Pipeline.EvictResidentWeights();
+            long teTick = Environment.TickCount64;
             cancel.ThrowIfCancellationRequested();
             cond = entry.Multimodal.Encode(backend, condTokens, [visionRgb]);
             cancel.ThrowIfCancellationRequested();
-            dropText = entry.Multimodal.Encode(backend, dropTextTokens, [visionRgb]);
+            dropText = entry.Multimodal.Encode(backend, dropTextTokens, []);
+            _ = cond.DataPointer;
+            _ = dropText.DataPointer;
+            backend.Sync();
+            backend.FreeWeights(entry.TextEncoder.EnumerateWeights());
+            backend.FreeWeights(entry.VisionEncoder.EnumerateWeights());
+            backend.FreeActivations();
+            Logs.Verbose($"[HartsyInference][Boogu] Edit TE encode ({numMerged} vision tokens @ {resizedW}x{resizedH}) " +
+                $"in {Environment.TickCount64 - teTick}ms.");
 
-            // Single-guidance edit (image_guidance_scale = 1): pred = cond + (tg-1)·(cond - dropText). The drop-all
-            // pass (image guidance > 1) is a future param; keep it off so editing stays a two-pass loop.
+            // Single-guidance edit (image_guidance_scale = 1, the reference default): pred = cond + (tg-1)·(cond -
+            // dropText), both passes keeping the ref latents. The drop-all pass (image guidance > 1) is a future param.
             var (rgbBytes, outW, outH, _) = entry.Pipeline.EditFromEmbeddings(
                 cond, dropText, null, [refLatentInput], request, textGuidance, 1.0f, bridge);
             Logs.Verbose($"[HartsyInference][Boogu] Edit {outW}x{outH} ({numMerged} ref tokens) in {Environment.TickCount64 - startTick}ms.");
@@ -334,6 +365,29 @@ public static class BooguImageLoader
             cond?.Dispose();
             dropText?.Dispose();
         }
+    }
+
+    /// <summary>Reference-pipeline VLM input sizing (<c>preprocess_vlm_input_pil_images</c>): scale to at most
+    /// <see cref="VlmMaxPixels"/> pixels and side ≤ <see cref="VlmMaxSideLength"/>, preserving aspect, floor-aligned
+    /// to multiples of 16 (the multimodal encoder's smart-resize then rounds to multiples of 32).</summary>
+    private static (int h, int w) ComputeVlmInputSize(int height, int width)
+    {
+        double h = height, w = width;
+        if (h * w > VlmMaxPixels)
+        {
+            double beta = Math.Sqrt(h * w / VlmMaxPixels);
+            h /= beta;
+            w /= beta;
+        }
+        if (Math.Max(h, w) > VlmMaxSideLength)
+        {
+            double beta = Math.Max(h, w) / VlmMaxSideLength;
+            h /= beta;
+            w /= beta;
+        }
+        int hOut = Math.Max(32, (int)Math.Floor(h / 16.0) * 16);
+        int wOut = Math.Max(32, (int)Math.Floor(w / 16.0) * 16);
+        return (hOut, wOut);
     }
 
     /// <summary>Builds the Qwen3-VL chat-templated token sequence: <c>&lt;|im_start|&gt;system\n{sys}&lt;|im_end|&gt;\n

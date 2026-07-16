@@ -96,12 +96,12 @@ highest-demand item here (punchlist P6).
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| ControlNet single + stack | 🟢 | SDXL only; summed residuals, 3-slot params honored |
-| ControlNet preprocessors | 🟢 | Canny only (pure C#). Depth / OpenPose / Lineart need ONNX runners — punchlist P5b |
-| ControlNet start/end ranges | 🟡 | Params read, currently full-range |
-| IP-Adapter standard / Plus / Plus-Face | ✅ | SD 1.5 + SDXL; weight types + start/end gating + multi-image averaging |
-| IP-Adapter FaceID / InstantID | 🔴 | Needs InsightFace ArcFace runtime |
-| Flux Redux / style models | 🔴 | Needs SigLIP encoder upstream |
+| ControlNet single + stack | ✅ | SDXL + SD 1.5 (verified e2e 2026-07-16); summed residuals, 3-slot params honored; LDM `control_model.*` + diffusers layouts both load |
+| ControlNet preprocessors | 🟢 | Canny (pure C#, cv2-convention fix 07-16), Depth (in-engine Depth-Anything-V2 ViT-L, parity 2.9e-7), OpenPose (in-engine YOLO11-pose → BODY-18) — all verified e2e. Lineart/softedge/normal/seg pending; no ONNX needed (pure C# engine models) |
+| ControlNet start/end ranges | ✅ | Per-step gating in both pipelines (engine `ControlNetConditioning.Start/EndFraction`), verified 07-16 |
+| IP-Adapter standard / Plus / Plus-Face | ✅ | SD 1.5 + SDXL VERIFIED with real weights 2026-07-16 (checkpoint layer-ORDER engine fix — it had never actually run before); weight types + start/end gating + multi-image averaging; dropdown populates from the ipadapter folder (Comfy-free) |
+| IP-Adapter FaceID / InstantID | 🔴 | Needs InsightFace ArcFace runtime (Wave 2) |
+| Flux Redux / style models | ✅ | Verified e2e 2026-07-16: in-engine SigLIP so400m + Redux projector; `usestylemodel` + merge/multiply/apply-start honored (multiply×merge = scalar on redux tokens, per Comfy math) |
 | ReVision | 🔴 | SDXL CLIP-Vision conditioning not wired |
 | Img2img (init + creativity) | ✅ | SD 1.5 / SDXL / Flux / SD3 / Z-Image (Flux.2: mechanical TODO) |
 | Inpaint (mask) | 🟢 | SDXL / Flux / SD3 blend-on-vanilla incl. MaskGrow/MaskBlur; SD 1.5 + Z-Image pending hooks |
