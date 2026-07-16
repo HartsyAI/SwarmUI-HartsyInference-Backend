@@ -393,6 +393,14 @@ public static class FluxLoader
         ReduxResolver.ReduxSpec redux = ReduxResolver.Resolve(
             input, entry.Backend, msg => Logs.Verbose($"[HartsyInference][Flux Redux] {msg}"));
 
+        // Flux DiT ControlNets (union / single-mode): resolved from the standard ControlNet slots
+        // when the selected checkpoint is a Flux CN. Skipped entirely on Tools checkpoints (their
+        // control channel is the built-in 128-wide x_embedder, not a separate adapter).
+        FluxControlNetResolver.ResolvedSpec fluxCn = entry.ToolsMode == FluxToolsMode.Vanilla
+            ? FluxControlNetResolver.Resolve(input, width, height, entry.Backend,
+                msg => Logs.Verbose($"[HartsyInference][Flux CN] {msg}"))
+            : null;
+
         int? seed = seedLong < 0 ? null : (int?)(int)(seedLong & 0x7FFFFFFF);
         // Variation seed: Flux injects unpacked [1,16,H/8,W/8] noise (FluxLatentChannels=16).
         Tensor variationNoise = VariationSeedResolver.Resolve(input, width, height, seed, VariationSeedResolver.FluxLatentChannels);
@@ -441,7 +449,8 @@ public static class FluxLoader
                 controlImage: fluxCannyControl,
                 kontextRefImage: kontextRef,
                 reduxImageEmbeds: redux?.Embeds,
-                reduxApplyStartFraction: redux?.ApplyStart ?? 0f);
+                reduxApplyStartFraction: redux?.ApplyStart ?? 0f,
+                fluxControlNets: fluxCn?.Conditionings);
 
             Logs.Verbose($"[HartsyInference][Flux] Pipeline returned {outW}x{outH} in {Environment.TickCount64 - start}ms.");
             return new[] { RgbToImage.FromHwcRgb(rgbBytes, outW, outH) };
@@ -452,6 +461,7 @@ public static class FluxLoader
             kontextRef?.Dispose();
             fluxCannyControl?.Dispose();
             redux?.Dispose();
+            fluxCn?.Dispose();
         }
     }
 

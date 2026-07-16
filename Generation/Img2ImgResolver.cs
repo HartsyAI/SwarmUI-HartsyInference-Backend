@@ -84,7 +84,7 @@ public static class Img2ImgResolver
     /// <summary>Decode a Swarm Image, resize to (w, h) with high-quality bicubic, and
     /// emit the HWC RGB byte array that <see cref="ImagePostProcessor.RgbBytesToTensor"/>
     /// consumes. Bicubic matches what SwarmUI's own resize helpers default to.</summary>
-    private static byte[] LoadResizedRgb(Image initImage, int w, int h)
+    internal static byte[] LoadResizedRgb(Image initImage, int w, int h)
     {
         using var frame = ISImage.Load<Rgb24>(initImage.RawData);
         if (frame.Width != w || frame.Height != h)
