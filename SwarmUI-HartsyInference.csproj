@@ -62,13 +62,17 @@
                         gap fixed: "HartsyInference" is now packed via a real project
                         (src/HartsyInference.Meta) wired into publish-nuget.yml, instead of a manual,
                         easily-forgotten `dotnet pack`+push that had been stuck at alpha.44 for weeks.
-                        Latest published on nuget.org as of this pin (verified via a from-scratch
-                        restore against nuget.org only, not just the version index).
+             alpha.49 = Kyutai TTS (Delayed-Streams Modeling) fully intelligible e2e — cross-attention
+                        voice source now includes the learnt-padding speaker slots (the missing-rows bug
+                        that produced non-speech) + text-token sampling for word pacing; depformer
+                        weights-per-step projections made device-resident (63.0 → 9.7 s on a 3060).
+                        Latest published on nuget.org as of this pin (verified via
+                        https://api.nuget.org/v3-flatcontainer/hartsyinference/index.json).
              NEVER pin a "-local" suffix here: those are locally-packed builds that live only on the
              dev machine's nuget.config feed and are NOT on nuget.org, so any downloaded copy of this
-             extension fails restore with NU1301. Always pin an EXACT version that appears in
-             https://api.nuget.org/v3-flatcontainer/hartsyinference/index.json. -->
-        <PackageReference Include="HartsyInference" Version="1.0.0-alpha.48" />
+             extension fails restore with NU1301 (the "missing local dll"-style error). Always pin an
+             EXACT version that appears in the flat-container index above. -->
+        <PackageReference Include="HartsyInference" Version="1.0.0-alpha.49" />
     </ItemGroup>
 
     <!-- LOCAL ENGINE: prebuilt DLLs from the SharpInference Cli bin (its full runtime closure). Referenced
