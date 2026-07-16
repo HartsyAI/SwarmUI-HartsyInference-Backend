@@ -30,9 +30,16 @@ namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 ///
 /// <para><b>Conditioning paths:</b> TI2V-5B I2V pins the VAE-encoded first frame at timestep 0 (expand_timesteps);
 /// Wan2.1 I2V instead concatenates a 36-channel <c>[noise, mask, cond-latent]</c> input and cross-attends to the CLIP
-/// image context. <b>A14B MoE caveat:</b> SwarmUI selects a single model file, so an A14B expert runs as a single
-/// transformer here (no high/low-noise boundary switch — that needs both expert files; the engine's
-/// <see cref="WanVideoPipeline"/> supports the full MoE when given <c>transformer2</c>). Numerics validation-pending.</para>
+/// image context.</para>
+///
+/// <para><b>Wan2.2 A14B MoE expert pairs</b> (base A14B, AnimeGen-T2V, and other high/low-noise finetune pairs):
+/// select the high-noise file as the main Model and the low-noise file in the <b>Refiner Model</b> slot (Swarm's
+/// documented Wan 2.2 pair convention — <c>docs/Video Model Support.md</c> §Wan 2.2), or via <b>Video Swap Model</b>
+/// (whose dropdown only lists I2V-class files; the refiner slot works for both). The engine's
+/// <see cref="WanVideoPipeline"/> then runs the full MoE: high-noise expert while <c>timestep ≥ boundary·1000</c>,
+/// low-noise below, with a single expert-swap at the crossing. The boundary defaults to Wan2.2's official
+/// 0.875 (T2V) / 0.9 (I2V); a user-moved Refiner Control Percentage / Video Swap Percent maps through the shifted
+/// flow schedule (see <see cref="ResolveBoundary"/>).</para>
 /// </summary>
 public static class WanVideoLoader
 {
@@ -42,6 +49,59 @@ public static class WanVideoLoader
 
     /// <summary>Wan's umT5 context length (matches diffusers' 512-token encode).</summary>
     private const int TokenLength = 512;
+
+    /// <summary>Resolves the low-noise expert of a Wan2.2 A14B-style MoE pair, or null for single-expert
+    /// generations. The Refiner Model slot is checked first (Swarm's documented Wan 2.2 pair convention),
+    /// then Video Swap Model (API parity / the I2V-group convention). Both the base and the expert must be
+    /// Wan-14B compat class — anything else is not a pair and returns null (validation refuses mismatches).</summary>
+    public static T2IModel ResolveLowNoiseModel(T2IModel model, T2IParamInput input)
+    {
+        if (input is null || model?.ModelClass?.CompatClass?.ID != Wan21_14BCompatClassId) return null;
+        T2IModel refiner = input.Get(T2IParamTypes.RefinerModel);
+        if (refiner?.ModelClass?.CompatClass?.ID == Wan21_14BCompatClassId) return refiner;
+        T2IModel swap = input.Get(T2IParamTypes.VideoSwapModel);
+        if (swap?.ModelClass?.CompatClass?.ID == Wan21_14BCompatClassId) return swap;
+        return null;
+    }
+
+    /// <summary>The user's explicit expert-split override — the fraction of steps given to the low-noise
+    /// expert — or null for "use the architecture default boundary". The registered defaults (Video Swap
+    /// Percent 0.5, Refiner Control Percentage 0.2) count as "auto": Swarm sends group params whenever the
+    /// group is open, so an untouched slider must not override Wan2.2's official boundary.</summary>
+    private static float? ExplicitSwapFraction(T2IParamInput input)
+    {
+        if (input.TryGet(T2IParamTypes.VideoSwapPercent, out double swapPct) && swapPct != 0.5) return (float)swapPct;
+        if (input.TryGet(T2IParamTypes.RefinerControl, out double refCtl) && refCtl > 0 && refCtl != 0.2) return (float)refCtl;
+        return null;
+    }
+
+    /// <summary>Maps the expert split to the engine's timestep boundary (<see cref="WanVideoConfig.BoundaryRatio"/>).
+    /// Untouched sliders → Wan2.2's official 0.875 (T2V) / 0.9 (I2V). An explicit fraction p converts through the
+    /// shifted flow schedule — boundary = s·p/(1+(s−1)·p), the same warp the UniPC sigmas use — so "fraction of
+    /// steps for the low expert" lands on the matching timestep (p=0.5 at shift 8 ≈ 0.889, consistent with the
+    /// official defaults).</summary>
+    private static float ResolveBoundary(T2IParamInput input, bool isConcatI2V)
+    {
+        float? p = ExplicitSwapFraction(input);
+        if (p is null) return isConcatI2V ? 0.9f : 0.875f;
+        float shift = input.TryGet(T2IParamTypes.SigmaShift, out double s) ? (float)s : 8f;
+        float frac = Math.Clamp(p.Value, 0.01f, 0.99f);
+        return shift * frac / (1f + (shift - 1f) * frac);
+    }
+
+    /// <summary>Cache key for a Wan generation: the base model name alone for single-expert runs, extended
+    /// with the low-noise expert name + resolved boundary for MoE pairs — so changing the pair or the split
+    /// reloads instead of silently reusing a stale single-expert pipeline. Safe to call for any architecture
+    /// (non-Wan-14B and null input just return <c>model.Name</c>).</summary>
+    public static string EffectiveCacheKey(T2IModel model, T2IParamInput input)
+    {
+        T2IModel low = ResolveLowNoiseModel(model, input);
+        if (low is null) return model.Name;
+        float? p = ExplicitSwapFraction(input);
+        string split = p is null ? "auto"
+            : ResolveBoundary(input, isConcatI2V: false).ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
+        return $"{model.Name}::moe::{low.Name}::b{split}";
+    }
 
     public static WanVideoCacheEntry Load(
         IBackend backend,
@@ -83,11 +143,43 @@ public static class WanVideoLoader
         string mode = isClipI2V ? "CLIP-I2V" : config.InChannels > config.VaeLatentChannels ? "concat-I2V" : "T2V/TI2V";
         log($"  Converted: {conv.Transformer.Count} transformer keys ({mode}, in {inChannels}, inner {config.InnerDim}{(config.CfgRescale > 0 ? $", cfg-renorm {config.CfgRescale}" : "")})");
 
+        // ── 1b. Wan2.2 A14B MoE: optional low-noise expert (Refiner slot per Swarm's Wan 2.2 pair convention,
+        // or Video Swap Model). BoundaryRatio > 0 makes WanVideoPipeline run the high-noise expert while
+        // timestep ≥ boundary·1000 and swap to the low-noise expert (freeing the other's VRAM) below it.
+        T2IModel lowNoiseModel = ResolveLowNoiseModel(model, input);
+        if (lowNoiseModel is not null)
+        {
+            if (string.IsNullOrWhiteSpace(lowNoiseModel.RawFilePath) || !File.Exists(lowNoiseModel.RawFilePath))
+                throw new FileNotFoundException($"Wan low-noise expert checkpoint not found: {lowNoiseModel.RawFilePath}");
+            if (WanModelVariants.Detect(lowNoiseModel) != WanModelVariants.Variant.Base)
+                throw new InvalidOperationException(
+                    $"Wan low-noise expert '{lowNoiseModel.Name}' is a VACE/Animate/S2V variant — the Wan2.2 expert pair needs plain T2V/I2V checkpoints.");
+            config = config with { BoundaryRatio = ResolveBoundary(input, isConcatI2V: config.InChannels > config.VaeLatentChannels) };
+        }
+
         WanVideoTransformer transformer = new WanVideoTransformer(config);
         transformer.LoadWeights(conv.Transformer);
+        WanVideoTransformer transformer2 = null;
+        Dictionary<string, Tensor> transformer2Weights = null;
+        SafeTensorsLoader lowNoiseLoader = null;
 
         try
         {
+            // ── 1c. Low-noise expert DiT (architecturally identical to the high-noise one) ──
+            if (lowNoiseModel is not null)
+            {
+                log($"Loading Wan low-noise expert: {lowNoiseModel.Name} (boundary {config.BoundaryRatio:0.###})");
+                (WanVideoCheckpointConverter.ConvertedWeights convLow, SafeTensorsLoader lowLoader) =
+                    WanVideoCheckpointConverter.LoadAndConvert(lowNoiseModel.RawFilePath);
+                lowNoiseLoader = lowLoader;
+                if (convLow.Transformer.Count == 0)
+                    throw new InvalidOperationException(
+                        $"Wan low-noise expert '{lowNoiseModel.Name}' has no recognized transformer weights after conversion.");
+                transformer2 = new WanVideoTransformer(config);
+                transformer2.LoadWeights(convLow.Transformer);
+                transformer2Weights = convLow.Transformer;
+            }
+
             // ── 2. VAE (decoder + encoder share one weight dict; cast to F32) ──
             log($"Loading Wan VAE: {vaeModel.Name}");
             var (vaeWeightsRaw, vaeLoaders) = LanceCheckpointConverter.LoadVae(vaeModel.RawFilePath);
@@ -131,12 +223,12 @@ public static class WanVideoLoader
             T5Tokenizer tokenizer = T5Tokenizer.CreateUmt5(maxLength: TokenLength);
 
             log("Building Wan video pipeline...");
-            WanVideoPipeline pipeline = new WanVideoPipeline(backend, transformer, vae, config, vaeEncoder);
+            WanVideoPipeline pipeline = new WanVideoPipeline(backend, transformer, vae, config, vaeEncoder, transformer2);
 
-            log($"Wan ready ({compat}, {(isClipI2V ? "CLIP image-to-video" : "text/image-to-video")}).");
+            log($"Wan ready ({compat}, {(isClipI2V ? "CLIP image-to-video" : "text/image-to-video")}{(transformer2 is not null ? ", MoE expert pair" : "")}).");
             return new WanVideoCacheEntry
             {
-                ModelName = model.Name,
+                ModelName = EffectiveCacheKey(model, input),
                 CompatClass = compat,
                 Pipeline = pipeline,
                 Config = config,
@@ -145,6 +237,9 @@ public static class WanVideoLoader
                 Umt5 = umt5,
                 Transformer = transformer,
                 TransformerWeights = conv.Transformer,
+                Transformer2 = transformer2,
+                Transformer2Weights = transformer2Weights,
+                LowNoiseLoader = lowNoiseLoader,
                 Vae = vae,
                 VaeEncoder = vaeEncoder,
                 ClipVision = clipVision,
@@ -157,6 +252,8 @@ public static class WanVideoLoader
         catch
         {
             transformer.Dispose();
+            transformer2?.Dispose();
+            lowNoiseLoader?.Dispose();
             ditLoader.Dispose();
             throw;
         }
@@ -179,7 +276,9 @@ public static class WanVideoLoader
         Action<GenerationProgress> onProgress, CancellationToken cancel) =>
         RunPipeline(entry.Pipeline, entry, backend, input, onProgress, cancel);
 
-    /// <summary>LoRA path: clone the cached DiT weights, merge the stack, run a fresh transformer + pipeline.</summary>
+    /// <summary>LoRA path: clone the cached DiT weights, merge the stack, run a fresh transformer + pipeline.
+    /// For a MoE pair the same stack merges into BOTH experts (the Wan2.2 community convention — e.g. the
+    /// lightx2v Lightning pairs ship one file per expert but plain single-file LoRAs target both).</summary>
     public static Image[] GenerateWithLoras(
         WanVideoCacheEntry entry, IReadOnlyList<LoraResolver.LoraSpec> loras, IBackend backend, T2IParamInput input,
         Action<GenerationProgress> onProgress, CancellationToken cancel)
@@ -187,20 +286,32 @@ public static class WanVideoLoader
         // A KEEP_MODELS-resident base DiT from a prior no-LoRA generation can't coexist with the merged
         // transformer's preload — free it up front (the next no-LoRA generation re-uploads it).
         backend.FreeWeights(entry.Transformer.EnumerateWeights());
+        if (entry.Transformer2 is not null) backend.FreeWeights(entry.Transformer2.EnumerateWeights());
         backend.TrimMemoryPool();
         Dictionary<string, Tensor> transformerWeights = LoraApplier.ShallowClone(entry.TransformerWeights);
         LoraStack stack = LoraApplier.BuildAndApply(loras, backend, transformerWeights: transformerWeights);
         WanVideoTransformer transformer = new WanVideoTransformer(entry.Config);
+        WanVideoTransformer transformer2 = null;
+        LoraStack stack2 = null;
         try
         {
             transformer.LoadWeights(transformerWeights);
-            using WanVideoPipeline pipeline = new WanVideoPipeline(backend, transformer, entry.Vae, entry.Config, entry.VaeEncoder);
+            if (entry.Transformer2 is not null)
+            {
+                Dictionary<string, Tensor> lowWeights = LoraApplier.ShallowClone(entry.Transformer2Weights);
+                stack2 = LoraApplier.BuildAndApply(loras, backend, transformerWeights: lowWeights);
+                transformer2 = new WanVideoTransformer(entry.Config);
+                transformer2.LoadWeights(lowWeights);
+            }
+            using WanVideoPipeline pipeline = new WanVideoPipeline(backend, transformer, entry.Vae, entry.Config, entry.VaeEncoder, transformer2);
             return RunPipeline(pipeline, entry, backend, input, onProgress, cancel);
         }
         finally
         {
             transformer?.Dispose();
+            transformer2?.Dispose();
             stack?.Dispose();
+            stack2?.Dispose();
         }
     }
 
@@ -386,6 +497,7 @@ public static class WanVideoLoader
             Logs.Info($"[HartsyInference][Wan] [wan-phase] {label} upload: evicting resident DiT " +
                 $"(free {free >> 20} MB < {need >> 20} MB + 2048 MB margin).");
             backend.FreeWeights(entry.Transformer.EnumerateWeights());
+            if (entry.Transformer2 is not null) backend.FreeWeights(entry.Transformer2.EnumerateWeights());
             backend.TrimMemoryPool();
         }
         else
@@ -408,6 +520,8 @@ public static class WanVideoLoader
 
 public sealed class WanVideoCacheEntry : IDisposable
 {
+    /// <summary>Cache key (<see cref="WanVideoLoader.EffectiveCacheKey"/>): the base model name, extended
+    /// with the low-noise expert + boundary for Wan2.2 MoE pairs.</summary>
     public required string ModelName { get; init; }
     public required string CompatClass { get; init; }
     public required WanVideoPipeline Pipeline { get; init; }
@@ -420,6 +534,15 @@ public sealed class WanVideoCacheEntry : IDisposable
     /// <summary>Converted (diffusers-named) DiT weight dict, retained for per-generation LoRA merging
     /// (<see cref="LoraApplier.ShallowClone"/> before mutating).</summary>
     public required Dictionary<string, Tensor> TransformerWeights { get; init; }
+
+    /// <summary>Low-noise expert DiT (Wan2.2 A14B MoE pair); null for single-expert checkpoints.</summary>
+    public WanVideoTransformer Transformer2 { get; init; }
+
+    /// <summary>Converted weight dict of the low-noise expert, retained for LoRA merging (null when single-expert).</summary>
+    public Dictionary<string, Tensor> Transformer2Weights { get; init; }
+
+    /// <summary>mmap loader backing the low-noise expert (null when single-expert).</summary>
+    public SafeTensorsLoader LowNoiseLoader { get; init; }
     public required IWanVaeDecoder Vae { get; init; }
     public required IWanVaeEncoder VaeEncoder { get; init; }
     public ClipVisionEncoder ClipVision { get; init; }
@@ -453,7 +576,9 @@ public sealed class WanVideoCacheEntry : IDisposable
         Tokenizer?.Dispose();
         Umt5?.Dispose();
         Transformer?.Dispose();
+        Transformer2?.Dispose();
         CheckpointLoader?.Dispose();
+        LowNoiseLoader?.Dispose();
         Umt5Loader?.Dispose();
         ClipLoader?.Dispose();
         if (VaeLoaders is not null)
