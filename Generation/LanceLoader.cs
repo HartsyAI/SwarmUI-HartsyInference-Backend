@@ -72,11 +72,15 @@ public static class LanceLoader
     /// apart by folder name — both variants ship byte-identical configs.</summary>
     private static bool IsLanceFolder(T2IModel model, Newtonsoft.Json.Linq.JObject header, bool video)
     {
-        if (model?.RawFilePath is null || !Directory.Exists(model.RawFilePath))
+        // Swarm's model scanner registers FILES only — a Lance "model" is the checkpoint's
+        // model.safetensors with llm_config.json etc. as siblings (the upstream folder layout).
+        // Accept a bare folder path too for API-registered models.
+        string folder = ResolveLanceFolder(model?.RawFilePath);
+        if (folder is null)
         {
             return false;
         }
-        string llmConfig = $"{model.RawFilePath}/llm_config.json";
+        string llmConfig = $"{folder}/llm_config.json";
         if (!File.Exists(llmConfig) || !File.ReadAllText(llmConfig).Contains("Qwen2_5_VL"))
         {
             return false;
@@ -85,8 +89,26 @@ public static class LanceLoader
         {
             return false;
         }
-        bool isVideoVariant = model.RawFilePath.Replace('\\', '/').AfterLast('/').ToLowerInvariant().Contains("video");
+        bool isVideoVariant = folder.Replace('\\', '/').AfterLast('/').ToLowerInvariant().Contains("video");
         return video == isVideoVariant;
+    }
+
+    /// <summary>Maps a Swarm model path (the .safetensors file or the checkpoint folder itself) to the Lance checkpoint folder, or null when neither exists.</summary>
+    private static string ResolveLanceFolder(string rawPath)
+    {
+        if (string.IsNullOrWhiteSpace(rawPath))
+        {
+            return null;
+        }
+        if (Directory.Exists(rawPath))
+        {
+            return rawPath;
+        }
+        if (File.Exists(rawPath))
+        {
+            return Path.GetDirectoryName(rawPath)?.Replace('\\', '/');
+        }
+        return null;
     }
 
     public static LanceCacheEntry Load(
@@ -97,8 +119,8 @@ public static class LanceLoader
     {
         if (string.IsNullOrWhiteSpace(model?.RawFilePath))
             throw new InvalidOperationException("Lance model has no folder path.");
-        if (!Directory.Exists(model.RawFilePath))
-            throw new DirectoryNotFoundException($"Lance checkpoint folder not found: {model.RawFilePath}");
+        string checkpointFolder = ResolveLanceFolder(model.RawFilePath)
+            ?? throw new DirectoryNotFoundException($"Lance checkpoint folder not found: {model.RawFilePath}");
 
         bool isVideo = model.ModelClass?.ID == LanceT2VClassId;
 
@@ -109,7 +131,7 @@ public static class LanceLoader
 
         // ── 1. Transformer (sharded-folder aware converter) ──
         log($"Loading Lance backbone: {model.Name}");
-        var (conv, loaders) = LanceCheckpointConverter.LoadAndConvert(model.RawFilePath);
+        var (conv, loaders) = LanceCheckpointConverter.LoadAndConvert(checkpointFolder);
         if (conv.Transformer.Count == 0)
         {
             foreach (SafeTensorsLoader l in loaders) l.Dispose();
@@ -128,8 +150,8 @@ public static class LanceLoader
         vae.LoadWeights(vaeWeights);
 
         // ── 3. Qwen2 chat tokenizer — prefer the checkpoint's own vocab/merges ──
-        string vocabPath = $"{model.RawFilePath}/vocab.json";
-        string mergesPath = $"{model.RawFilePath}/merges.txt";
+        string vocabPath = $"{checkpointFolder}/vocab.json";
+        string mergesPath = $"{checkpointFolder}/merges.txt";
         Qwen2Tokenizer tokenizer;
         if (File.Exists(vocabPath) && File.Exists(mergesPath))
         {

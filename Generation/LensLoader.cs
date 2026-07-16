@@ -27,7 +27,9 @@ public static class LensLoader
 {
     public const string LensCompatClassId = "lens";
 
-    private const string TokenizerJsonUrl = "https://huggingface.co/microsoft/Lens/resolve/main/tokenizer/tokenizer.json";
+    // The microsoft/Lens repo is not public; the GPT-OSS o200k-harmony tokenizer that Lens's encoder
+    // uses ships with the (non-gated) openai/gpt-oss-20b repo — byte-identical tokenizer.json.
+    private const string TokenizerJsonUrl = "https://huggingface.co/openai/gpt-oss-20b/resolve/main/tokenizer.json";
 
     public static LensCacheEntry Load(
         IBackend backend,
