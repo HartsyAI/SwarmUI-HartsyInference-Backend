@@ -102,9 +102,17 @@ public static class ControlNetResolver
                         msg => log($"[Depth] {msg}")),
                     ControlNetMode.OpenPose => OpenPoseControlPreprocessor.Process(cnImage, targetW, targetH, backend,
                         msg => log($"[OpenPose] {msg}")),
+                    ControlNetMode.SoftEdge => AnnotatorControlPreprocessors.ProcessSoftEdge(cnImage, targetW, targetH, backend,
+                        msg => log($"[SoftEdge] {msg}")),
+                    ControlNetMode.Scribble => AnnotatorControlPreprocessors.ProcessScribble(cnImage, targetW, targetH, backend,
+                        msg => log($"[Scribble] {msg}")),
+                    ControlNetMode.LineArt => AnnotatorControlPreprocessors.ProcessLineart(cnImage, targetW, targetH, backend,
+                        msg => log($"[Lineart] {msg}")),
+                    ControlNetMode.Normal => AnnotatorControlPreprocessors.ProcessNormal(cnImage, targetW, targetH, backend,
+                        msg => log($"[Normal] {msg}")),
                     _ => throw new NotSupportedException(
                         $"ControlNet[{i}] '{cnModel.Name}' detected as mode '{entry.File.Mode}'. " +
-                        $"Currently supported preprocessors: Canny, Depth, OpenPose. Other modes (lineart, softedge, normal, seg) land with the in-engine preprocessor subsystem."),
+                        $"Currently supported preprocessors: Canny, Depth, OpenPose, SoftEdge/HED, Scribble, Lineart, Normal. Segmentation/Tile/Inpaint modes are follow-ups."),
                 };
                 images.Add(condTensor);
 
