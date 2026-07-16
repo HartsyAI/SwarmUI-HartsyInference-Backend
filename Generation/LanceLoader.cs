@@ -26,10 +26,10 @@ namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 /// Required side model: the Wan2.2 48-channel video VAE (<see cref="SideModels.Wan22Vae"/> — the
 /// same file the Wan2.2 loader uses; Lance's HF repo only ships the equivalent .pth).
 ///
-/// Text conditioning: Qwen2.5 ChatML chat template via <see cref="Qwen2Tokenizer"/>, preferring the
-/// vocab.json/merges.txt shipped inside the checkpoint folder. NOTE: the engine pipelines are
-/// first-run-validation pending (no real-checkpoint numerics yet) — generation works end-to-end but
-/// output fidelity is unverified until the engine's validation pass lands.
+/// Text conditioning: caption tokens (byte-level-exact BPE from the checkpoint's tokenizer.json via
+/// <see cref="HfTokenizerJson"/>; embedded <see cref="Qwen2Tokenizer"/> only as fallback) wrapped by
+/// the engine pipeline in the upstream T2I chat scaffold (<c>LancePromptTemplate</c>). Backbone
+/// numerics are parity-verified against the real Lance_3B checkpoint.
 /// </summary>
 public static class LanceLoader
 {
@@ -38,8 +38,8 @@ public static class LanceLoader
     public const string LanceT2IClassId = "lance-t2i";
     public const string LanceT2VClassId = "lance-t2v";
 
-    /// <summary>Total downscale between pixels and transformer tokens (VAE 16x then patchify 2x).</summary>
-    private const int SizeMultiple = 32;
+    /// <summary>Total downscale between pixels and transformer tokens (VAE 16x, latent patch (1,1,1) per the real checkpoint).</summary>
+    private const int SizeMultiple = 16;
 
     /// <summary>Registers the Lance compat + model classes (core has none). Call once at extension
     /// init, before model folders are scanned.</summary>
@@ -149,27 +149,28 @@ public static class LanceLoader
         Wan22VaeDecoder vae = new Wan22VaeDecoder();
         vae.LoadWeights(vaeWeights);
 
-        // ── 3. Qwen2 chat tokenizer — prefer the checkpoint's own vocab/merges ──
-        string vocabPath = $"{checkpointFolder}/vocab.json";
-        string mergesPath = $"{checkpointFolder}/merges.txt";
-        Qwen2Tokenizer tokenizer;
-        if (File.Exists(vocabPath) && File.Exists(mergesPath))
+        // ── 3. Byte-level BPE from the checkpoint's tokenizer.json (exact pre-tokenizer Split regex;
+        // the two-file Qwen2Tokenizer path mis-splits space+punct sequences and is only a fallback) ──
+        ILlmTokenizer tokenizer;
+        string tokenizerJsonPath = $"{checkpointFolder}/tokenizer.json";
+        if (File.Exists(tokenizerJsonPath))
         {
-            log("Loading Qwen2 tokenizer from checkpoint folder...");
-            tokenizer = new Qwen2Tokenizer(vocabPath, mergesPath);
+            log("Loading byte-level BPE from checkpoint tokenizer.json...");
+            using FileStream tokFs = File.OpenRead(tokenizerJsonPath);
+            tokenizer = HfTokenizerJson.LoadByteLevelBpe(tokFs);
         }
         else
         {
-            log("Checkpoint folder has no vocab.json/merges.txt — using embedded Qwen2 tokenizer.");
+            log("Checkpoint folder has no tokenizer.json — falling back to the embedded Qwen2 tokenizer (token ids may differ around punctuation).");
             tokenizer = new Qwen2Tokenizer();
         }
 
         log("Building Lance pipeline...");
-        LanceImagePipeline imagePipeline = new LanceImagePipeline(backend, transformer, vae, config);
-        LanceVideoPipeline videoPipeline = isVideo ? new LanceVideoPipeline(backend, transformer, vae, config) : null;
+        LancePromptTemplate template = LancePromptTemplate.Create(tokenizer.EncodeOrdinary, config, video: isVideo);
+        LanceImagePipeline imagePipeline = new LanceImagePipeline(backend, transformer, vae, config, template);
+        LanceVideoPipeline videoPipeline = isVideo ? new LanceVideoPipeline(backend, transformer, vae, config, template) : null;
 
-        log($"Lance ready ({(isVideo ? "text-to-image + text-to-video" : "text-to-image")}). " +
-            "Note: engine numerics are first-run-validation pending.");
+        log($"Lance ready ({(isVideo ? "text-to-image + text-to-video" : "text-to-image")}).");
         return new LanceCacheEntry
         {
             ModelName = model.Name,
@@ -218,8 +219,9 @@ public static class LanceLoader
             }
         }
 
-        int[] promptTokens = entry.Tokenizer.EncodeChat(prompt);
-        int[] negativeTokens = entry.Tokenizer.EncodeChat(negative ?? "");
+        // Caption-only tokens: the pipeline wraps them in the upstream chat-templated scaffold itself.
+        int[] promptTokens = entry.Tokenizer.EncodeOrdinary(prompt ?? "");
+        int[] negativeTokens = string.IsNullOrWhiteSpace(negative) ? [] : entry.Tokenizer.EncodeOrdinary(negative);
 
         TextToImageRequest request = new TextToImageRequest
         {
@@ -265,7 +267,7 @@ public sealed class LanceCacheEntry : IDisposable
     public required LanceConfig Config { get; init; }
     public required LanceTransformer Transformer { get; init; }
     public required Wan22VaeDecoder Vae { get; init; }
-    public required Qwen2Tokenizer Tokenizer { get; init; }
+    public required ILlmTokenizer Tokenizer { get; init; }
     public required IReadOnlyList<SafeTensorsLoader> CheckpointLoaders { get; init; }
     public required IReadOnlyList<SafeTensorsLoader> VaeLoaders { get; init; }
 
@@ -279,7 +281,7 @@ public sealed class LanceCacheEntry : IDisposable
         (ImagePipeline as IDisposable)?.Dispose();
         (VideoPipeline as IDisposable)?.Dispose();
         Transformer?.Dispose();
-        Tokenizer?.Dispose();
+        (Tokenizer as IDisposable)?.Dispose();
         if (CheckpointLoaders is not null)
         {
             foreach (SafeTensorsLoader loader in CheckpointLoaders) loader?.Dispose();
