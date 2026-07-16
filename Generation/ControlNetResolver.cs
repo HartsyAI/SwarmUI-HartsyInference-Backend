@@ -100,9 +100,11 @@ public static class ControlNetResolver
                     ControlNetMode.Canny => CannyPreprocessor.Process(cnImage, targetW, targetH),
                     ControlNetMode.Depth => DepthPreprocessor.Process(cnImage, targetW, targetH, backend,
                         msg => log($"[Depth] {msg}")),
+                    ControlNetMode.OpenPose => OpenPoseControlPreprocessor.Process(cnImage, targetW, targetH, backend,
+                        msg => log($"[OpenPose] {msg}")),
                     _ => throw new NotSupportedException(
                         $"ControlNet[{i}] '{cnModel.Name}' detected as mode '{entry.File.Mode}'. " +
-                        $"Currently supported preprocessors: Canny, Depth. Other modes (OpenPose, lineart, softedge, normal, seg) land with the in-engine preprocessor subsystem."),
+                        $"Currently supported preprocessors: Canny, Depth, OpenPose. Other modes (lineart, softedge, normal, seg) land with the in-engine preprocessor subsystem."),
                 };
                 images.Add(condTensor);
 
