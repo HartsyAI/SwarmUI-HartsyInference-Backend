@@ -148,11 +148,9 @@ public static class FluxLoader
         var (doubleBlocks, singleBlocks, hasGuidance) = FluxCheckpointConverter.DetectArchitecture(transformerWeights);
 
         // FLUX.1 Tools detection: vanilla Flux has x_embedder input dim 64 (16 latent
-        // channels × 2×2 packing). Canny / Depth / Fill variants have 128 (32 channels).
-        // Same architectural shape across all three Tools — the difference is just how the
-        // control image is preprocessed (canny / depth / mask). v1 wires Canny only;
-        // Depth/Fill detect cleanly but refuse at load time so the user gets a clear msg
-        // instead of a runtime crash from missing depth-estimator / mask handling.
+        // channels × 2×2 packing). Canny / Depth have 128 (64 noise + 64 packed control);
+        // Fill has 384 (64 noise + 64 masked latent + 256 packed mask). Canny and Fill are
+        // fully wired; Depth runs the in-engine Depth-Anything-V2 annotator at gen time.
         FluxToolsMode toolsMode = DetectToolsMode(transformerWeights, model.Name);
         // Kontext is architecturally identical to Dev (x_embedder stays 64-wide — the reference image is
         // sequence-appended at runtime, not channel-concat like Tools), so it can only be identified from
@@ -160,31 +158,12 @@ public static class FluxLoader
         bool isKontext = (model.ModelClass?.ID?.Contains("kontext", StringComparison.OrdinalIgnoreCase) ?? false)
             || model.Name.Contains("kontext", StringComparison.OrdinalIgnoreCase);
         log($"Architecture: {doubleBlocks} double, {singleBlocks} single, guidance={hasGuidance} ({(hasGuidance ? "Dev" : "Schnell")}), tools={toolsMode}, kontext={isKontext}");
-        if (toolsMode == FluxToolsMode.Depth)
+        FluxConfig fluxConfig = toolsMode switch
         {
-            mainLoader?.Dispose();
-            ggufHandle?.Dispose();
-            clipLLoader?.Dispose();
-            t5Loader?.Dispose();
-            vaeLoader?.Dispose();
-            throw new InvalidOperationException(
-                "FLUX.1 Depth detected. Depth conditioning needs a DepthAnything-V2 (or similar) ONNX preprocessor that's not yet bundled. " +
-                "Detected variant cleanly; will be supported in a follow-up alongside DepthAnything wiring. Use FLUX.1 Canny for now.");
-        }
-        if (toolsMode == FluxToolsMode.Fill)
-        {
-            mainLoader?.Dispose();
-            ggufHandle?.Dispose();
-            clipLLoader?.Dispose();
-            t5Loader?.Dispose();
-            vaeLoader?.Dispose();
-            throw new InvalidOperationException(
-                "FLUX.1 Fill detected. Fill needs masked-image + mask preprocessing that's not yet wired through the Flux pipeline. " +
-                "Detected variant cleanly; will be supported in a follow-up. Use blend-on-vanilla inpaint with vanilla Flux + a mask in the meantime.");
-        }
-        FluxConfig fluxConfig = toolsMode != FluxToolsMode.Vanilla
-            ? FluxConfig.Flux1Tools
-            : (hasGuidance ? FluxConfig.Dev : FluxConfig.Schnell);
+            FluxToolsMode.Fill => FluxConfig.Flux1Fill,
+            FluxToolsMode.Canny or FluxToolsMode.Depth => FluxConfig.Flux1Tools,
+            _ => hasGuidance ? FluxConfig.Dev : FluxConfig.Schnell,
+        };
 
         // fp8 checkpoints on hardware without native FP8 GEMM (Ampere and below) fall back to
         // casting each fp8 weight to F16/BF16 on first use. With CacheWeightCasts=true (default)
@@ -232,6 +211,7 @@ public static class FluxLoader
         {
             ModelName = model.Name,
             CompatClass = Flux1CompatClassId,
+            Backend = backend,
             IsDev = hasGuidance,
             IsKontext = isKontext,
             ToolsMode = toolsMode,
@@ -340,7 +320,7 @@ public static class FluxLoader
         // [-1, 1] range Flux's VAE expects, and pass that to the pipeline which handles
         // VAE encoding + packing internally.
         Tensor fluxCannyControl = null;
-        if (entry.ToolsMode == FluxToolsMode.Canny)
+        if (entry.ToolsMode is FluxToolsMode.Canny or FluxToolsMode.Depth)
         {
             Image cnImage = null;
             T2IParamTypes.ControlNetParamHolder[] cnHolders = T2IParamTypes.Controlnets;
@@ -352,22 +332,49 @@ public static class FluxLoader
             if (cnImage is null)
             {
                 throw new InvalidOperationException(
-                    "FLUX.1 Canny requires a reference image. Set ControlNet Image Input or Init Image — the canny edges will be extracted from it and used as the control conditioning.");
+                    $"FLUX.1 {entry.ToolsMode} requires a reference image. Set ControlNet Image Input or Init Image — " +
+                    $"the {(entry.ToolsMode == FluxToolsMode.Canny ? "canny edges" : "depth map")} will be extracted from it and used as the control conditioning.");
             }
-            Logs.Verbose($"[HartsyInference][Flux Canny] Building canny control from reference image at {width}x{height}.");
-            Tensor cannyZeroOne = CannyPreprocessor.Process(cnImage, width, height);
+            Logs.Verbose($"[HartsyInference][Flux {entry.ToolsMode}] Building control map from reference image at {width}x{height}.");
+            Tensor controlZeroOne = entry.ToolsMode == FluxToolsMode.Canny
+                ? CannyPreprocessor.Process(cnImage, width, height)
+                : DepthPreprocessor.Process(cnImage, width, height, entry.Backend,
+                    msg => Logs.Verbose($"[HartsyInference][Flux Depth] {msg}"));
             try
             {
-                // Flux VAE expects RGB in [-1, 1]; CannyPreprocessor returns [0, 1].
-                fluxCannyControl = ScaleZeroOneToMinusOneOne(cannyZeroOne);
+                string dumpDir = Environment.GetEnvironmentVariable("HARTSY_DUMP_CONTROL");
+                if (!string.IsNullOrEmpty(dumpDir))
+                {
+                    DumpControlPng(controlZeroOne, Path.Combine(dumpDir, $"flux_control_{entry.ToolsMode}.png".ToLowerInvariant()));
+                }
+                // Flux VAE expects RGB in [-1, 1]; both preprocessors return [0, 1].
+                fluxCannyControl = ScaleZeroOneToMinusOneOne(controlZeroOne);
             }
             finally
             {
-                cannyZeroOne.Dispose();
+                controlZeroOne.Dispose();
             }
         }
 
         Img2ImgResolver.Img2ImgSpec img2img = Img2ImgResolver.Resolve(input, width, height);
+        // FLUX.1 Fill: the engine conditions the wide x_embedder on Init Image + Mask directly
+        // (diffusers FluxFillPipeline). Both are required; denoise strength defaults to 1.0
+        // (full regeneration of the masked region) unless the user explicitly set creativity.
+        float img2imgStrength = img2img?.Strength ?? 0f;
+        if (entry.ToolsMode == FluxToolsMode.Fill)
+        {
+            if (img2img is null || img2img.MaskTensor is null)
+            {
+                img2img?.Dispose();
+                throw new InvalidOperationException(
+                    "FLUX.1 Fill requires both an Init Image and a Mask Image — the masked region is regenerated from the prompt.");
+            }
+            if (!input.TryGet(T2IParamTypes.InitImageCreativity, out _))
+            {
+                img2imgStrength = 1.0f;
+                Logs.Verbose("[HartsyInference][Flux Fill] No explicit Init Image Creativity; defaulting fill strength to 1.0.");
+            }
+        }
         // Kontext editing: on a Kontext model the Init Image is the EDIT REFERENCE, not an img2img source —
         // the pipeline VAE-encodes it and sequence-appends its tokens every step (diffusers FluxKontext flow),
         // while denoising still starts from pure noise. Consume the resolved spec's tensor as the reference
@@ -380,6 +387,12 @@ public static class FluxLoader
             img2img.MaskTensor?.Dispose();
             img2img = null;
         }
+        // FLUX.1 Redux (style model): SigLIP + projector run on the calling thread; the pipeline
+        // appends the resulting tokens after the T5 stream. Works on any Flux variant (Comfy applies
+        // style models to the positive conditioning the same way).
+        ReduxResolver.ReduxSpec redux = ReduxResolver.Resolve(
+            input, entry.Backend, msg => Logs.Verbose($"[HartsyInference][Flux Redux] {msg}"));
+
         int? seed = seedLong < 0 ? null : (int?)(int)(seedLong & 0x7FFFFFFF);
         // Variation seed: Flux injects unpacked [1,16,H/8,W/8] noise (FluxLatentChannels=16).
         Tensor variationNoise = VariationSeedResolver.Resolve(input, width, height, seed, VariationSeedResolver.FluxLatentChannels);
@@ -395,7 +408,7 @@ public static class FluxLoader
                 Seed = seed,
                 InitialNoise = variationNoise,
                 SourceImage = img2img.SourceTensor,
-                Strength = img2img.Strength,
+                Strength = img2imgStrength,
                 Mask = img2img.MaskTensor,
             };
         }
@@ -426,7 +439,9 @@ public static class FluxLoader
                 guidanceScale: guidance,
                 onProgress: bridge,
                 controlImage: fluxCannyControl,
-                kontextRefImage: kontextRef);
+                kontextRefImage: kontextRef,
+                reduxImageEmbeds: redux?.Embeds,
+                reduxApplyStartFraction: redux?.ApplyStart ?? 0f);
 
             Logs.Verbose($"[HartsyInference][Flux] Pipeline returned {outW}x{outH} in {Environment.TickCount64 - start}ms.");
             return new[] { RgbToImage.FromHwcRgb(rgbBytes, outW, outH) };
@@ -436,6 +451,7 @@ public static class FluxLoader
             img2img?.Dispose();
             kontextRef?.Dispose();
             fluxCannyControl?.Dispose();
+            redux?.Dispose();
         }
     }
 
@@ -553,12 +569,41 @@ public static class FluxLoader
     {
         if (!transformerWeights.TryGetValue("x_embedder.weight", out Tensor xEmbed)) return FluxToolsMode.Vanilla;
         long inputDim = xEmbed.Shape.Rank >= 2 ? xEmbed.Shape[1] : 0;
+        // Fill is architecturally distinct: 384-wide x_embedder (64 noise + 64 masked latent + 256 packed
+        // mask) vs the 128-wide Canny/Depth control concat — no filename hint needed.
+        if (inputDim >= 384) return FluxToolsMode.Fill;
         if (inputDim != 128) return FluxToolsMode.Vanilla;
         string lowered = modelName.ToLowerInvariant();
         if (lowered.Contains("canny")) return FluxToolsMode.Canny;
         if (lowered.Contains("depth")) return FluxToolsMode.Depth;
-        if (lowered.Contains("fill")) return FluxToolsMode.Fill;
         return FluxToolsMode.Canny;
+    }
+
+    /// <summary>Debug aid (HARTSY_DUMP_CONTROL=dir): writes a [1,3,H,W] [0,1] control tensor as a PNG so the conditioning map can be inspected.</summary>
+    private static unsafe void DumpControlPng(Tensor control, string path)
+    {
+        try
+        {
+            int h = (int)control.Shape[2];
+            int w = (int)control.Shape[3];
+            float* p = (float*)control.DataPointer;
+            byte[] rgb = new byte[h * w * 3];
+            for (int c = 0; c < 3; c++)
+            {
+                for (int i = 0; i < h * w; i++)
+                {
+                    rgb[i * 3 + c] = (byte)Math.Clamp((int)(p[(long)c * h * w + i] * 255f), 0, 255);
+                }
+            }
+            using var img = SixLabors.ImageSharp.Image.LoadPixelData<SixLabors.ImageSharp.PixelFormats.Rgb24>(rgb, w, h);
+            using FileStream fs = File.OpenWrite(path);
+            SixLabors.ImageSharp.ImageExtensions.SaveAsPng(img, fs);
+            Logs.Info($"[HartsyInference] Control map dumped to {path}");
+        }
+        catch (Exception ex)
+        {
+            Logs.Error($"[HartsyInference] Control map dump failed: {ex.Message}");
+        }
     }
 
     /// <summary>Normalizes the keys of a standalone Flux VAE safetensors file into the
@@ -620,6 +665,8 @@ public sealed class FluxCacheEntry : IDisposable
 {
     public required string ModelName { get; init; }
     public required string CompatClass { get; init; }
+    /// <summary>The backend the pipeline was built on — used by gen-time resolvers (Redux SigLIP encode, Depth-Anything) that run device work outside the pipeline.</summary>
+    public required IBackend Backend { get; init; }
     public required bool IsDev { get; init; }
 
     /// <summary>True for FLUX.1 Kontext models — the Init Image routes as the sequence-appended edit

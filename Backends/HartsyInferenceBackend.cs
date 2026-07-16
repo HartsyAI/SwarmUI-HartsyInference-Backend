@@ -1353,7 +1353,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     /// sampler/scheduler/upscale-method feed our refiner path. Everything else tagged
     /// "comfyui" is a Comfy-node-only feature we can't run, so it's refused and routed to Comfy.</summary>
     private static readonly HashSet<string> HonoredComfyParams =
-        ["sampler", "scheduler", "refinersampler", "refinerscheduler", "refinerupscalemethod"];
+        ["sampler", "scheduler", "refinersampler", "refinerscheduler", "refinerupscalemethod",
+         "stylemodelmergestrength", "stylemodelmultiplystrength", "stylemodelapplystart"];
 
     /// <summary>Architectures whose pipelines have the inpaint blend path — the only ones that
     /// can run YOLO segment re-denoise (which is img2img + mask under the hood).</summary>
@@ -1740,6 +1741,25 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             }
             // FaceID variants are refused at load time inside IpAdapterResolver — they need
             // an InsightFace ArcFace runtime which we don't link.
+        }
+
+        // Style model (FLUX.1 Redux): wired for the Flux family only — the redux tokens ride
+        // Flux's joint [txt|img] attention. Refuse on other archs so the selection isn't
+        // silently ignored (the master `usestylemodel` param is `flux-dev`-flagged, which is
+        // a DisregardedFeatureFlag and would otherwise slip through).
+        if (T2IParamTypes.TryGetType("usestylemodel", out T2IParamType styleType, input)
+            && input.TryGetRaw(styleType, out object styleRaw)
+            && styleRaw is string styleModel
+            && !string.IsNullOrEmpty(styleModel)
+            && styleModel != "None")
+        {
+            if (compat != FluxLoader.Flux1CompatClassId)
+            {
+                input.RefusalReasons.Add(
+                    $"HartsyInference: Style Models (FLUX.1 Redux) are supported on Flux.1 models only (got base architecture '{compat}'). " +
+                    $"Set Use Style Model to None or pick a Flux.1 model.");
+                return false;
+            }
         }
 
         // ControlNet: SDXL-base only in v1 (Canny preprocessor only). Other base models

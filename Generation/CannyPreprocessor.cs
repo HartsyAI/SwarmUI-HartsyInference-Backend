@@ -25,7 +25,7 @@ namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 /// the convention diffusers' ControlNet expects on its conditioning input
 /// (the hint encoder bakes any further normalization into its weights).</para>
 ///
-/// <para>Defaults <c>low=100, high=200</c> match Comfy's <c>CannyEdgePreprocessor</c>
+/// <para>Defaults <c>low=100, high=200</c> match the cv2.Canny convention
 /// for parity with the reference workflow. Higher thresholds → fewer / cleaner
 /// edges; lower → more / noisier. v1 keeps these hardcoded; expose as advanced
 /// params in a follow-up if users ask.</para>
@@ -42,7 +42,9 @@ public static unsafe class CannyPreprocessor
         }
 
         byte[] gray = LoadResizedGrayscale(inputImage, targetW, targetH);
-        GaussianBlurInPlace(gray, targetW, targetH, sigma: 1.4f);
+        // NO Gaussian pre-blur: cv2.Canny (the convention the 100/200 thresholds come from — BFL's
+        // reference uses cv2.Canny(50, 200)) does not blur internally. The previous sigma-1.4 blur
+        // crushed soft-photo gradients below the strong threshold and produced near-empty edge maps.
 
         // Sobel: separate Gx, Gy; magnitude + quantized direction (0, 45, 90, 135 degrees).
         float[] mag = new float[targetW * targetH];
@@ -77,15 +79,6 @@ public static unsafe class CannyPreprocessor
         return bytes;
     }
 
-    /// <summary>Gaussian blur via ImageSharp's L8 filter. Sigma 1.4 is the textbook Canny default — strong enough to suppress sensor noise without erasing the fine edges Canny is meant to find.</summary>
-    private static void GaussianBlurInPlace(byte[] gray, int w, int h, float sigma)
-    {
-        if (sigma < 1e-3f) return;
-        using var img = ISImage.LoadPixelData<L8>(gray, w, h);
-        img.Mutate(ctx => ctx.GaussianBlur(sigma));
-        img.CopyPixelDataTo(gray);
-    }
-
     /// <summary>3×3 Sobel: <c>Gx = [[-1,0,1],[-2,0,2],[-1,0,1]]</c>, <c>Gy = [[-1,-2,-1],[0,0,0],[1,2,1]]</c>. Computes magnitude (Euclidean) and quantizes the gradient direction into 4 bins (0, 45, 90, 135 degrees) for the NMS step. Boundary pixels left at zero — Canny edges along the image border are uncommon and the simpler boundary handling is worth it.</summary>
     private static void ComputeGradients(byte[] gray, int w, int h, float[] mag, byte[] dir)
     {
@@ -101,7 +94,9 @@ public static unsafe class CannyPreprocessor
                 int p20 = gray[(y + 1) * w + (x - 1)], p21 = gray[(y + 1) * w + x], p22 = gray[(y + 1) * w + (x + 1)];
                 int gx = -p00 + p02 - 2 * p10 + 2 * p12 - p20 + p22;
                 int gy = -p00 - 2 * p01 - p02 + p20 + 2 * p21 + p22;
-                mag[idx] = MathF.Sqrt(gx * gx + gy * gy);
+                // L1 magnitude — cv2.Canny's default (L2gradient=false), the scale its 0-255-ish
+                // thresholds are calibrated against.
+                mag[idx] = MathF.Abs(gx) + MathF.Abs(gy);
 
                 // Quantize angle into 4 bins. atan2 result in (-π, π]; mirror across origin
                 // (gradient direction is unsigned for Canny purposes).

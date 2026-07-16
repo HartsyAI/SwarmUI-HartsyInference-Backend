@@ -470,4 +470,14 @@ public static class SideModels
         Url: "https://huggingface.co/h94/IP-Adapter/resolve/main/models/image_encoder/model.safetensors",
         Hash: "6ca9667da1ca9e0b0f75e46bb030f7e011f44f86cbfb8d5a36590fcd7507b030",
         DisplayName: "CLIP-Vision H/14 (IP-Adapter compatible)");
+
+    /// <summary>SigLIP so400m/14 384 vision tower (Comfy-Org packaging) — the image encoder FLUX.1
+    /// Redux consumes (post-layernorm patch tokens, 729 × 1152). Auto-downloaded when the user
+    /// enables a style model without explicitly setting <c>ClipVisionModel</c>.</summary>
+    public static readonly Entry SigclipVision384 = new(
+        CanonicalName: "sigclip_vision_patch14_384.safetensors",
+        FolderType: "ClipVision",
+        Url: "https://huggingface.co/Comfy-Org/sigclip_vision_384/resolve/main/sigclip_vision_patch14_384.safetensors",
+        Hash: "1fee501deabac72f0ed17610307d7131e3e9d1e838d0363aa3c2b97a6e03fb33",
+        DisplayName: "SigLIP so400m/14 384 vision (FLUX.1 Redux)");
 }
