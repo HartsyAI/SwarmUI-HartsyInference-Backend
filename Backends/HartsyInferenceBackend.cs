@@ -107,7 +107,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             yield return "img2img";    // SD 1.5 / SDXL / Flux / SD3 / Z-Image supported via VaeEncoder
             yield return "inpaint";    // SDXL / Flux / SD3 supported via blend-on-vanilla pipeline path; SD 1.5 / Z-Image refused at validation time
             yield return "controlnet"; // SDXL-base only in v1, Canny preprocessor only; SD 1.5 / Flux ControlNet + Depth/OpenPose/etc refused at validation time
-            yield return "ipadapter";  // SDXL standard + Plus + Plus-Face via blend-on-vanilla cross-attn injection; SD 1.5 / Flux IPA + FaceID variants refused at validation time
+            yield return "ipadapter";  // SD 1.5 + SDXL: standard + Plus + Plus-Face + FaceID + FaceID-Plus/PlusV2 (in-engine ArcFace + CLIP-face mix); Flux IPA refused at validation time
             yield return "variation_seed"; // SD 1.5 / SDXL via InitialNoise slerp (VariationSeedResolver); other archs refused at validation time
             yield return "video";      // Wan (TI2V / VACE / Animate / S2V) + LTX-Video + LTX-2 (video+generated audio track).
                                        // Exposes VideoFPS/VideoFormat/boomerang/trim params ("text2video" itself is client-derived
@@ -1786,8 +1786,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                     $"Either disable IP-Adapter (set Use IP-Adapter to None) or pick a SD 1.5 / SDXL model.");
                 return false;
             }
-            // FaceID variants are refused at load time inside IpAdapterResolver — they need
-            // an InsightFace ArcFace runtime which we don't link.
+            // FaceID / FaceID-Plus / PlusV2 are handled in-engine (YOLO11-pose detect + ArcFace IR-50
+            // embed + CLIP-Vision face crop for the Plus variants) — see IpAdapterResolver.
         }
 
         // Style model (FLUX.1 Redux): wired for the Flux family only — the redux tokens ride

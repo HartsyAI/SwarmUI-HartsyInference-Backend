@@ -57,6 +57,9 @@ public class SwarmUIHartsyInference : Extension
     public static T2IRegisteredParam<int> TileVaeThresholdParam;
     public static T2IRegisteredParam<string> SamplerParam;
 
+    // IP-Adapter FaceID-PlusV2 shortcut strength (read by Generation.IpAdapterResolver).
+    public static T2IRegisteredParam<double> FaceIdV2WeightParam;
+
     // Ideogram 4 magic-prompt params (see Generation.Ideogram4MagicPrompt).
     public static T2IParamGroup Ideogram4ParamGroup;
     public static T2IRegisteredParam<bool> Ideogram4MagicPromptParam;
@@ -204,6 +207,22 @@ public class SwarmUIHartsyInference : Extension
             Group: HartsyInferenceParamGroup,
             FeatureFlag: "hartsyinference",
             GetValues: _ => new List<string> { "euler", "ddim", "dpm++2m", "lcm" }));
+
+        // FaceID-PlusV2 shortcut strength: sits with the Comfy extension's IP-Adapter params in the
+        // Image Prompting group (same "ipadapter" feature flag + dropdown dependency) so it appears
+        // exactly when an IP-Adapter is selected. Only consumed for faceid-plusv2 checkpoints; the
+        // 1.0 default matches the official IPAdapterFaceIDPlus pipeline (s_scale).
+        FaceIdV2WeightParam = T2IParamTypes.Register<double>(new(
+            "FaceID V2 Weight",
+            "Strength of the FaceID-PlusV2 CLIP-face shortcut mix (the official pipeline's 's_scale').\nHigher = the CLIP appearance of the face crop contributes more on top of the ArcFace identity tokens.\nOnly used with ip-adapter-faceid-plusv2 models; 1.0 is the official default.",
+            "1", Min: 0, Max: 2, Step: 0.05, IgnoreIf: "1",
+            FeatureFlag: "ipadapter",
+            Group: T2IParamTypes.GroupImagePrompting,
+            ViewType: ParamViewType.SLIDER,
+            OrderPriority: 19.5,
+            IsAdvanced: true,
+            Examples: ["0.5", "1", "1.5"],
+            DependNonDefault: SwarmUI.Builtin_ComfyUIBackend.ComfyUIBackendExtension.UseIPAdapterForRevision.Type.ID));
 
         // Ideogram 4 magic prompt: optional LLM rewrite of a plain prompt into Ideogram's structured JSON
         // caption (Generation.Ideogram4MagicPrompt). Ideogram 4 is trained on structured captions; plain

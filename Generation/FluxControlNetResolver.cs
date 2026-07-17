@@ -125,7 +125,7 @@ public static class FluxControlNetResolver
         }
     }
 
-    private static unsafe Tensor RawImageZeroOne(Image input, int targetW, int targetH)
+    internal static unsafe Tensor RawImageZeroOne(Image input, int targetW, int targetH)
     {
         byte[] rgb = Img2ImgResolver.LoadResizedRgb(input, targetW, targetH);
         Tensor output = new Tensor(new TensorShape(1, 3, targetH, targetW), DType.F32);

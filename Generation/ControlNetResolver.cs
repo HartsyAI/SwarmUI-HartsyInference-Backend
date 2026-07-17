@@ -1,3 +1,4 @@
+using SwarmUI.Builtin_ComfyUIBackend;
 using SwarmUI.Text2Image;
 using SwarmUI.Utils;
 using HartsyInference.Core.Backends;
@@ -21,6 +22,14 @@ namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 /// but we haven't yet wired SD1.5 into <see cref="Sd15Loader"/> + pipeline
 /// (mechanical follow-up). Other preprocessors (Depth, OpenPose, etc.) require
 /// ONNX runtime + bundled models — separate phase.</para>
+///
+/// <para><b>Union checkpoints</b> (xinsir controlnet-union-sdxl, detected via
+/// <see cref="ControlNetConfig.UnionControlTypeCount"/>) take their control type
+/// from the per-slot "ControlNet Union Type" param and run the matching
+/// preprocessor; the type index is passed through
+/// <see cref="ControlNetConditioning.UnionControlType"/> to the engine's union
+/// fusion path. Stack the same union model in multiple slots with different
+/// types to combine controls.</para>
 ///
 /// <para>The Swarm UI exposes up to 3 ControlNet slots
 /// (<c>T2IParamTypes.Controlnets[0..2]</c>). This resolver iterates all 3 and
@@ -91,29 +100,44 @@ public static class ControlNetResolver
                         $"ControlNet[{i}] '{cnModel.Name}' is selected but no ControlNet Image Input or Init Image was provided.");
                 }
 
-                // Preprocess based on the file's auto-detected mode (filename heuristic).
-                // Canny is algorithmic; Depth runs the in-engine Depth-Anything-V2 annotator.
-                // Remaining modes (OpenPose, lineart, softedge, normal, seg) land with the
-                // preprocessor subsystem — refuse with a clear message until then.
-                Tensor condTensor = entry.File.Mode switch
+                // Union checkpoints (xinsir controlnet-union-sdxl): one file covers all modes.
+                // The control type comes from the user's "ControlNet Union Type" param (the
+                // ComfyUI extension registers it per slot); the preprocessor follows the type.
+                // Single-mode files keep the existing filename-mode dispatch untouched.
+                bool isUnion = entry.File.Config.UnionControlTypeCount > 0;
+                SdxlUnionControlType? unionType = null;
+                Tensor condTensor;
+                if (isUnion)
                 {
-                    ControlNetMode.Canny => CannyPreprocessor.Process(cnImage, targetW, targetH),
-                    ControlNetMode.Depth => DepthPreprocessor.Process(cnImage, targetW, targetH, backend,
-                        msg => log($"[Depth] {msg}")),
-                    ControlNetMode.OpenPose => OpenPoseControlPreprocessor.Process(cnImage, targetW, targetH, backend,
-                        msg => log($"[OpenPose] {msg}")),
-                    ControlNetMode.SoftEdge => AnnotatorControlPreprocessors.ProcessSoftEdge(cnImage, targetW, targetH, backend,
-                        msg => log($"[SoftEdge] {msg}")),
-                    ControlNetMode.Scribble => AnnotatorControlPreprocessors.ProcessScribble(cnImage, targetW, targetH, backend,
-                        msg => log($"[Scribble] {msg}")),
-                    ControlNetMode.LineArt => AnnotatorControlPreprocessors.ProcessLineart(cnImage, targetW, targetH, backend,
-                        msg => log($"[Lineart] {msg}")),
-                    ControlNetMode.Normal => AnnotatorControlPreprocessors.ProcessNormal(cnImage, targetW, targetH, backend,
-                        msg => log($"[Normal] {msg}")),
-                    _ => throw new NotSupportedException(
-                        $"ControlNet[{i}] '{cnModel.Name}' detected as mode '{entry.File.Mode}'. " +
-                        $"Currently supported preprocessors: Canny, Depth, OpenPose, SoftEdge/HED, Scribble, Lineart, Normal. Segmentation/Tile/Inpaint modes are follow-ups."),
-                };
+                    unionType = ResolveUnionType(input, i, entry.File.Config.UnionControlTypeCount, cnModel.Name, log);
+                    condTensor = PreprocessForUnionType(unionType.Value, cnImage, targetW, targetH, backend, log);
+                }
+                else
+                {
+                    // Preprocess based on the file's auto-detected mode (filename heuristic).
+                    // Canny is algorithmic; Depth runs the in-engine Depth-Anything-V2 annotator.
+                    condTensor = entry.File.Mode switch
+                    {
+                        ControlNetMode.Canny => CannyPreprocessor.Process(cnImage, targetW, targetH),
+                        ControlNetMode.Depth => DepthPreprocessor.Process(cnImage, targetW, targetH, backend,
+                            msg => log($"[Depth] {msg}")),
+                        ControlNetMode.OpenPose => OpenPoseControlPreprocessor.Process(cnImage, targetW, targetH, backend,
+                            msg => log($"[OpenPose] {msg}")),
+                        ControlNetMode.SoftEdge => AnnotatorControlPreprocessors.ProcessSoftEdge(cnImage, targetW, targetH, backend,
+                            msg => log($"[SoftEdge] {msg}")),
+                        ControlNetMode.Scribble => AnnotatorControlPreprocessors.ProcessScribble(cnImage, targetW, targetH, backend,
+                            msg => log($"[Scribble] {msg}")),
+                        ControlNetMode.LineArt => AnnotatorControlPreprocessors.ProcessLineart(cnImage, targetW, targetH, backend,
+                            msg => log($"[Lineart] {msg}")),
+                        ControlNetMode.Normal => AnnotatorControlPreprocessors.ProcessNormal(cnImage, targetW, targetH, backend,
+                            msg => log($"[Normal] {msg}")),
+                        ControlNetMode.Segmentation => AnnotatorControlPreprocessors.ProcessSegment(cnImage, targetW, targetH, backend,
+                            msg => log($"[Segment] {msg}")),
+                        _ => throw new NotSupportedException(
+                            $"ControlNet[{i}] '{cnModel.Name}' detected as mode '{entry.File.Mode}'. " +
+                            $"Currently supported preprocessors: Canny, Depth, OpenPose, SoftEdge/HED, Scribble, Lineart, Normal, Segmentation. Tile/Inpaint modes are follow-ups."),
+                    };
+                }
                 images.Add(condTensor);
 
                 double strength = input.Get(holder.Strength);
@@ -126,6 +150,7 @@ public static class ControlNetResolver
                     Scale = (float)strength,
                     StartFraction = (float)Math.Clamp(startFrac, 0.0, 1.0),
                     EndFraction = (float)Math.Clamp(endFrac, 0.0, 1.0),
+                    UnionControlType = unionType,
                 });
             }
         }
@@ -144,6 +169,66 @@ public static class ControlNetResolver
             Conditionings = conditionings,
             Adapters = adapters,
             ConditionImages = images,
+        };
+    }
+
+    /// <summary>Maps the user's per-slot "ControlNet Union Type" param (registered by the ComfyUI
+    /// extension; values follow the xinsir training list) onto the checkpoint's control-type index.
+    /// Untoggled/"auto" defaults to the thin-line (canny) type — algorithmic, no annotator download.
+    /// Tile/Repaint need the 8-type ProMax revision; the 6-type standard union is rejected early
+    /// with a clear message instead of an out-of-range engine error.</summary>
+    private static SdxlUnionControlType ResolveUnionType(T2IParamInput input, int slot, int numControlTypes, string modelName, Action<string> log)
+    {
+        string typeStr = "auto";
+        T2IRegisteredParam<string> param = ComfyUIBackendExtension.ControlNetUnionTypeParams != null && slot < ComfyUIBackendExtension.ControlNetUnionTypeParams.Length
+            ? ComfyUIBackendExtension.ControlNetUnionTypeParams[slot] : null;
+        if (param is not null && input.TryGet(param, out string val) && !string.IsNullOrWhiteSpace(val))
+        {
+            typeStr = val.Trim().ToLowerInvariant();
+        }
+        SdxlUnionControlType type = typeStr switch
+        {
+            "openpose" => SdxlUnionControlType.OpenPose,
+            "depth" => SdxlUnionControlType.Depth,
+            "hed/pidi/scribble/ted" => SdxlUnionControlType.SoftEdge,
+            "canny/lineart/anime_lineart/mlsd" => SdxlUnionControlType.Canny,
+            "normal" => SdxlUnionControlType.Normal,
+            "segment" => SdxlUnionControlType.Segment,
+            "tile" => SdxlUnionControlType.Tile,
+            "repaint" => SdxlUnionControlType.Repaint,
+            "auto" => SdxlUnionControlType.Canny,
+            _ => throw new InvalidOperationException(
+                $"ControlNet[{slot}] Union Type '{typeStr}' is not a recognized union control type."),
+        };
+        if (typeStr == "auto")
+        {
+            log($"ControlNet[{slot}] '{modelName}' is a union checkpoint and no Union Type was chosen — defaulting to canny (thin line). Set 'ControlNet Union Type' to pick another mode.");
+        }
+        if ((int)type >= numControlTypes)
+        {
+            throw new InvalidOperationException(
+                $"ControlNet[{slot}] '{modelName}' has {numControlTypes} control types (standard union revision) — '{type}' needs the 8-type ProMax revision (controlnet-union-sdxl promax).");
+        }
+        return type;
+    }
+
+    /// <summary>Runs the preprocessor matching the union control type. Segment/Tile/Repaint pass the
+    /// user's image through raw (0..1 RGB) — the Comfy convention of supplying a pre-made map (tile
+    /// conditions on the raw image itself; repaint's masked-inpaint image assembly is a follow-up).</summary>
+    private static Tensor PreprocessForUnionType(SdxlUnionControlType type, Image cnImage, int targetW, int targetH, IBackend backend, Action<string> log)
+    {
+        return type switch
+        {
+            SdxlUnionControlType.OpenPose => OpenPoseControlPreprocessor.Process(cnImage, targetW, targetH, backend,
+                msg => log($"[OpenPose] {msg}")),
+            SdxlUnionControlType.Depth => DepthPreprocessor.Process(cnImage, targetW, targetH, backend,
+                msg => log($"[Depth] {msg}")),
+            SdxlUnionControlType.SoftEdge => AnnotatorControlPreprocessors.ProcessSoftEdge(cnImage, targetW, targetH, backend,
+                msg => log($"[SoftEdge] {msg}")),
+            SdxlUnionControlType.Canny => CannyPreprocessor.Process(cnImage, targetW, targetH),
+            SdxlUnionControlType.Normal => AnnotatorControlPreprocessors.ProcessNormal(cnImage, targetW, targetH, backend,
+                msg => log($"[Normal] {msg}")),
+            _ => FluxControlNetResolver.RawImageZeroOne(cnImage, targetW, targetH),
         };
     }
 }

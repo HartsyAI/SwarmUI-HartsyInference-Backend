@@ -11,6 +11,7 @@ using HartsyInference.ModelHandler.SafeTensors;
 using HartsyInference.Vision.Detection;
 using HartsyInference.Vision.Face;
 using HartsyInference.Vision.FaceDetection;
+using EngineClipPreprocessor = HartsyInference.Vision.Clip.ClipImagePreprocessor;
 
 namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
@@ -22,16 +23,18 @@ namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 /// user's prompt image (CLIP-Vision for standard/Plus, ArcFace face embedding for FaceID),
 /// projects the result into image-prompt tokens, and returns the per-cross-attn-layer wiring.
 ///
-/// <para><b>Scope:</b> SDXL + SD 1.5; standard + Plus + Plus-Face + plain FaceID. For FaceID the
-/// face is detected with the engine's YOLO11-pose detector (largest/strongest face), aligned to
-/// the ArcFace 112×112 template from the eyes+nose keypoints (see
+/// <para><b>Scope:</b> SDXL + SD 1.5; standard + Plus + Plus-Face + FaceID + FaceID-Plus/Plus-v2.
+/// For FaceID the face is detected with the engine's YOLO11-pose detector (largest/strongest
+/// face), aligned to the ArcFace 112×112 template from the eyes+nose keypoints (see
 /// <see cref="FaceAlignment"/> for the documented deviation from insightface's 5-point SCRFD
-/// alignment), and embedded with the in-engine ArcFace IR-50. FaceID checkpoints also ship a
+/// alignment), and embedded with the in-engine ArcFace IR-50. FaceID-Plus additionally renders
+/// the same alignment at 224×224 and feeds its CLIP-Vision-H penultimate hidden states to the
+/// two-input projection; the Plus-v2 shortcut strength comes from the extension's "FaceID V2
+/// Weight" param (default 1.0, official pipeline default). All FaceID checkpoints also ship a
 /// rank-128 UNet LoRA — the companion kohya <c>*_lora.safetensors</c> is auto-downloaded and its
 /// path surfaced via <see cref="ResolvedSpec.FaceIdLoraPath"/> so the backend merges it through
-/// the normal LoRA path. FaceID-Plus/Plus-v2 are refused upstream by <see cref="IpAdapter"/>.
-/// Single adapter only — Comfy lets users stack multiple IPA models, which would sum the
-/// per-cross-attn image-attention outputs; deferred. Flux refused upstream.</para>
+/// the normal LoRA path. Single adapter only — Comfy lets users stack multiple IPA models, which
+/// would sum the per-cross-attn image-attention outputs; deferred. Flux refused upstream.</para>
 ///
 /// <para>The IPA model file is located under <c>&lt;ModelRoot&gt;/ipadapter/&lt;filename&gt;</c>
 /// — the standard Comfy path (the known h94 FaceID checkpoints auto-download there). CLIP-Vision
@@ -60,7 +63,17 @@ public static class IpAdapterResolver
             "ip-adapter-faceid_sdxl_lora.safetensors", "4fcf93d6e8dc8dd18f5f9e51c8306f369486ed0aa0780ade9961308aff7f0d64"),
         new("ip-adapter-faceid_sd15.bin", "201344e22e6f55849cf07ca7a6e53d8c3b001327c66cb9710d69fd5da48a8da7",
             "ip-adapter-faceid_sd15_lora.safetensors", "70699f0dbfadd47de1f81d263cf4c86bd4b7271d841304af9b340b3a7f38e86a"),
+        new("ip-adapter-faceid-plusv2_sdxl.bin", "c6945d82b543700cc3ccbb98d363b837e9c596281607857c74b713a876daf5fb",
+            "ip-adapter-faceid-plusv2_sdxl_lora.safetensors", "f24b4bb2dad6638a09c00f151cde84991baf374409385bcbab53c1871a30cb7b"),
+        new("ip-adapter-faceid-plusv2_sd15.bin", "26d0d86a1d60d6cc811d3b8862178b461e1eeb651e6fe2b72ba17aa95411e313",
+            "ip-adapter-faceid-plusv2_sd15_lora.safetensors", "8abff87a15a049f3e0186c2e82c1c8e77783baf2cfb63f34c412656052eb57b0"),
+        new("ip-adapter-faceid-plus_sd15.bin", "252fb53e0d018489d9e7f9b9e2001a52ff700e491894011ada7cfb471e0fadf2",
+            "ip-adapter-faceid-plus_sd15_lora.safetensors", "3f00341d11e5e7b5aadf63cbdead09ef82eb28669156161cf1bfc2105d4ff1cd"),
     ];
+
+    /// <summary>Side length of the CLIP-Vision face crop FaceID-Plus consumes (insightface
+    /// <c>norm_crop(image_size=224)</c>, matching the official IPAdapterFaceIDPlus pipeline).</summary>
+    private const int ClipFaceCropSize = 224;
 
     /// <summary>One generation's worth of resolved IPA state. Owns the image-prompt token
     /// tensor produced by <see cref="IpAdapter.ProjectImage"/>; the loaded IPA + image encoder
@@ -154,18 +167,40 @@ public static class IpAdapterResolver
         }
 
         // Run the variant's image encoder over all prompt images (averaging), then project ONCE.
-        Tensor encoderOut = entry.IpAdapter.Config.IsFaceId
-            ? EmbedFaces(backend, entry, promptImages, log)
-            : EncodeClipVision(backend, entry, promptImages, log);
-
         Tensor imageTokens;
-        try
+        if (entry.IpAdapter.Config.IsFaceId && entry.IpAdapter.Config.IsPlus)
         {
-            imageTokens = entry.IpAdapter.ProjectImage(backend, encoderOut);
+            // FaceID-Plus / Plus-v2: ArcFace embedding + CLIP-Vision hidden states of the SAME aligned face,
+            // mixed by the two-input projection. The v2 shortcut weight follows the official default of 1.0.
+            double v2Weight = ReadDoubleParam(input, "faceidv2weight", defaultValue: 1.0);
+            (Tensor faceEmbeds, Tensor clipHidden) = EmbedFacesPlus(backend, entry, promptImages, log);
+            try
+            {
+                imageTokens = entry.IpAdapter.ProjectImage(backend, faceEmbeds, clipHidden, (float)v2Weight);
+            }
+            finally
+            {
+                faceEmbeds.Dispose();
+                clipHidden.Dispose();
+            }
+            if (entry.IpAdapter.Config.IsFaceIdV2)
+            {
+                log($"  FaceID V2 weight: {v2Weight:F2}");
+            }
         }
-        finally
+        else
         {
-            encoderOut.Dispose();
+            Tensor encoderOut = entry.IpAdapter.Config.IsFaceId
+                ? EmbedFaces(backend, entry, promptImages, log)
+                : EncodeClipVision(backend, entry, promptImages, log);
+            try
+            {
+                imageTokens = entry.IpAdapter.ProjectImage(backend, encoderOut);
+            }
+            finally
+            {
+                encoderOut.Dispose();
+            }
         }
 
         List<IpAdapterConditioning> conditionings = new()
@@ -182,7 +217,7 @@ public static class IpAdapterResolver
         };
         List<Tensor> imageTokenList = new() { imageTokens };
 
-        string variant = entry.IpAdapter.Config.IsFaceId ? "FaceID" : entry.IpAdapter.Config.IsPlus ? "Plus" : "Standard";
+        string variant = VariantName(entry.IpAdapter.Config);
         log($"IP-Adapter ready: variant={variant}, base={baseModel}, weight={weightRaw:F2}, weightType={weightType}, window=[{startRaw:F2}, {endRaw:F2}], tokens={entry.IpAdapter.NumImageTokens}.");
         return new ResolvedSpec
         {
@@ -205,21 +240,43 @@ public static class IpAdapterResolver
     /// <summary>FaceID image encoding: for each prompt image detect the strongest face (YOLO11-pose keypoints),
     /// align it to the ArcFace 112×112 template, embed with ArcFace IR-50, then average the L2-normalized
     /// embeddings and renormalize. Returns <c>[1, 512]</c>.</summary>
-    private static unsafe Tensor EmbedFaces(IBackend backend, IpAdapterCacheEntry entry, List<Image> images, Action<string> log)
+    private static Tensor EmbedFaces(IBackend backend, IpAdapterCacheEntry entry, List<Image> images, Action<string> log)
+    {
+        (Tensor faceEmbeds, Tensor clipHidden) = EmbedFacesCore(backend, entry, images, wantClipCrop: false, log);
+        clipHidden?.Dispose();
+        return faceEmbeds;
+    }
+
+    /// <summary>FaceID-Plus image encoding: like <see cref="EmbedFaces"/>, but ALSO runs CLIP-Vision over the
+    /// same alignment rendered at 224×224 (the official pipeline's <c>norm_crop(image_size=224)</c> input) and
+    /// averages the penultimate hidden states across images. Returns (<c>[1, 512]</c>, <c>[1, 257, 1280]</c>).</summary>
+    private static (Tensor faceEmbeds, Tensor clipHidden) EmbedFacesPlus(IBackend backend, IpAdapterCacheEntry entry, List<Image> images, Action<string> log)
+    {
+        return EmbedFacesCore(backend, entry, images, wantClipCrop: true, log);
+    }
+
+    private static unsafe (Tensor faceEmbeds, Tensor clipHidden) EmbedFacesCore(
+        IBackend backend, IpAdapterCacheEntry entry, List<Image> images, bool wantClipCrop, Action<string> log)
     {
         ArcFaceModel arcFace = entry.ArcFace
             ?? throw new InvalidOperationException("FaceID cache entry has no ArcFace model (loader bug).");
         YoloPosePipeline pose = entry.PosePipeline
             ?? throw new InvalidOperationException("FaceID cache entry has no pose pipeline (loader bug).");
+        if (wantClipCrop && entry.ClipVision is null)
+        {
+            throw new InvalidOperationException("FaceID-Plus cache entry has no CLIP-Vision encoder (loader bug).");
+        }
 
         float[] accumulator = new float[ArcFaceModel.EmbeddingDim];
+        Tensor clipAccumulator = null;
+        long clipCount = 0;
         backend.PreloadWeights(arcFace.EnumerateWeights());
         try
         {
             foreach (Image image in images)
             {
                 (byte[] rgb, int width, int height) = RgbToImage.ToHwcRgb(image);
-                byte[] crop = DetectAndAlignFace(pose, rgb, width, height, log);
+                (byte[] crop, byte[] clipCrop) = DetectAndAlignFace(pose, rgb, width, height, wantClipCrop, log);
                 Tensor inputTensor = ArcFaceModel.PreprocessAligned(crop);
                 Tensor embed;
                 try
@@ -239,7 +296,51 @@ public static class IpAdapterResolver
                 {
                     embed.Dispose();
                 }
+
+                if (!wantClipCrop)
+                {
+                    continue;
+                }
+                EngineClipPreprocessor preprocess = new EngineClipPreprocessor(ClipFaceCropSize);
+                Tensor pixels = preprocess.Preprocess(clipCrop, ClipFaceCropSize, ClipFaceCropSize);
+                Tensor hidden;
+                try
+                {
+                    hidden = entry.ClipVision.EncodeHiddenStates(backend, pixels);
+                }
+                finally
+                {
+                    pixels.Dispose();
+                }
+                if (clipAccumulator is null)
+                {
+                    clipAccumulator = hidden;
+                    clipCount = hidden.ElementCount;
+                }
+                else
+                {
+                    try
+                    {
+                        if (hidden.Shape != clipAccumulator.Shape)
+                        {
+                            throw new InvalidOperationException(
+                                $"CLIP-Vision face-crop output shape mismatch across reference images: {clipAccumulator.Shape} vs {hidden.Shape}.");
+                        }
+                        float* ap = (float*)clipAccumulator.DataPointer;
+                        float* hp = (float*)hidden.DataPointer;
+                        for (long e = 0; e < clipCount; e++) ap[e] += hp[e];
+                    }
+                    finally
+                    {
+                        hidden.Dispose();
+                    }
+                }
             }
+        }
+        catch
+        {
+            clipAccumulator?.Dispose();
+            throw;
         }
         finally
         {
@@ -248,7 +349,8 @@ public static class IpAdapterResolver
 
         if (images.Count > 1)
         {
-            log($"  averaged {images.Count} face embeddings (renormalized identity centroid)");
+            log($"  averaged {images.Count} face embeddings (renormalized identity centroid)"
+                + (wantClipCrop ? " + CLIP face-crop hidden states (mean)" : ""));
         }
         double norm = 0;
         for (int d = 0; d < ArcFaceModel.EmbeddingDim; d++) norm += (double)accumulator[d] * accumulator[d];
@@ -256,14 +358,26 @@ public static class IpAdapterResolver
         Tensor result = new Tensor(new TensorShape(1, ArcFaceModel.EmbeddingDim), DType.F32);
         float* rp = (float*)result.DataPointer;
         for (int d = 0; d < ArcFaceModel.EmbeddingDim; d++) rp[d] = accumulator[d] * inv;
-        return result;
+
+        if (wantClipCrop && images.Count > 1)
+        {
+            float invN = 1.0f / images.Count;
+            float* cp = (float*)clipAccumulator.DataPointer;
+            for (long e = 0; e < clipCount; e++) cp[e] *= invN;
+        }
+        return (result, clipAccumulator);
     }
 
+    private static string VariantName(IpAdapterConfig config) => config.IsFaceId
+        ? config.IsPlus ? (config.IsFaceIdV2 ? "FaceID-PlusV2" : "FaceID-Plus") : "FaceID"
+        : config.IsPlus ? "Plus" : "Standard";
+
     /// <summary>Detects people, picks the best face (largest inter-eye distance among detections with usable
-    /// eye+nose keypoints, else the highest-confidence person), and returns an ArcFace-aligned 112×112 RGB crop.
+    /// eye+nose keypoints, else the highest-confidence person), and returns an ArcFace-aligned 112×112 RGB crop
+    /// plus (when <paramref name="wantClipCrop"/>) the SAME alignment rendered at 224×224 for CLIP-Vision.
     /// Falls back to a square face-region crop (no rotation) when keypoints are missing, and to a center crop
     /// when no person is detected at all.</summary>
-    private static byte[] DetectAndAlignFace(YoloPosePipeline pose, byte[] rgb, int width, int height, Action<string> log)
+    private static (byte[] arcCrop, byte[] clipCrop) DetectAndAlignFace(YoloPosePipeline pose, byte[] rgb, int width, int height, bool wantClipCrop, Action<string> log)
     {
         IReadOnlyList<PoseDetection> people = pose.Detect(rgb, width, height, confidenceThreshold: 0.25f, iouThreshold: 0.45f);
 
@@ -289,27 +403,32 @@ public static class IpAdapterResolver
 
         if (bestAligned is not null)
         {
-            return FaceAlignment.AlignToTemplate(rgb, width, height, bestPoints);
+            return (FaceAlignment.AlignToTemplate(rgb, width, height, bestPoints),
+                wantClipCrop ? FaceAlignment.AlignToTemplate(rgb, width, height, bestPoints, outputSize: ClipFaceCropSize) : null);
         }
 
         if (bestAny is not null)
         {
             log("  FaceID: face keypoints not visible — falling back to unrotated square face crop.");
             PoseFaceCrop.Rect rect = PoseFaceCrop.ComputeSquareCrop(bestAny, width, height, expand: 1.6f);
-            return SquareCropTo112(rgb, width, height, rect.X, rect.Y, rect.Size);
+            return (SquareCropTo(rgb, width, height, rect.X, rect.Y, rect.Size, FaceAlignment.CropSize),
+                wantClipCrop ? SquareCropTo(rgb, width, height, rect.X, rect.Y, rect.Size, ClipFaceCropSize) : null);
         }
 
         log("  FaceID: WARNING — no person detected in the prompt image; using a center crop. Identity transfer will be weak.");
         float side = Math.Min(width, height);
-        return SquareCropTo112(rgb, width, height, (width - side) * 0.5f, (height - side) * 0.5f, side);
+        float cx = (width - side) * 0.5f, cy = (height - side) * 0.5f;
+        return (SquareCropTo(rgb, width, height, cx, cy, side, FaceAlignment.CropSize),
+            wantClipCrop ? SquareCropTo(rgb, width, height, cx, cy, side, ClipFaceCropSize) : null);
     }
 
-    /// <summary>Scales a square source region to the 112×112 ArcFace input via the shared affine warp.</summary>
-    private static byte[] SquareCropTo112(byte[] rgb, int width, int height, float x, float y, float side)
+    /// <summary>Scales a square source region to an <paramref name="outSize"/>² crop via the shared affine warp
+    /// (112 for ArcFace, 224 for the FaceID-Plus CLIP-Vision input).</summary>
+    private static byte[] SquareCropTo(byte[] rgb, int width, int height, float x, float y, float side, int outSize)
     {
-        float s = FaceAlignment.CropSize / Math.Max(side, 1f);
+        float s = outSize / Math.Max(side, 1f);
         FaceAlignment.Affine2x3 srcToDst = new(s, 0f, -x * s, 0f, s, -y * s);
-        return FaceAlignment.WarpAffine(rgb, width, height, srcToDst, FaceAlignment.CropSize, FaceAlignment.CropSize);
+        return FaceAlignment.WarpAffine(rgb, width, height, srcToDst, outSize, outSize);
     }
 
     /// <summary>Run CLIP-Vision on each prompt image, average the outputs along the batch
@@ -440,11 +559,9 @@ public static class IpAdapterResolver
                     $"IP-Adapter '{Path.GetFileName(ipaPath)}' is for base={file.BaseModel}, but the current generation is using base={expectedBase}. " +
                     $"Pick an IP-Adapter trained for {expectedBase}, or switch the base model.");
             }
-            string variantName = file.Config.IsFaceId ? "FaceID" : file.Config.IsPlus ? "Plus" : "Standard";
-            log($"  variant: {variantName}, base={file.BaseModel}, tokens={file.Config.NumImageTokens}");
+            log($"  variant: {VariantName(file.Config)}, base={file.BaseModel}, tokens={file.Config.NumImageTokens}");
 
             // 2. Build the IPA adapter and load its weights (image projection + per-layer K_ip/V_ip).
-            //    IpAdapter's ctor refuses FaceID-Plus/Plus-v2 with a clear message.
             IpAdapter adapter = new IpAdapter(file.Config);
             adapter.LoadWeights(file.Weights);
             log($"  loaded {adapter.CrossAttentionLayerCount} per-cross-attn projections.");
@@ -452,6 +569,7 @@ public static class IpAdapterResolver
             if (file.Config.IsFaceId)
             {
                 // 3a. FaceID: ArcFace face embedder + YOLO11-pose face detector + companion UNet LoRA.
+                //     FaceID-Plus/Plus-v2 additionally need CLIP-Vision for the aligned face crop.
                 string arcFacePath = ResolveArcFaceWeights();
                 arcFaceLoader = new SafeTensorsLoader();
                 arcFaceLoader.Load(arcFacePath);
@@ -468,13 +586,19 @@ public static class IpAdapterResolver
                         "Place the matching *_lora.safetensors next to the FaceID checkpoint.");
                 }
 
+                ClipVisionEncoder faceClipVision = null;
+                if (file.Config.IsPlus)
+                {
+                    (faceClipVision, clipVisionLoader) = LoadClipVision(input, log);
+                }
+
                 return new IpAdapterCacheEntry
                 {
                     FilePath = ipaPath,
                     File = file,
                     IpAdapter = adapter,
-                    ClipVision = null,
-                    ClipVisionLoader = null,
+                    ClipVision = faceClipVision,
+                    ClipVisionLoader = clipVisionLoader,
                     ArcFace = arcFace,
                     ArcFaceLoader = arcFaceLoader,
                     PosePipeline = posePipeline,
@@ -482,25 +606,9 @@ public static class IpAdapterResolver
                 };
             }
 
-            // 3b. Standard/Plus: resolve CLIP-Vision — user-selected ClipVisionModel takes priority;
-            //     otherwise auto-download CLIP-ViT-H/14 (the encoder all current SDXL IPAs were trained on).
-            T2IModel cvModel = ModelAutoDownloader.EnsureSideModel(
-                userPick: input?.Get(T2IParamTypes.ClipVisionModel),
-                entry: SideModels.ClipVisionH14,
-                log: log);
-            log($"  CLIP-Vision: {cvModel.Name}");
-
-            clipVisionLoader = new SafeTensorsLoader();
-            clipVisionLoader.Load(cvModel.RawFilePath);
-            Dictionary<string, Tensor> cvWeights = clipVisionLoader.GetAllTensors();
-            // Some image-encoder safetensors ship under "vision_model." prefix already; others
-            // ship rooted (e.g. just "embeddings.patch_embedding.weight"). Detect by probing for
-            // the patch_embedding weight under either naming.
-            string cvPrefix = cvWeights.ContainsKey("vision_model.embeddings.patch_embedding.weight")
-                ? "vision_model"
-                : (cvWeights.ContainsKey("embeddings.patch_embedding.weight") ? "" : "vision_model");
-            ClipVisionEncoder clipVision = new ClipVisionEncoder(ClipVisionEncoderConfig.ViTH14);
-            clipVision.LoadWeights(cvWeights, prefix: cvPrefix);
+            // 3b. Standard/Plus: CLIP-Vision over the full reference image.
+            ClipVisionEncoder clipVision;
+            (clipVision, clipVisionLoader) = LoadClipVision(input, log);
 
             return new IpAdapterCacheEntry
             {
@@ -517,6 +625,39 @@ public static class IpAdapterResolver
             arcFaceLoader?.Dispose();
             clipVisionLoader?.Dispose();
             file.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>Resolves and loads the CLIP-Vision encoder: the user-selected ClipVisionModel takes priority;
+    /// otherwise the canonical CLIP-ViT-H/14 is auto-downloaded (the encoder every supported IPA — including
+    /// FaceID-Plus — was trained against). Returns the encoder plus the loader that owns its mmap.</summary>
+    private static (ClipVisionEncoder encoder, SafeTensorsLoader loader) LoadClipVision(T2IParamInput input, Action<string> log)
+    {
+        T2IModel cvModel = ModelAutoDownloader.EnsureSideModel(
+            userPick: input?.Get(T2IParamTypes.ClipVisionModel),
+            entry: SideModels.ClipVisionH14,
+            log: log);
+        log($"  CLIP-Vision: {cvModel.Name}");
+
+        SafeTensorsLoader clipVisionLoader = new SafeTensorsLoader();
+        try
+        {
+            clipVisionLoader.Load(cvModel.RawFilePath);
+            Dictionary<string, Tensor> cvWeights = clipVisionLoader.GetAllTensors();
+            // Some image-encoder safetensors ship under "vision_model." prefix already; others
+            // ship rooted (e.g. just "embeddings.patch_embedding.weight"). Detect by probing for
+            // the patch_embedding weight under either naming.
+            string cvPrefix = cvWeights.ContainsKey("vision_model.embeddings.patch_embedding.weight")
+                ? "vision_model"
+                : (cvWeights.ContainsKey("embeddings.patch_embedding.weight") ? "" : "vision_model");
+            ClipVisionEncoder clipVision = new ClipVisionEncoder(ClipVisionEncoderConfig.ViTH14);
+            clipVision.LoadWeights(cvWeights, prefix: cvPrefix);
+            return (clipVision, clipVisionLoader);
+        }
+        catch
+        {
+            clipVisionLoader.Dispose();
             throw;
         }
     }

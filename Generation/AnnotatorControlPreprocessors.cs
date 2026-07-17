@@ -12,10 +12,11 @@ namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
 /// <summary>
 /// ControlNet conditioning wrappers for the in-engine annotator models (HED soft-edge, Lineart,
-/// NormalBAE) — the same auto-download + static-cache + [1,3,H,W]-[0,1] contract as
+/// NormalBAE, UperNet segmentation) — the same auto-download + static-cache + [1,3,H,W]-[0,1] contract as
 /// <see cref="DepthPreprocessor"/>. Each model runs at its architecture-valid resolution
-/// (rounded from the generation size) and the map is bilinearly rescaled to the exact target.
-/// Parity vs controlnet_aux is pinned by the engine's Hed/Lineart/NormalBae parity tests.
+/// (rounded from the generation size) and the map is bilinearly rescaled to the exact target
+/// (nearest-neighbor for the segmentation palette map, which must stay on exact class colors).
+/// Parity vs controlnet_aux is pinned by the engine's Hed/Lineart/NormalBae/UperNetSeg parity tests.
 /// </summary>
 public static class AnnotatorControlPreprocessors
 {
@@ -23,6 +24,7 @@ public static class AnnotatorControlPreprocessors
     private static HedPreprocessor s_hed;
     private static LineartPreprocessor s_lineart;
     private static NormalBaePreprocessor s_normal;
+    private static UperNetSegPreprocessor s_segment;
     // Model weights are (partly) views owned by their loaders — loaders live with the cached models.
     private static readonly List<PytorchPickleLoader> s_loaders = [];
 
@@ -78,6 +80,35 @@ public static class AnnotatorControlPreprocessors
             }
         }
         log($"NormalBAE map ready: {targetWidth}x{targetHeight}.");
+        return output;
+    }
+
+    /// <summary>ADE20K-palette segmentation map (UperNet-ConvNeXt-Small, the diffusers reference for
+    /// control_v11p_sd15_seg) at the generation resolution. Detection runs at the reference 512×512;
+    /// the class map is nearest-neighbor rescaled so conditioning colors stay on exact palette values.</summary>
+    public static unsafe Tensor ProcessSegment(Image input, int targetWidth, int targetHeight, IBackend backend, Action<string> log)
+    {
+        UperNetSegPreprocessor pre = GetSegment(log);
+        const int detect = UperNetSegPreprocessor.ReferenceSize;
+        (byte[] rgb, int w, int h) = DecodeAtValid(input, detect, detect, multiple: 32);
+        byte[] classMap = pre.Process(backend, rgb, w, h);
+        Tensor output = new Tensor(new TensorShape(1, 3, targetHeight, targetWidth), DType.F32);
+        float* dp = (float*)output.DataPointer;
+        long plane = (long)targetWidth * targetHeight;
+        for (int y = 0; y < targetHeight; y++)
+        {
+            int sy = Math.Min((int)((y + 0.5f) * h / targetHeight), h - 1);
+            for (int x = 0; x < targetWidth; x++)
+            {
+                int sx = Math.Min((int)((x + 0.5f) * w / targetWidth), w - 1);
+                uint color = Ade20kPalette.Color(classMap[sy * w + sx]);
+                long i = (long)y * targetWidth + x;
+                dp[i] = ((color >> 16) & 0xFF) / 255f;
+                dp[plane + i] = ((color >> 8) & 0xFF) / 255f;
+                dp[2 * plane + i] = (color & 0xFF) / 255f;
+            }
+        }
+        log($"Segmentation map ready: {targetWidth}x{targetHeight}.");
         return output;
     }
 
@@ -138,6 +169,26 @@ public static class AnnotatorControlPreprocessors
             s_loaders.Add(loader);
             s_normal = new NormalBaePreprocessor(model);
             return s_normal;
+        }
+    }
+
+    private static UperNetSegPreprocessor GetSegment(Action<string> log)
+    {
+        lock (s_lock)
+        {
+            if (s_segment is not null) return s_segment;
+            UperNetSegPreset preset = UperNetSegPreset.ConvNextSmall;
+            string path = AnnotatorDownloader.EnsureAnnotator(preset.LocalFileName,
+                $"https://huggingface.co/{preset.HuggingFaceRepo}/resolve/main/{preset.CheckpointFile}",
+                preset.Sha256, log);
+            log($"Loading UperNet segmentation annotator: {path}");
+            PytorchPickleLoader loader = new PytorchPickleLoader();
+            loader.Load(path);
+            UperNetSegModel model = new UperNetSegModel();
+            model.LoadWeights(loader.GetAllTensors());
+            s_loaders.Add(loader);
+            s_segment = new UperNetSegPreprocessor(model);
+            return s_segment;
         }
     }
 
