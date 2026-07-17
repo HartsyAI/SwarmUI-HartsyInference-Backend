@@ -8,8 +8,10 @@
 > Krea2-Turbo 4.50s vs 6.5s, Qwen-Image 40.9s vs 54.8s. Video is live in production
 > (Wan 2.x T2V/I2V/VACE/Animate/S2V, LTX incl. LTX-2 with audio, HunyuanVideo,
 > Kandinsky-5). Img2img, inpaint, LoRA, refiner (verified live), ControlNet
-> (SDXL+Canny), IP-Adapter, GGUF checkpoints, live previews, and cancellation all
-> work. Remaining gaps are tracked in [Known limitations](#known-limitations), the
+> (SDXL + SD1.5 + union-type + FLUX-DiT, full in-engine preprocessor set incl.
+> segmentation), IP-Adapter (standard/Plus/Plus-Face/FaceID/FaceID-PlusV2),
+> FLUX.1 Kontext/Fill/Canny/Depth/Redux, GGUF checkpoints, live previews, and
+> cancellation all work. Remaining gaps are tracked in [Known limitations](#known-limitations), the
 > [parity matrix](./docs/02-Comfy-Feature-Parity-Matrix.md), and the engine's
 > [benchmark log](https://github.com/HartsyAI/HartsyInference/blob/main/benchmarks/results/).
 
@@ -95,11 +97,13 @@ Working: prompt/negative/CFG/steps/seed, sampler selection (SD1.5/SDXL) + clip
 skip (SD1.5), EndStepsEarly, img2img creativity (incl. Flux.2), inpaint masks
 (+grow/blur), variation seed (SD1.5/SDXL/Flux), **`<segment:yolo->` auto-refinement
 (SDXL/Flux/SD3, pure-C# YOLO)**, multi-LoRA with strengths, SDXL refiner (PostApply
-any base, StepSwap SDXL), IP-Adapter standard/Plus/Plus-Face with weight types +
-step gating (SDXL + SD1.5, real-weight verified 07-16), ControlNet stacking + start/end
-windows (SDXL + SD1.5; Canny / Depth-Anything-V2 / OpenPose preprocessors, LDM +
-diffusers checkpoint layouts), FLUX.1 Kontext / Fill / Canny / Depth / Redux (all
-verified e2e 07-16), **GGUF Flux transformers**,
+any base, StepSwap SDXL), IP-Adapter standard/Plus/Plus-Face **+ FaceID + FaceID-Plus/PlusV2**
+with weight types + step gating (SDXL + SD1.5, real-weight verified 07-16/17), ControlNet
+stacking + start/end windows (SDXL + SD1.5; Canny / Depth-Anything-V2 / OpenPose / HED-softedge /
+scribble / lineart / normal / **segmentation** preprocessors, LDM + diffusers checkpoint layouts),
+**union-type SDXL ControlNet** (xinsir controlnet-union ProMax, per-slot control-type dropdown) and
+**FLUX DiT ControlNet** (union + single-mode, contour-locked live-verified 07-17), FLUX.1 Kontext /
+Fill / Canny / Depth / Redux (all verified e2e 07-16/17), **GGUF Flux transformers**,
 Wan/LTX video with FPS/format/boomerang/trim, **Wan VACE control-video** (pose/depth/edge
 clip → guided video), **Wan Animate** (driving video → character animation), **Wan S2V**
 (speech audio → talking video), ACE-Step music, TAESD or latent2rgb
@@ -108,15 +112,17 @@ live previews, mid-gen cancel, FreeMemory, multi-GPU via one backend per GPU,
 
 Not yet — needs upstream HartsyInference engine work first (Category B): hires-fix
 2-pass upscale + ESRGAN (tiled VaeEncoder + upscaler), guidance variants
-(FreeU/SAG/PAG/NAG/RescaleCFG/CFGZero★), LoRA on SD3/Z-Image/Flux.2, remaining
-ControlNet preprocessors (lineart/softedge/normal/seg), Flux-DiT ControlNet,
-IP-Adapter FaceID, SAM2
+(FreeU/SAG/PAG/NAG/RescaleCFG/CFGZero★), LoRA on SD3/Z-Image/Flux.2, SAM2
 segment targets, seamless tiling, batch>1, variation seed on SD3,
-Qwen Image Edit, FP4 (Flux.2 Klein 9B / Ideogram nf4). (CLIP-Seg text segments
-and Wan 14B have since shipped — see the architecture table.)
+FP4 (Flux.2 Klein 9B / Ideogram nf4), union-type segment/tile/repaint control types
+(raw-map pass-through wired; dedicated preprocessing pending). (Since shipped — see the
+architecture table: CLIP-Seg text segments, Wan 14B, the lineart/softedge/normal/**segmentation**
+ControlNet preprocessors, **Flux-DiT ControlNet**, union-type SDXL ControlNet, **IP-Adapter
+FaceID + FaceID-Plus/PlusV2**, and Qwen-Image-Edit.)
 
-Not planned for v1: workflow editor, textual-inversion embeddings, InstantID,
-Flux Redux, rembg, face restore, TensorRT. TTS/STT (engine has Whisper/Bark/
+Not planned for v1: workflow editor, textual-inversion embeddings, full InstantID
+pipeline (IP-Adapter FaceID covers the identity-transfer case), rembg, face restore,
+TensorRT. TTS/STT (engine has Whisper/Bark/
 Kokoro/F5/CosyVoice/etc) is deferred pending a Swarm UI surface for voice/
 reference inputs — the current audio params are music-only.
 
@@ -293,7 +299,7 @@ inference engine. What's implemented today:
 - **Schedulers:** Euler, DDIM, DPM++ 2M, LCM, FlowMatch Euler/DMD/UniPC, logit-normal (Ideogram 4)
 - **Text encoders:** CLIP-L/G, CLIP-Vision (IPA), T5-XXL, LlamaStyle (Qwen3 / Qwen3-VL-8B / Mistral / Llama 3.1), GPT-OSS
 - **Tokenizers:** CLIP, T5, Whisper, Qwen3
-- **Adapters:** LoRA stack with per-component application, ControlNet (SDXL), IP-Adapter standard/Plus
+- **Adapters:** LoRA stack with per-component application, ControlNet (SDXL + SD1.5 + union-type ProMax + FLUX-DiT), IP-Adapter standard/Plus/Plus-Face/FaceID/FaceID-Plus/FaceID-PlusV2
 - **Prompting:** structured-prompt subsystem (JSON dialects, bounding boxes, regions — built for Ideogram 4)
 - **Memory mgmt:** `BlockStreamingController` (per-layer streaming), `CudaStreamingWeightCache` (async upload on side stream), tiled VAE decode
 - **Cancellation:** `CancellationToken` threaded through pipeline loops

@@ -97,11 +97,13 @@ highest-demand item here (punchlist P6).
 | Feature | Status | Notes |
 |---------|--------|-------|
 | ControlNet single + stack | ✅ | SDXL + SD 1.5 (verified e2e 2026-07-16); summed residuals, 3-slot params honored; LDM `control_model.*` + diffusers layouts both load |
-| ControlNet preprocessors | 🟢 | Canny (pure C#, cv2-convention fix 07-16), Depth (in-engine Depth-Anything-V2 ViT-L, parity 2.9e-7), OpenPose (in-engine YOLO11-pose → BODY-18) — all verified e2e. Lineart/softedge/normal/seg pending; no ONNX needed (pure C# engine models) |
+| ControlNet union-type (SDXL) | ✅ | xinsir controlnet-union-sdxl ProMax; per-slot "ControlNet Union Type" dropdown → `SdxlUnionControlType`; parity vs diffusers `ControlNetUnionModel` corr ≥0.9999998; live-verified 07-17 (canny + depth types) |
+| Flux DiT ControlNet | ✅ | Union-Pro-2.0 + single-mode; `FluxControlNetResolver`; parity vs diffusers `FluxControlNetModel` maxAbs 3.7e-9; live-verified 07-17 (contour-locked glass-apple) |
+| ControlNet preprocessors | ✅ | Canny (pure C#, cv2-convention fix 07-16), Depth (in-engine Depth-Anything-V2 ViT-L, parity 2.9e-7), OpenPose (YOLO11-pose → BODY-18), HED-softedge / scribble / lineart / normal (parity ≤8e-6), **segmentation** (UperNet-ConvNeXt ADE20K, 100% class parity, live-verified 07-17) — all pure-C#, no ONNX |
 | ControlNet start/end ranges | ✅ | Per-step gating in both pipelines (engine `ControlNetConditioning.Start/EndFraction`), verified 07-16 |
-| IP-Adapter standard / Plus / Plus-Face | ✅ | SD 1.5 + SDXL VERIFIED with real weights 2026-07-16 (checkpoint layer-ORDER engine fix — it had never actually run before); weight types + start/end gating + multi-image averaging; dropdown populates from the ipadapter folder (Comfy-free) |
-| IP-Adapter FaceID / InstantID | 🔴 | Needs InsightFace ArcFace runtime (Wave 2) |
-| Flux Redux / style models | ✅ | Verified e2e 2026-07-16: in-engine SigLIP so400m + Redux projector; `usestylemodel` + merge/multiply/apply-start honored (multiply×merge = scalar on redux tokens, per Comfy math) |
+| IP-Adapter standard / Plus / Plus-Face | ✅ | SD 1.5 + SDXL VERIFIED with real weights 2026-07-16 (checkpoint layer-ORDER engine fix — it had never actually run before); weight types + start/end gating + multi-image averaging; dropdown populates from the ipadapter folder (Comfy-free). Re-verified 07-17 after the shared ResamplerLayer GELU parity fix |
+| IP-Adapter FaceID / FaceID-Plus / FaceID-PlusV2 | ✅ | Pure-C# ArcFace IR-50 (cosine 1.000000 vs onnxruntime — no InsightFace runtime needed) + face alignment + companion-LoRA auto-merge + CLIP-Vision face crop (Plus/V2). SDXL + SD 1.5; projection corr 1.000000 on all real checkpoints; SDXL PlusV2 e2e identity cosine 0.3456; live-verified 07-16/17. "FaceID V2 Weight" param exposes the shortcut scale. Full InstantID pipeline (ControlNet+IPA combo) not wired — FaceID covers identity transfer |
+| Flux Redux / style models | ✅ | Verified e2e 2026-07-16 + numeric A/B 07-17 (encoder+projector corr 1.000000 vs `FluxPriorReduxPipeline`): in-engine SigLIP so400m + Redux projector; `usestylemodel` + merge/multiply/apply-start honored (multiply×merge = scalar on redux tokens, per Comfy math) |
 | ReVision | 🔴 | SDXL CLIP-Vision conditioning not wired |
 | Img2img (init + creativity) | ✅ | SD 1.5 / SDXL / Flux / SD3 / Z-Image (Flux.2: mechanical TODO) |
 | Inpaint (mask) | 🟢 | SDXL / Flux / SD3 blend-on-vanilla incl. MaskGrow/MaskBlur; SD 1.5 + Z-Image pending hooks |
