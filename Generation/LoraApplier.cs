@@ -1,3 +1,4 @@
+using System.IO;
 using SwarmUI.Utils;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
@@ -40,7 +41,7 @@ public static class LoraApplier
         {
             foreach (LoraResolver.LoraSpec spec in loras)
             {
-                Logs.Verbose($"[HartsyInference][LoRA] Loading '{spec.Model.Name}' (model={spec.ModelStrength}, tenc={spec.TencStrength}).");
+                Logs.Verbose($"[HartsyInference][LoRA] Loading '{spec.Model?.Name ?? Path.GetFileName(spec.FilePath)}' (model={spec.ModelStrength}, tenc={spec.TencStrength}).");
                 stack.AddFromPath(spec.FilePath, strength: spec.ModelStrength);
             }
 

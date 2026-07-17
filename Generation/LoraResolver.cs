@@ -27,7 +27,9 @@ public static class LoraResolver
     /// distinct tenc weight, <see cref="TencStrength"/> equals <see cref="ModelStrength"/>.</summary>
     public sealed class LoraSpec
     {
-        public required T2IModel Model { get; init; }
+        /// <summary>The Swarm model registration; null for programmatically-injected side LoRAs (e.g. the
+        /// IP-Adapter FaceID companion LoRA, which lives outside the Lora model folder).</summary>
+        public T2IModel Model { get; init; }
         public required string FilePath { get; init; }
         public required float ModelStrength { get; init; }
         public required float TencStrength { get; init; }

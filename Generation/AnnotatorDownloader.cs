@@ -20,14 +20,18 @@ public static class AnnotatorDownloader
 
     /// <summary>Returns the local path of the annotator checkpoint, downloading it first when missing. Hash is SHA-256 hex; empty skips verification (discouraged).</summary>
     public static string EnsureAnnotator(string fileName, string url, string hash, Action<string> log)
+        => EnsureFileInFolder("preprocessors", fileName, url, hash, log);
+
+    /// <summary>Like <see cref="EnsureAnnotator"/> but for an arbitrary <c>&lt;ModelRoot&gt;/&lt;subFolder&gt;</c> destination — used for non-T2I side files that live next to their consumers (e.g. the IP-Adapter FaceID checkpoints + companion LoRAs under <c>ipadapter/</c>).</summary>
+    public static string EnsureFileInFolder(string subFolder, string fileName, string url, string hash, Action<string> log)
     {
-        string folder = Path.Combine(Program.ServerSettings.Paths.ActualModelRoot, "preprocessors");
+        string folder = Path.Combine(Program.ServerSettings.Paths.ActualModelRoot, subFolder);
         string path = Path.Combine(folder, fileName);
         if (File.Exists(path))
         {
             return path;
         }
-        object dlLock = _locks.GetOrAdd(fileName, _ => new object());
+        object dlLock = _locks.GetOrAdd($"{subFolder}/{fileName}", _ => new object());
         lock (dlLock)
         {
             if (File.Exists(path))
@@ -36,7 +40,7 @@ public static class AnnotatorDownloader
             }
             Directory.CreateDirectory(folder);
             string tmp = path + ".tmp";
-            log($"Downloading annotator '{fileName}' from {url} ...");
+            log($"Downloading '{fileName}' from {url} ...");
             try
             {
                 Utilities.DownloadFile(url, tmp, null).Wait(Program.GlobalProgramCancel);
@@ -47,16 +51,16 @@ public static class AnnotatorDownloader
                     if (actual != hash.ToLowerInvariant())
                     {
                         throw new InvalidDataException(
-                            $"Annotator '{fileName}' failed hash verification (expected {hash}, got {actual}) — corrupt download?");
+                            $"'{fileName}' failed hash verification (expected {hash}, got {actual}) — corrupt download?");
                     }
                 }
                 File.Move(tmp, path);
-                log($"Annotator '{fileName}' ready.");
+                log($"'{fileName}' ready.");
                 return path;
             }
             catch (Exception ex)
             {
-                Logs.Error($"[HartsyInference] Annotator download failed for '{fileName}': {ex.Message}");
+                Logs.Error($"[HartsyInference] Download failed for '{fileName}': {ex.Message}");
                 try { if (File.Exists(tmp)) File.Delete(tmp); } catch (IOException) { }
                 throw;
             }

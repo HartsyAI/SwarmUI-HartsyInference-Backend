@@ -988,6 +988,19 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                     cachePut: entry => _cache.PutIpAdapter(entry))
                 : null;
 
+            // FaceID ships half its effect as a rank-128 UNet LoRA — inject it into the normal
+            // LoRA merge path (kohya SDXL/SD15 format, handled by the engine's KohyaSdMapper).
+            if (ipaSpec?.FaceIdLoraPath is string faceIdLoraPath)
+            {
+                AddLoadStatus($"Applying IP-Adapter FaceID companion LoRA ({Path.GetFileName(faceIdLoraPath)}).");
+                loras.Add(new LoraResolver.LoraSpec
+                {
+                    FilePath = faceIdLoraPath,
+                    ModelStrength = ipaSpec.FaceIdLoraStrength,
+                    TencStrength = ipaSpec.FaceIdLoraStrength,
+                });
+            }
+
             Image[] images = await Task.Run(() =>
             {
                 if (compat == Sd15Loader.Sd15CompatClassId)
@@ -1713,6 +1726,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 || Sd3Loader.IsSd3Compat(compat)
                 || compat == ZImageLoader.ZImageCompatClassId
                 || compat == BooguImageLoader.BooguImageCompatClassId // Init Image = the edit reference (TI2I)
+                || compat == OmniGen2Loader.OmniGen2CompatClassId     // Init Image = the edit reference (VAE ref latents + dual guidance)
                 || compat == QwenImageLoader.QwenImageCompatClassId   // img2img via QwenImageVaeEncoder (covers qwen-image-edit checkpoints too)
                 || Flux2Loader.IsFlux2Compat(compat)
                 // Wan video: Init Image = the I2V first frame, not img2img. The loader routes it
@@ -1724,7 +1738,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             {
                 input.RefusalReasons.Add(
                     $"HartsyInference: img2img isn't supported on architecture '{compat}' yet. " +
-                    $"Currently supported: SD 1.5, SDXL, Flux, Flux.2, SD3, Z-Image, Qwen-Image, Boogu. Remove the Init Image or pick a model from a supported architecture.");
+                    $"Currently supported: SD 1.5, SDXL, Flux, Flux.2, SD3, Z-Image, Qwen-Image, Boogu, OmniGen2. Remove the Init Image or pick a model from a supported architecture.");
                 return false;
             }
         }

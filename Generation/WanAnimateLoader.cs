@@ -382,18 +382,18 @@ public static class WanAnimateLoader
         return entry.PosePipeline;
     }
 
-    /// <summary>Resolves the folded YOLO11n-pose safetensors from the shared side-model folder. TODO(host): add an
-    /// auto-download <see cref="SideModels"/> entry once the folded file is hosted; until then it is converted locally.</summary>
-    private static string ResolvePoseWeights()
+    /// <summary>Resolves the folded YOLO11n-pose safetensors from the shared side-model folder. Public because
+    /// IP-Adapter FaceID reuses the same pose detector for face keypoints. TODO(host): add an auto-download
+    /// <see cref="SideModels"/> entry once the folded file is hosted; until then it is converted locally.</summary>
+    public static string ResolvePoseWeights()
     {
         if (!Program.T2IModelSets.TryGetValue("Clip", out T2IModelHandler handler) || handler.FolderPaths.Length == 0)
             throw new SwarmUserErrorException("HartsyInference: cannot locate the model folder for the YOLO11n-pose weights.");
         string path = Path.Combine(handler.FolderPaths[0], PoseWeightsFile);
         if (!File.Exists(path))
             throw new SwarmUserErrorException(
-                $"HartsyInference: Wan-Animate auto face-preprocessing needs the YOLO11n-pose weights at '{path}'. "
-                + "Convert Ultralytics 'yolo11n-pose.pt' with tests/python-reference/convert_yolov8_pt_to_safetensors.py, "
-                + "or turn off 'Animate Auto-Preprocess Driving' and supply an 'Animate Face Video' instead.");
+                $"HartsyInference: this feature needs the YOLO11n-pose weights at '{path}'. "
+                + "Convert Ultralytics 'yolo11n-pose.pt' with tests/python-reference/convert_yolov8_pt_to_safetensors.py.");
         return path;
     }
 }
