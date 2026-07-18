@@ -52,10 +52,17 @@ public static class SegmentRefiner
             foreach (PromptRegion.Part part in parts)
             {
                 cancel.ThrowIfCancellationRequested();
-                // YOLO targets ("yolo-...") use the detector; any other target text is free-text CLIPSeg.
+                // "yolo-..." → closed-set YOLO; "rtdetr[-class]" → closed-set RT-DETR (COCO, transformer);
+                // "dino-..." → open-vocabulary Grounding DINO text detection; any other target text →
+                // free-text CLIPSeg heatmap. YOLO/RT-DETR/DINO boxes are refined to pixel masks by SAM 2
+                // when a checkpoint is installed.
                 Image mask = SegmentResolver.IsYoloTarget(part)
                     ? SegmentResolver.BuildYoloMask(backend, current, part, input, log)
-                    : ClipSegResolver.BuildTextMask(backend, current, part, input, log);
+                    : SegmentResolver.IsRtDetrTarget(part)
+                        ? SegmentResolver.BuildRtDetrMask(backend, current, part, input, log)
+                        : SegmentResolver.IsDinoTarget(part)
+                            ? SegmentResolver.BuildDinoMask(backend, current, part, input, log)
+                            : ClipSegResolver.BuildTextMask(backend, current, part, input, log);
                 if (mask is null)
                 {
                     segIdx++;

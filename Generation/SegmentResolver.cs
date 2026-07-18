@@ -6,8 +6,10 @@ using SwarmUI.Core;
 using SwarmUI.Text2Image;
 using SwarmUI.Utils;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Pipelines;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Vision.Detection;
+using HartsyInference.Vision.Detection.GroundingDino;
 using HartsyInference.Vision.Segmentation;
 using HartsyInference.Vision.Segmentation.Sam2;
 using ISImage = SixLabors.ImageSharp.Image;
@@ -112,8 +114,8 @@ public static class SegmentResolver
         bool invert = part.Strength < 0;
         int grow = input.Get(T2IParamTypes.SegmentMaskGrow, 16);
         int blur = input.Get(T2IParamTypes.SegmentMaskBlur, 10);
-        byte[] maskBytes = TryBuildSam2Mask(backend, baseImage, chosen, w, h, invert, log)
-            ?? RasterizeBox(chosen, w, h, invert);
+        byte[] maskBytes = TryBuildSam2Mask(backend, baseImage, chosen.X1, chosen.Y1, chosen.X2, chosen.Y2, w, h, invert, log)
+            ?? RasterizeBox(chosen.X1, chosen.Y1, chosen.X2, chosen.Y2, w, h, invert);
         if (grow > 0) DilateInPlaceSeparable(maskBytes, w, h, grow);
         var maskImg = SixLabors.ImageSharp.Image.LoadPixelData<L8>(maskBytes, w, h);
         try
@@ -130,9 +132,168 @@ public static class SegmentResolver
         }
     }
 
-    // TODO(B7): wire RT-DETR + Grounding DINO detectors into this segment path once their deformable attention
-    // is GPU-routed. They are real-weight verified but currently host-loop (too slow for interactive gen), so
-    // only the YOLO detector feeds <segment:> for now.
+    /// <summary>Returns true if the segment part targets Grounding DINO open-vocabulary detection ("dino-...").</summary>
+    public static bool IsDinoTarget(PromptRegion.Part part) =>
+        part.DataText is not null && part.DataText.StartsWith("dino-", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Builds a grayscale mask for a Grounding DINO segment part: detects the free-text query with the
+    /// open-vocabulary detector (GPU-routed deformable attention), picks the Nth box in sort order, and refines it
+    /// to a pixel-accurate mask with SAM 2 (falling back to the box rasterization). Syntax:
+    /// <c>&lt;segment:dino-QUERY[:INDEX],STRENGTH,CREATIVITY&gt; prompt&gt;</c> where STRENGTH is the box confidence
+    /// threshold and a negative STRENGTH inverts the mask. Returns null when nothing is detected.</summary>
+    public static Image BuildDinoMask(IBackend backend, Image baseImage, PromptRegion.Part part, T2IParamInput input, Action<string> log)
+    {
+        // Parse "dino-<query>[:index]". Only a trailing ":<integer>" is treated as an index (queries with a real
+        // colon are rare); everything else is the detection phrase.
+        string spec = part.DataText["dino-".Length..];
+        int index = 0;
+        int lastColon = spec.LastIndexOf(':');
+        if (lastColon > 0 && int.TryParse(spec[(lastColon + 1)..].Trim(), out int parsedIdx))
+        {
+            index = parsedIdx;
+            spec = spec[..lastColon];
+        }
+        string query = spec.Trim();
+        if (query.Length == 0)
+        {
+            throw new InvalidOperationException("Empty '<segment:dino-...>' query — provide the object phrase, e.g. <segment:dino-a red car,0.4,0.6>.");
+        }
+
+        // Strength == box confidence threshold; the "1.0 = default" convention maps to GDINO's 0.35 default.
+        float threshold = (float)Math.Abs(part.Strength);
+        if (threshold > 0.999f) threshold = 0.35f;
+        if (threshold <= 0f) threshold = 0.35f;
+
+        var (_, w, h) = RgbToImage.ToHwcRgb(baseImage);
+        List<GroundingDinoDetection> dets = GroundingDinoResolver.Detect(backend, baseImage, query, threshold, log);
+        if (dets.Count == 0)
+        {
+            log($"[Segment] dino-'{query}': no detections above threshold {threshold:F2} — skipping this segment.");
+            return null;
+        }
+
+        string sortOrder = input.Get(T2IParamTypes.SegmentSortOrder, "left-right");
+        dets = SortDinoDetections(dets, sortOrder);
+        if (index < 0 || index >= dets.Count)
+        {
+            log($"[Segment] dino-'{query}': index {index} out of range (have {dets.Count}) — using detection 0.");
+            index = 0;
+        }
+        GroundingDinoDetection chosen = dets[index];
+
+        bool invert = part.Strength < 0;
+        int grow = input.Get(T2IParamTypes.SegmentMaskGrow, 16);
+        int blur = input.Get(T2IParamTypes.SegmentMaskBlur, 10);
+        byte[] maskBytes = TryBuildSam2Mask(backend, baseImage, chosen.X0, chosen.Y0, chosen.X1, chosen.Y1, w, h, invert, log)
+            ?? RasterizeBox(chosen.X0, chosen.Y0, chosen.X1, chosen.Y1, w, h, invert);
+        if (grow > 0) DilateInPlaceSeparable(maskBytes, w, h, grow);
+        var maskImg = SixLabors.ImageSharp.Image.LoadPixelData<L8>(maskBytes, w, h);
+        try
+        {
+            if (blur > 0) maskImg.Mutate(ctx => ctx.GaussianBlur(blur / 2.0f));
+            log($"[Segment] dino-'{query}': matched '{chosen.Label}' score={chosen.Score:F2} " +
+                $"box=({chosen.X0:F0},{chosen.Y0:F0})-({chosen.X1:F0},{chosen.Y1:F0}) [{index + 1}/{dets.Count}, sort={sortOrder}].");
+            return new Image(maskImg);
+        }
+        finally
+        {
+            maskImg.Dispose();
+        }
+    }
+
+    private static List<GroundingDinoDetection> SortDinoDetections(List<GroundingDinoDetection> dets, string order) => order switch
+    {
+        "right-left" => dets.OrderByDescending(d => d.X0).ToList(),
+        "top-bottom" => dets.OrderBy(d => d.Y0).ToList(),
+        "bottom-top" => dets.OrderByDescending(d => d.Y0).ToList(),
+        "largest-smallest" => dets.OrderByDescending(d => (d.X1 - d.X0) * (d.Y1 - d.Y0)).ToList(),
+        "smallest-largest" => dets.OrderBy(d => (d.X1 - d.X0) * (d.Y1 - d.Y0)).ToList(),
+        _ => dets.OrderBy(d => d.X0).ToList(), // left-right (default)
+    };
+
+    /// <summary>Returns true if the segment part targets RT-DETR closed-set COCO detection ("rtdetr" / "rtdetr-...").</summary>
+    public static bool IsRtDetrTarget(PromptRegion.Part part) =>
+        part.DataText is not null && part.DataText.StartsWith("rtdetr", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Builds a grayscale mask for an RT-DETR segment part: detects COCO objects (GPU-routed deformable
+    /// attention), filters by an optional class substring, picks the Nth box in sort order, and refines it with
+    /// SAM 2. Syntax: <c>&lt;segment:rtdetr[-CLASS][:INDEX],STRENGTH,CREATIVITY&gt; prompt&gt;</c> — STRENGTH is
+    /// the confidence threshold, a negative STRENGTH inverts. Returns null when nothing matches.</summary>
+    public static Image BuildRtDetrMask(IBackend backend, Image baseImage, PromptRegion.Part part, T2IParamInput input, Action<string> log)
+    {
+        // "rtdetr[-<classfilter>][:index]" — strip the "rtdetr" prefix and an optional leading '-'.
+        string spec = part.DataText["rtdetr".Length..];
+        if (spec.StartsWith("-")) spec = spec[1..];
+        int index = 0;
+        int lastColon = spec.LastIndexOf(':');
+        if (lastColon >= 0 && int.TryParse(spec[(lastColon + 1)..].Trim(), out int parsedIdx))
+        {
+            index = parsedIdx;
+            spec = spec[..lastColon];
+        }
+        string classFilter = spec.Trim();
+
+        float threshold = (float)Math.Abs(part.Strength);
+        if (threshold > 0.999f) threshold = 0.3f;
+        if (threshold <= 0f) threshold = 0.3f;
+
+        var (rgb, w, h) = RgbToImage.ToHwcRgb(baseImage);
+        IReadOnlyList<DetectionResult> detected = RtDetrResolver.Detect(backend, rgb, w, h, threshold, log);
+        List<DetectionResult> filtered = detected.ToList();
+        if (classFilter.Length > 0)
+        {
+            filtered = filtered.Where(d => d.Label.Contains(classFilter, StringComparison.OrdinalIgnoreCase)).ToList();
+            if (filtered.Count == 0)
+            {
+                log($"[Segment] rtdetr '{classFilter}': no detections matched — skipping this segment.");
+                return null;
+            }
+        }
+        if (filtered.Count == 0)
+        {
+            log($"[Segment] rtdetr: no detections above threshold {threshold:F2} — skipping this segment.");
+            return null;
+        }
+
+        string sortOrder = input.Get(T2IParamTypes.SegmentSortOrder, "left-right");
+        filtered = SortDetectionResults(filtered, sortOrder);
+        if (index < 0 || index >= filtered.Count)
+        {
+            log($"[Segment] rtdetr: index {index} out of range (have {filtered.Count}) — using detection 0.");
+            index = 0;
+        }
+        DetectionResult chosen = filtered[index];
+        float bx1 = chosen.X * w, by1 = chosen.Y * h, bx2 = (chosen.X + chosen.Width) * w, by2 = (chosen.Y + chosen.Height) * h;
+
+        bool invert = part.Strength < 0;
+        int grow = input.Get(T2IParamTypes.SegmentMaskGrow, 16);
+        int blur = input.Get(T2IParamTypes.SegmentMaskBlur, 10);
+        byte[] maskBytes = TryBuildSam2Mask(backend, baseImage, bx1, by1, bx2, by2, w, h, invert, log)
+            ?? RasterizeBox(bx1, by1, bx2, by2, w, h, invert);
+        if (grow > 0) DilateInPlaceSeparable(maskBytes, w, h, grow);
+        var maskImg = SixLabors.ImageSharp.Image.LoadPixelData<L8>(maskBytes, w, h);
+        try
+        {
+            if (blur > 0) maskImg.Mutate(ctx => ctx.GaussianBlur(blur / 2.0f));
+            log($"[Segment] rtdetr: matched '{chosen.Label}' score={chosen.Confidence:F2} " +
+                $"box=({bx1:F0},{by1:F0})-({bx2:F0},{by2:F0}) [{index + 1}/{filtered.Count}, sort={sortOrder}].");
+            return new Image(maskImg);
+        }
+        finally
+        {
+            maskImg.Dispose();
+        }
+    }
+
+    private static List<DetectionResult> SortDetectionResults(List<DetectionResult> dets, string order) => order switch
+    {
+        "right-left" => dets.OrderByDescending(d => d.X).ToList(),
+        "top-bottom" => dets.OrderBy(d => d.Y).ToList(),
+        "bottom-top" => dets.OrderByDescending(d => d.Y).ToList(),
+        "largest-smallest" => dets.OrderByDescending(d => d.Width * d.Height).ToList(),
+        "smallest-largest" => dets.OrderBy(d => d.Width * d.Height).ToList(),
+        _ => dets.OrderBy(d => d.X).ToList(), // left-right (default)
+    };
 
     // SAM 2 uses ImageNet normalization on a 1024² square (HF Sam2ImageProcessor: resize to exactly 1024×1024,
     // then (x/255 - mean) / std). Box/point coordinates and the returned mask share that square frame.
@@ -148,7 +309,7 @@ public static class SegmentResolver
     /// <summary>Refines the chosen YOLO detection box into a pixel-accurate mask with SAM 2 (box prompt), or
     /// returns null when no SAM 2 checkpoint is installed / the refine fails — in which case the caller falls
     /// back to rasterizing the bounding box. Output is an H×W L8 buffer (255 inside, honoring <paramref name="invert"/>).</summary>
-    private static unsafe byte[] TryBuildSam2Mask(IBackend backend, Image baseImage, YoloDetection box, int w, int h, bool invert, Action<string> log)
+    internal static unsafe byte[] TryBuildSam2Mask(IBackend backend, Image baseImage, float bx1, float by1, float bx2, float by2, int w, int h, bool invert, Action<string> log)
     {
         string ckpt = ResolveSam2ModelPath();
         if (ckpt is null)
@@ -166,8 +327,8 @@ public static class SegmentResolver
             {
                 float sx = (float)Sam2InputSize / w, sy = (float)Sam2InputSize / h;
                 SamBoxPrompt bp = new SamBoxPrompt(
-                    Math.Clamp(box.X1 * sx, 0f, Sam2InputSize - 1f), Math.Clamp(box.Y1 * sy, 0f, Sam2InputSize - 1f),
-                    Math.Clamp(box.X2 * sx, 0f, Sam2InputSize - 1f), Math.Clamp(box.Y2 * sy, 0f, Sam2InputSize - 1f));
+                    Math.Clamp(bx1 * sx, 0f, Sam2InputSize - 1f), Math.Clamp(by1 * sy, 0f, Sam2InputSize - 1f),
+                    Math.Clamp(bx2 * sx, 0f, Sam2InputSize - 1f), Math.Clamp(by2 * sy, 0f, Sam2InputSize - 1f));
                 SamMaskResult[] results = pipeline.Segment(new SamPrompt { Box = bp }, image, Sam2InputSize, Sam2InputSize);
                 if (results is null || results.Length == 0)
                 {
@@ -287,16 +448,16 @@ public static class SegmentResolver
         return null;
     }
 
-    private static byte[] RasterizeBox(YoloDetection box, int w, int h, bool invert)
+    internal static byte[] RasterizeBox(float boxX1, float boxY1, float boxX2, float boxY2, int w, int h, bool invert)
     {
         byte inside = invert ? (byte)0 : (byte)255;
         byte outside = invert ? (byte)255 : (byte)0;
         byte[] bytes = new byte[w * h];
         if (outside != 0) Array.Fill(bytes, outside);
-        int x1 = Math.Clamp((int)MathF.Floor(box.X1), 0, w);
-        int x2 = Math.Clamp((int)MathF.Ceiling(box.X2), 0, w);
-        int y1 = Math.Clamp((int)MathF.Floor(box.Y1), 0, h);
-        int y2 = Math.Clamp((int)MathF.Ceiling(box.Y2), 0, h);
+        int x1 = Math.Clamp((int)MathF.Floor(boxX1), 0, w);
+        int x2 = Math.Clamp((int)MathF.Ceiling(boxX2), 0, w);
+        int y1 = Math.Clamp((int)MathF.Floor(boxY1), 0, h);
+        int y2 = Math.Clamp((int)MathF.Ceiling(boxY2), 0, h);
         for (int y = y1; y < y2; y++)
         {
             int rowOff = y * w;
