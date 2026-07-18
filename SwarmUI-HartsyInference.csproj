@@ -23,22 +23,22 @@
         <HartsyRepo Condition="'$(HartsyRepo)' == ''">$(MSBuildThisFileDirectory)../../../../SharpInference</HartsyRepo>
         <!-- Cli bin is the full engine closure: every HartsyInference.* assembly + Google.Protobuf +
              Microsoft.ML.Tokenizers, all in one folder. -->
-        <HartsyLocalBin>$(HartsyRepo)/src/HartsyInference.Cli/bin/Release/net10.0</HartsyLocalBin>
+        <HartsyLocalBin>$(HartsyRepo)/src/HartsyInference.Cli/bin/Release/net8.0</HartsyLocalBin>
     </PropertyGroup>
     <Import Project="../../SwarmUI.extension.props" />
 
-    <!-- MUST come AFTER the import: SwarmUI.extension.props sets both TargetFramework=net8.0 and
-         CopyLocalLockFileAssemblies=false for all extensions. We override BOTH here:
-         (1) TargetFramework net10.0 — the engine (and this box's runtime) is net10.0; a net10.0
-             engine DLL can't be referenced from a net8.0 target, so the extension TFM must match the
-             net10.0 HintPaths / NuGet assets it consumes. The net8.0-built SwarmUI host loads a
-             net10.0 extension fine on the net10.0 runtime.
-         (2) CopyLocalLockFileAssemblies — the HartsyInference NuGet's private DLLs (HartsyInference.*,
-             Microsoft.ML.Tokenizers, Google.Protobuf) must land in THIS extension's output folder so
-             Swarm's per-extension AssemblyLoadContext can resolve them; we then exclude the
-             host-provided packages below. -->
+    <!-- SwarmUI.extension.props sets TargetFramework=net8.0 (matching the net8.0 host) and
+         CopyLocalLockFileAssemblies=false. KEEP the inherited net8.0 TFM — the engine is multi-target
+         (net8.0 + net10.0), so net8.0 pulls the net8.0 engine assets that load in the net8.0 host. Overriding
+         to net10.0 pulls net10.0 engine DLLs (System.Runtime 10.0.0.0) that the host's per-extension
+         AssemblyLoadContext cannot resolve → ReflectionTypeLoadException. Only override
+         CopyLocalLockFileAssemblies — the engine's private DLLs (HartsyInference.*, Microsoft.ML.Tokenizers,
+         Google.Protobuf) must land in THIS extension's output folder so the ALC can resolve them; we then
+         exclude the host-provided packages below. -->
     <PropertyGroup>
-        <TargetFramework>net10.0</TargetFramework>
+        <!-- Inherit net8.0 from SwarmUI.extension.props (matches the net8.0 host). Do NOT override to net10.0:
+             the engine is multi-target, so net8.0 pulls the net8.0 engine assets that load in the net8.0 host.
+             A net10.0 extension → net10.0 engine DLLs (System.Runtime 10.0.0.0) → the host ALC can't resolve. -->
         <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
     </PropertyGroup>
 
@@ -78,13 +78,13 @@
              dev machine's nuget.config feed and are NOT on nuget.org, so any downloaded copy of this
              extension fails restore with NU1301 (the "missing local dll"-style error). Always pin an
              EXACT version that appears in the flat-container index above. -->
-        <PackageReference Include="HartsyInference" Version="1.0.0-alpha.51" />
+        <PackageReference Include="HartsyInference" Version="1.0.0-alpha.52" />
     </ItemGroup>
 
     <!-- LOCAL ENGINE: prebuilt DLLs from the SharpInference Cli bin (its full runtime closure). Referenced
          directly (Private=true copies them to our output for Swarm's per-extension AssemblyLoadContext),
          plus the CUDA PTX kernels the backend resolves next to the DLL. FIRST build the engine:
-         dotnet build src/HartsyInference.Cli/HartsyInference.Cli.csproj -c Release -f net10.0 (in SharpInference). -->
+         dotnet build src/HartsyInference.Cli/HartsyInference.Cli.csproj -c Release -f net8.0 (in SharpInference). -->
     <ItemGroup Condition="'$(UseLocalHartsy)' == 'true'">
         <Reference Include="HartsyInference.Core"><HintPath>$(HartsyLocalBin)/HartsyInference.Core.dll</HintPath><Private>true</Private></Reference>
         <Reference Include="HartsyInference.ModelHandler"><HintPath>$(HartsyLocalBin)/HartsyInference.ModelHandler.dll</HintPath><Private>true</Private></Reference>
