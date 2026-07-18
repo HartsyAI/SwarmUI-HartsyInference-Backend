@@ -276,7 +276,7 @@ public static class IpAdapterResolver
             foreach (Image image in images)
             {
                 (byte[] rgb, int width, int height) = RgbToImage.ToHwcRgb(image);
-                (byte[] crop, byte[] clipCrop) = DetectAndAlignFace(pose, rgb, width, height, wantClipCrop, log);
+                (byte[] crop, byte[] clipCrop) = DetectAndAlignFace(entry.FaceDetector, pose, rgb, width, height, wantClipCrop, log);
                 Tensor inputTensor = ArcFaceModel.PreprocessAligned(crop);
                 Tensor embed;
                 try
@@ -377,8 +377,30 @@ public static class IpAdapterResolver
     /// plus (when <paramref name="wantClipCrop"/>) the SAME alignment rendered at 224×224 for CLIP-Vision.
     /// Falls back to a square face-region crop (no rotation) when keypoints are missing, and to a center crop
     /// when no person is detected at all.</summary>
-    private static (byte[] arcCrop, byte[] clipCrop) DetectAndAlignFace(YoloPosePipeline pose, byte[] rgb, int width, int height, bool wantClipCrop, Action<string> log)
+    private static (byte[] arcCrop, byte[] clipCrop) DetectAndAlignFace(FaceDetector faceDetector, YoloPosePipeline pose, byte[] rgb, int width, int height, bool wantClipCrop, Action<string> log)
     {
+        // Preferred path: the dedicated YOLOv8-Face detector → 5 landmarks → ArcFace-template alignment. It is a
+        // proper face localizer + landmark regressor (vs the pose model's whole-body keypoints), so the aligned
+        // crop is tighter and more identity-faithful. Used when a face-detector checkpoint is installed; on no
+        // detection (or no checkpoint) we fall through to the pose-keypoint path below.
+        if (faceDetector is not null)
+        {
+            IReadOnlyList<DetectedFace> faces = faceDetector.DetectFaces(rgb, width, height, confidenceThreshold: 0.25f, iouThreshold: 0.45f);
+            if (faces.Count > 0)
+            {
+                DetectedFace best = faces[0];
+                float bestArea = best.Box.Area;
+                foreach (DetectedFace f in faces)
+                {
+                    if (f.Box.Area > bestArea) { best = f; bestArea = f.Box.Area; }
+                }
+                log($"  FaceID: detected {faces.Count} face(s) via YOLOv8-Face — aligning the largest (conf={best.Confidence:F2}).");
+                return (FaceDetector.AlignedCrop(rgb, width, height, best, ArcFaceModel.InputSize),
+                    wantClipCrop ? FaceDetector.AlignedCrop(rgb, width, height, best, ClipFaceCropSize) : null);
+            }
+            log("  FaceID: YOLOv8-Face found no faces — falling back to pose-keypoint alignment.");
+        }
+
         IReadOnlyList<PoseDetection> people = pose.Detect(rgb, width, height, confidenceThreshold: 0.25f, iouThreshold: 0.45f);
 
         PoseDetection bestAligned = null;
@@ -545,6 +567,7 @@ public static class IpAdapterResolver
         SafeTensorsLoader clipVisionLoader = null;
         SafeTensorsLoader arcFaceLoader = null;
         YoloPosePipeline posePipeline = null;
+        FaceDetector faceDetector = null;
         try
         {
             if (file.BaseModel != IpAdapterBaseModel.Sdxl && file.BaseModel != IpAdapterBaseModel.Sd15)
@@ -579,6 +602,10 @@ public static class IpAdapterResolver
 
                 posePipeline = new YoloPosePipeline(backend, YoloConfig.YoloV11nPose, WanAnimateLoader.ResolvePoseWeights(), inputSize: 640);
 
+                // Optional dedicated face detector (YOLOv8-Face): when installed it replaces the pose-keypoint
+                // heuristic with a proper face box + 5-landmark alignment. Falls back to pose when absent.
+                faceDetector = TryLoadFaceDetector(backend, log);
+
                 string loraPath = ResolveFaceIdLora(ipaPath, log);
                 if (loraPath is null)
                 {
@@ -602,6 +629,7 @@ public static class IpAdapterResolver
                     ArcFace = arcFace,
                     ArcFaceLoader = arcFaceLoader,
                     PosePipeline = posePipeline,
+                    FaceDetector = faceDetector,
                     FaceIdLoraPath = loraPath,
                 };
             }
@@ -621,12 +649,69 @@ public static class IpAdapterResolver
         }
         catch
         {
+            faceDetector?.Dispose();
             posePipeline?.Dispose();
             arcFaceLoader?.Dispose();
             clipVisionLoader?.Dispose();
             file.Dispose();
             throw;
         }
+    }
+
+    /// <summary>Loads a dedicated YOLOv8-Face detector when a checkpoint is installed under a conventional
+    /// <c>facedetection</c>/<c>face</c>/<c>ipadapter</c> folder; returns null (→ pose-keypoint fallback) when
+    /// absent or on load failure. The variant + landmark stride are inferred from the filename.</summary>
+    private static FaceDetector TryLoadFaceDetector(IBackend backend, Action<string> log)
+    {
+        string path = ResolveFaceDetectorWeights();
+        if (path is null)
+        {
+            return null;
+        }
+        try
+        {
+            YoloConfig cfg = InferFaceConfig(path);
+            FaceDetector det = new FaceDetector(backend, cfg, path);
+            log($"  Face detector: {Path.GetFileName(path)} (YOLOv8-Face) — proper detect+align for the ArcFace crop.");
+            return det;
+        }
+        catch (Exception ex)
+        {
+            Logs.Error($"[HartsyInference] Face-detector load failed ({ex.Message}); using the pose-keypoint face crop.");
+            return null;
+        }
+    }
+
+    /// <summary>Locates a YOLOv8-Face <c>.safetensors</c> (a filename containing "face" and a yolo tag) under a
+    /// conventional side-model folder. Returns null when none is installed.</summary>
+    private static string ResolveFaceDetectorWeights()
+    {
+        foreach (string root in Program.ServerSettings.Paths.ActualModelRoots)
+        {
+            foreach (string sub in new[] { "facedetection", "yolov8-face", "face", "ipadapter" })
+            {
+                string dir = Path.Combine(root, sub);
+                if (!Directory.Exists(dir)) continue;
+                foreach (string f in Directory.EnumerateFiles(dir, "*.safetensors").OrderBy(x => x, StringComparer.Ordinal))
+                {
+                    string fn = Path.GetFileNameWithoutExtension(f).ToLowerInvariant();
+                    if (fn.Contains("face") && fn.Contains("yolo")) return f;
+                }
+            }
+        }
+        return null;
+    }
+
+    /// <summary>Infers the YOLOv8-Face variant (n/s/m/l) + landmark stride from the checkpoint filename. Landmark
+    /// stride defaults to 3 (Ultralytics x/y/visibility); a name hinting a landmark-only branch selects stride 2.</summary>
+    private static YoloConfig InferFaceConfig(string path)
+    {
+        string n = Path.GetFileNameWithoutExtension(path).ToLowerInvariant();
+        int kptDims = (n.Contains("kpt2") || n.Contains("lmk") || n.Contains("xy")) ? 2 : 3;
+        if (n.Contains("yolov8l") || n.Contains("yolov8x")) return YoloV8FaceConfig.YoloV8lFace(kptDims);
+        if (n.Contains("yolov8m")) return YoloV8FaceConfig.YoloV8mFace(kptDims);
+        if (n.Contains("yolov8s")) return YoloV8FaceConfig.YoloV8sFace(kptDims);
+        return YoloV8FaceConfig.YoloV8nFace(kptDims);
     }
 
     /// <summary>Resolves and loads the CLIP-Vision encoder: the user-selected ClipVisionModel takes priority;
@@ -757,6 +842,10 @@ public sealed class IpAdapterCacheEntry : IDisposable
     /// <summary>YOLO11-pose face/keypoint detector (FaceID entries only).</summary>
     public YoloPosePipeline PosePipeline { get; init; }
 
+    /// <summary>Dedicated YOLOv8-Face detector (FaceID entries only, when a checkpoint is installed). When present it
+    /// supersedes <see cref="PosePipeline"/> for locating + aligning the face; null → pose-keypoint fallback.</summary>
+    public FaceDetector FaceDetector { get; init; }
+
     /// <summary>Path of the FaceID companion UNet LoRA (kohya), or null.</summary>
     public string FaceIdLoraPath { get; init; }
 
@@ -770,6 +859,7 @@ public sealed class IpAdapterCacheEntry : IDisposable
         IpAdapter.Dispose();
         File.Dispose();
         ClipVisionLoader?.Dispose();
+        FaceDetector?.Dispose();
         PosePipeline?.Dispose();
         ArcFaceLoader?.Dispose();
     }

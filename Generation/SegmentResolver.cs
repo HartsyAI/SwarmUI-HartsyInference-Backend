@@ -6,7 +6,10 @@ using SwarmUI.Core;
 using SwarmUI.Text2Image;
 using SwarmUI.Utils;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Tensors;
 using HartsyInference.Vision.Detection;
+using HartsyInference.Vision.Segmentation;
+using HartsyInference.Vision.Segmentation.Sam2;
 using ISImage = SixLabors.ImageSharp.Image;
 using Image = SwarmUI.Utils.Image;
 
@@ -101,13 +104,16 @@ public static class SegmentResolver
         }
         YoloDetection chosen = filtered[index];
 
-        // Rasterize the chosen bbox into an H×W mask buffer (white inside), grow via separable
-        // max-filter dilation, then build the L8 image and Gaussian-blur the edges. A negative
-        // part strength inverts the mask (refine everything BUT the box).
+        // Build the H×W mask buffer (white inside), grow via separable max-filter dilation, then build the L8
+        // image and Gaussian-blur the edges. A negative part strength inverts the mask (refine everything BUT
+        // the region). When a SAM 2 checkpoint is installed we feed the chosen YOLO box as a box-prompt to SAM 2
+        // for a PIXEL-ACCURATE object mask (a big quality upgrade over the crude bounding-box rasterization);
+        // otherwise we fall back to rasterizing the box. The grow/blur post-step is identical either way.
         bool invert = part.Strength < 0;
         int grow = input.Get(T2IParamTypes.SegmentMaskGrow, 16);
         int blur = input.Get(T2IParamTypes.SegmentMaskBlur, 10);
-        byte[] maskBytes = RasterizeBox(chosen, w, h, invert);
+        byte[] maskBytes = TryBuildSam2Mask(backend, baseImage, chosen, w, h, invert, log)
+            ?? RasterizeBox(chosen, w, h, invert);
         if (grow > 0) DilateInPlaceSeparable(maskBytes, w, h, grow);
         var maskImg = SixLabors.ImageSharp.Image.LoadPixelData<L8>(maskBytes, w, h);
         try
@@ -122,6 +128,163 @@ public static class SegmentResolver
         {
             maskImg.Dispose();
         }
+    }
+
+    // TODO(B7): wire RT-DETR + Grounding DINO detectors into this segment path once their deformable attention
+    // is GPU-routed. They are real-weight verified but currently host-loop (too slow for interactive gen), so
+    // only the YOLO detector feeds <segment:> for now.
+
+    // SAM 2 uses ImageNet normalization on a 1024² square (HF Sam2ImageProcessor: resize to exactly 1024×1024,
+    // then (x/255 - mean) / std). Box/point coordinates and the returned mask share that square frame.
+    private static readonly float[] s_sam2Mean = { 0.485f, 0.456f, 0.406f };
+    private static readonly float[] s_sam2Std = { 0.229f, 0.224f, 0.225f };
+    private const int Sam2InputSize = 1024;
+
+    // SAM 2 pipelines are expensive to construct (the Hiera encoder copies every weight), so cache one per
+    // checkpoint path. The backend it was built against is stored so a backend swap rebuilds cleanly.
+    private static readonly Dictionary<string, (IBackend backend, SamPipeline pipe)> s_samCache = new();
+    private static readonly object s_samLock = new();
+
+    /// <summary>Refines the chosen YOLO detection box into a pixel-accurate mask with SAM 2 (box prompt), or
+    /// returns null when no SAM 2 checkpoint is installed / the refine fails — in which case the caller falls
+    /// back to rasterizing the bounding box. Output is an H×W L8 buffer (255 inside, honoring <paramref name="invert"/>).</summary>
+    private static unsafe byte[] TryBuildSam2Mask(IBackend backend, Image baseImage, YoloDetection box, int w, int h, bool invert, Action<string> log)
+    {
+        string ckpt = ResolveSam2ModelPath();
+        if (ckpt is null)
+        {
+            log("[Segment] SAM2 checkpoint not installed — using the YOLO bounding-box mask. " +
+                "Place a converted sam2_hiera_*.safetensors in a 'sam2' folder under your model root for pixel-accurate masks.");
+            return null;
+        }
+        try
+        {
+            SamPipeline pipeline = GetOrLoadSam2(backend, ckpt);
+            Tensor image = BuildSam2Input(baseImage, Sam2InputSize);
+            SamMaskResult best;
+            try
+            {
+                float sx = (float)Sam2InputSize / w, sy = (float)Sam2InputSize / h;
+                SamBoxPrompt bp = new SamBoxPrompt(
+                    Math.Clamp(box.X1 * sx, 0f, Sam2InputSize - 1f), Math.Clamp(box.Y1 * sy, 0f, Sam2InputSize - 1f),
+                    Math.Clamp(box.X2 * sx, 0f, Sam2InputSize - 1f), Math.Clamp(box.Y2 * sy, 0f, Sam2InputSize - 1f));
+                SamMaskResult[] results = pipeline.Segment(new SamPrompt { Box = bp }, image, Sam2InputSize, Sam2InputSize);
+                if (results is null || results.Length == 0)
+                {
+                    return null;
+                }
+                best = results[0]; // best-first by predicted IoU
+            }
+            finally
+            {
+                image.Dispose();
+            }
+
+            // Downscale the model-resolution binary mask to the base image size (nearest), applying invert.
+            byte inside = invert ? (byte)0 : (byte)255;
+            byte outside = invert ? (byte)255 : (byte)0;
+            byte[] outMask = new byte[w * h];
+            byte[] src = best.Mask;
+            long inside_count = 0;
+            for (int y = 0; y < h; y++)
+            {
+                int syi = Math.Clamp((int)((y + 0.5f) * best.Height / h), 0, best.Height - 1);
+                int rowSrc = syi * best.Width;
+                int rowDst = y * w;
+                for (int x = 0; x < w; x++)
+                {
+                    int sxi = Math.Clamp((int)((x + 0.5f) * best.Width / w), 0, best.Width - 1);
+                    bool on = src[rowSrc + sxi] != 0;
+                    outMask[rowDst + x] = on ? inside : outside;
+                    if (on) inside_count++;
+                }
+            }
+            log($"[Segment] SAM2 refine: pixel-accurate mask from box prompt (score={best.IoUScore:F3}, " +
+                $"{inside_count} px object, checkpoint '{Path.GetFileName(ckpt)}').");
+            return outMask;
+        }
+        catch (Exception ex)
+        {
+            log($"[Segment] SAM2 refine failed ({ex.Message}) — falling back to the YOLO bounding-box mask.");
+            return null;
+        }
+    }
+
+    /// <summary>Builds the SAM 2 input tensor <c>[1,3,1024,1024]</c> (ImageNet-normalized) from a base image.</summary>
+    private static unsafe Tensor BuildSam2Input(Image baseImage, int size)
+    {
+        byte[] rgb = RgbToImage.ToHwcRgbResized(baseImage, size, size); // HWC RGB u8, size*size*3
+        Tensor t = new Tensor(new TensorShape(1, 3, size, size), DType.F32);
+        float* dp = (float*)t.DataPointer;
+        int spatial = size * size;
+        const float inv255 = 1f / 255f;
+        for (int c = 0; c < 3; c++)
+        {
+            float mean = s_sam2Mean[c], invStd = 1f / s_sam2Std[c];
+            int chOff = c * spatial;
+            for (int i = 0; i < spatial; i++)
+            {
+                dp[chOff + i] = (rgb[i * 3 + c] * inv255 - mean) * invStd;
+            }
+        }
+        return t;
+    }
+
+    private static SamPipeline GetOrLoadSam2(IBackend backend, string ckpt)
+    {
+        lock (s_samLock)
+        {
+            if (s_samCache.TryGetValue(ckpt, out (IBackend backend, SamPipeline pipe) entry))
+            {
+                if (ReferenceEquals(entry.backend, backend)) return entry.pipe;
+                entry.pipe.Dispose();
+                s_samCache.Remove(ckpt);
+            }
+            Sam2Config cfg = InferSam2Config(ckpt);
+            SamPipeline pipe = SamPipeline.Load(backend, cfg, ckpt);
+            s_samCache[ckpt] = (backend, pipe);
+            return pipe;
+        }
+    }
+
+    /// <summary>Infers the SAM 2 Hiera variant from the checkpoint filename (tiny/small/large/base+).</summary>
+    private static Sam2Config InferSam2Config(string path)
+    {
+        string n = Path.GetFileNameWithoutExtension(path).ToLowerInvariant();
+        if (n.Contains("tiny") || n.Contains("hiera_t")) return Sam2Config.HieraTiny;
+        if (n.Contains("small") || n.Contains("hiera_s")) return Sam2Config.HieraSmall;
+        if (n.Contains("large") || n.Contains("hiera_l")) return Sam2Config.HieraLarge;
+        return Sam2Config.HieraBasePlus; // base_plus / base / unknown
+    }
+
+    /// <summary>Locates a SAM 2 <c>.safetensors</c> under a conventional <c>sam2</c> folder (sibling of the SD
+    /// model roots, plus a top-level <c>&lt;ModelRoot&gt;/sam2</c>). Returns null when none is installed — the
+    /// caller then falls back to the bounding-box mask, so SAM 2 is a pure quality upgrade, never a hard dep.</summary>
+    private static string ResolveSam2ModelPath()
+    {
+        List<string> roots = [];
+        if (Program.T2IModelSets.TryGetValue("Stable-Diffusion", out T2IModelHandler sd))
+        {
+            foreach (string fp in sd.FolderPaths)
+            {
+                roots.Add(Path.Combine(fp, "sam2"));
+                string parent = Path.GetDirectoryName(fp.TrimEnd('/', '\\'));
+                if (!string.IsNullOrEmpty(parent)) roots.Add(Path.Combine(parent, "sam2"));
+            }
+        }
+        foreach (string root in Program.ServerSettings.Paths.ActualModelRoots)
+        {
+            roots.Add(Path.Combine(root, "sam2"));
+        }
+        foreach (string root in roots.Distinct())
+        {
+            if (!Directory.Exists(root)) continue;
+            foreach (string f in Directory.EnumerateFiles(root, "*.safetensors").OrderBy(x => x, StringComparer.Ordinal))
+            {
+                return f;
+            }
+        }
+        return null;
     }
 
     private static byte[] RasterizeBox(YoloDetection box, int w, int h, bool invert)

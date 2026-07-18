@@ -72,7 +72,7 @@
              dev machine's nuget.config feed and are NOT on nuget.org, so any downloaded copy of this
              extension fails restore with NU1301 (the "missing local dll"-style error). Always pin an
              EXACT version that appears in the flat-container index above. -->
-        <PackageReference Include="HartsyInference" Version="1.0.0-alpha.49.24-local" />
+        <PackageReference Include="HartsyInference" Version="1.0.0-alpha.49" />
     </ItemGroup>
 
     <!-- LOCAL ENGINE: prebuilt DLLs from the SharpInference Cli bin (its full runtime closure). Referenced
