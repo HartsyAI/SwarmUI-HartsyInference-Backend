@@ -23,16 +23,22 @@
         <HartsyRepo Condition="'$(HartsyRepo)' == ''">$(MSBuildThisFileDirectory)../../../../SharpInference</HartsyRepo>
         <!-- Cli bin is the full engine closure: every HartsyInference.* assembly + Google.Protobuf +
              Microsoft.ML.Tokenizers, all in one folder. -->
-        <HartsyLocalBin>$(HartsyRepo)/src/HartsyInference.Cli/bin/Release/net8.0</HartsyLocalBin>
+        <HartsyLocalBin>$(HartsyRepo)/src/HartsyInference.Cli/bin/Release/net10.0</HartsyLocalBin>
     </PropertyGroup>
     <Import Project="../../SwarmUI.extension.props" />
 
-    <!-- MUST come AFTER the import: SwarmUI.extension.props sets CopyLocalLockFileAssemblies=false
-         for all extensions. The HartsyInference engine ships as NuGet packages whose private DLLs
-         (HartsyInference.*, Microsoft.ML.Tokenizers, Google.Protobuf) must land in THIS extension's
-         output folder so Swarm's per-extension AssemblyLoadContext can resolve them. So we opt the
-         copy back on here, then exclude the host-provided packages below. -->
+    <!-- MUST come AFTER the import: SwarmUI.extension.props sets both TargetFramework=net8.0 and
+         CopyLocalLockFileAssemblies=false for all extensions. We override BOTH here:
+         (1) TargetFramework net10.0 — the engine (and this box's runtime) is net10.0; a net10.0
+             engine DLL can't be referenced from a net8.0 target, so the extension TFM must match the
+             net10.0 HintPaths / NuGet assets it consumes. The net8.0-built SwarmUI host loads a
+             net10.0 extension fine on the net10.0 runtime.
+         (2) CopyLocalLockFileAssemblies — the HartsyInference NuGet's private DLLs (HartsyInference.*,
+             Microsoft.ML.Tokenizers, Google.Protobuf) must land in THIS extension's output folder so
+             Swarm's per-extension AssemblyLoadContext can resolve them; we then exclude the
+             host-provided packages below. -->
     <PropertyGroup>
+        <TargetFramework>net10.0</TargetFramework>
         <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
     </PropertyGroup>
 
@@ -72,13 +78,13 @@
              dev machine's nuget.config feed and are NOT on nuget.org, so any downloaded copy of this
              extension fails restore with NU1301 (the "missing local dll"-style error). Always pin an
              EXACT version that appears in the flat-container index above. -->
-        <PackageReference Include="HartsyInference" Version="1.0.0-alpha.50" />
+        <PackageReference Include="HartsyInference" Version="1.0.0-alpha.51" />
     </ItemGroup>
 
     <!-- LOCAL ENGINE: prebuilt DLLs from the SharpInference Cli bin (its full runtime closure). Referenced
          directly (Private=true copies them to our output for Swarm's per-extension AssemblyLoadContext),
          plus the CUDA PTX kernels the backend resolves next to the DLL. FIRST build the engine:
-         dotnet build src/HartsyInference.Cli/HartsyInference.Cli.csproj -c Release -f net8.0 (in SharpInference). -->
+         dotnet build src/HartsyInference.Cli/HartsyInference.Cli.csproj -c Release -f net10.0 (in SharpInference). -->
     <ItemGroup Condition="'$(UseLocalHartsy)' == 'true'">
         <Reference Include="HartsyInference.Core"><HintPath>$(HartsyLocalBin)/HartsyInference.Core.dll</HintPath><Private>true</Private></Reference>
         <Reference Include="HartsyInference.ModelHandler"><HintPath>$(HartsyLocalBin)/HartsyInference.ModelHandler.dll</HintPath><Private>true</Private></Reference>
