@@ -5,22 +5,35 @@ using FreneticUtilities.FreneticDataSyntax;
 using Newtonsoft.Json.Linq;
 using SwarmUI.Backends;
 using SwarmUI.Core;
+using SwarmUI.Media;
 using SwarmUI.Text2Image;
 using SwarmUI.Utils;
 using Hartsy.Extensions.HartsyInferenceBackend.Generation;
 using HartsyInference.Core.Backends;
 using SiLogs = HartsyInference.Core.Logging.Logs;
-using HartsyInference.Cpu;
-using HartsyInference.Cuda;
-using HartsyInference.Diffusion.Pipelines;
-using HartsyInference.Diffusion.Requests;
-using HartsyInference.Vulkan;
+using HartsyInference.Engine;
+using HartsyInference.Engine.Dispatch;
+using HartsyInference.Engine.Recipes;
+using HartsyInference.Engine.Requests;
+using HartsyInference.Engine.Services;
+using EngineImage = HartsyInference.Engine.Requests.ImageData;
 
 namespace Hartsy.Extensions.HartsyInferenceBackend.Backends;
 
 /// <summary>
-/// SwarmUI backend that performs diffusion inference in-process via HartsyInference.
-/// See docs/06-Backend-Lifecycle.md for the full lifecycle contract.
+/// SwarmUI backend that runs inference in-process through <c>HartsyInference.Engine</c>.
+///
+/// <para>This class is a <b>thin mapper</b> and nothing more. The Engine is the single source of truth for
+/// "load a model + generate": it owns architecture detection, per-family recipes, pipeline caching, side-model
+/// download, composition (LoRA / ControlNet / IP-Adapter / refiner / img2img / inpaint / regional) and sampling
+/// defaults. The four things that remain SwarmUI's problem, and therefore ours, are:</para>
+/// <list type="number">
+/// <item><b>Load</b> — resolve a <see cref="T2IModel"/> to a checkpoint path and an Engine <see cref="ModelSpec"/>.</item>
+/// <item><b>Map request</b> — the only place <c>input.Get(T2IParamTypes.*)</c> is read; produces an
+/// <see cref="ImageRequest"/> / <see cref="VideoRequest"/> / <see cref="MusicRequest"/>.</item>
+/// <item><b>Stream progress</b> — bridge <see cref="StepPreview"/> onto Swarm's <c>takeOutput</c> contract.</item>
+/// <item><b>Map result</b> — Engine pixels/frames/samples back into a SwarmUI <see cref="Image"/>.</item>
+/// </list>
 /// </summary>
 public class HartsyInferenceBackend : AbstractT2IBackend
 {
@@ -28,50 +41,37 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     /// backend class so BackendHandler.RegisterBackendType discovers it via reflection.</summary>
     public class HartsyInferenceBackendSettings : AutoConfiguration
     {
-        [ConfigComment("Compute backend to use. 'auto' tries CUDA, then Vulkan, then CPU.")]
+        [ConfigComment("Compute backend to use. 'auto' tries CUDA, then CPU.")]
         public string ComputeBackend = "auto";
 
-        [ConfigComment("Which GPU to use, if multiple are available.\nShould be a single number, like '0' (first GPU), '1' (second GPU), etc.\nIgnored for the CPU compute backend.\nHartsyInference uses a single GPU per backend — to run on multiple GPUs, add one backend per GPU (each with its own GPU_ID). A '0,1'-style list is accepted but only the first number is used.")]
+        [ConfigComment("Which GPU to use, if multiple are available.\nShould be a single number, like '0' (first GPU), '1' (second GPU), etc.\nIgnored for the CPU compute backend.\nNOTE: the current HartsyInference.Engine facade always constructs its device on ordinal 0 — a non-zero value here is logged and ignored until the Engine exposes device selection.")]
         public string GPU_ID = "0";
 
-        [ConfigComment("Maximum number of model pipelines to keep cached in VRAM/RAM at once.\nHigher values avoid reloading when switching between models, at the cost of memory. 1 is recommended for a single GPU.")]
-        public int MaxCachedPipelines = 1;
-
-        [ConfigComment("Path to PTX kernel directory (CUDA only). Empty = use bundled Ptx/ folder next to the extension DLL.")]
-        public string PtxDirectory = "";
+        [ConfigComment("Path to the compiled kernel directory (the folder CONTAINING 'Ptx' and 'Spirv').\nEmpty = resolve next to the engine assemblies (the extension's own output folder), which is correct for a normal install.")]
+        public string KernelDirectory = "";
 
         [ConfigComment("How many extra requests may queue up on this backend while one is generating.\n0 means a single live generation with nothing waiting (the scheduler routes further requests to other backends/GPUs immediately).\n1 (default) means a live generation plus one extra waiting in line before further requests route elsewhere.\n-1 makes this a UI-only instance that cannot do actual generations.\nGenerations always run one at a time on this backend (the queue just lets requests wait here instead of being sent elsewhere).")]
         public int OverQueue = 1;
 
-        [ConfigComment("Per-step progress previews. 'off' disables them; 'latent2rgb' (default) uses a fast model-free latent→RGB approximation (blurry but instant); 'taesd' uses a tiny per-architecture autoencoder for higher-fidelity previews when the TAESD weights ship.")]
-        public string PreviewMethod = "latent2rgb";
-
-        [ConfigComment("Native FP8 GEMM for fp8 checkpoints (Ada/Hopper, SM 8.9+). When on, fp8 weights are matrix-multiplied directly in fp8 (via cuBLASLt) instead of being upcast to fp16 — roughly half the transformer VRAM and faster on supported GPUs. 'auto' (default) enables it on SM 8.9+ GPUs; 'on' forces it; 'off' always upcasts to fp16. On older GPUs (Ampere and below) the engine falls back to fp16 automatically regardless of this setting.")]
-        public string NativeFp8Gemm = "auto";
+        [ConfigComment("Per-step progress previews.\nThe Engine decides whether a given pipeline can produce preview pixels; when it doesn't, only the progress bar moves.\nTurn this off to skip JPEG-encoding previews entirely.")]
+        public bool Previews = true;
 
         [ConfigComment("Whether to auto-update the HartsyInference engine (the in-process NuGet library) when this backend starts.\n'false' (default): never check.\n'true': on start, check NuGet for a newer engine build and, if found, download + rebuild the extension against it.\n'aggressive': same as 'true' but also clears the NuGet caches first (fixes a stuck floating-version restore) and automatically restarts SwarmUI to load the new build.\nThe engine is loaded in-process, so a staged update applies on the NEXT SwarmUI restart (a loaded DLL can't hot-swap). With 'true' you'll get a log line telling you to restart; 'aggressive' restarts for you.")]
         public string AutoUpdate = "false";
-
-        [ConfigComment("Cache fp16 casts of fp8/quantized weights on the GPU (CUDA only).\n'on' (default): fastest — each fp8 weight is cast to fp16 once and kept, but that keeps BOTH copies resident (~2x the checkpoint size; a 14B fp8 model needs ~28 GB and will OOM a 24 GB card).\n'off': re-cast per use — slower steps but roughly half the weight VRAM; required for 14B-class fp8 models on 24 GB GPUs.\nNative FP8 GEMM avoids the cast only when activations are also fp8, which diffusion pipelines' are not — so this cache is what actually governs fp8 model VRAM.")]
-        public string CacheWeightCasts = "on";
     }
 
     public HartsyInferenceBackendSettings Settings => SettingsRaw as HartsyInferenceBackendSettings;
 
-    /// <summary>The HartsyInference IBackend (CPU / Vulkan / CUDA). Constructed in <see cref="Init"/>.</summary>
-    private IBackend _backend;
-
-    /// <summary>Pipeline cache. One entry per loaded checkpoint.</summary>
-    private PipelineCache _cache;
+    /// <summary>The Engine facade. Owns the compute backend, every loaded pipeline, and all generation.</summary>
+    private InferenceEngine _engine;
 
     /// <summary>Cancellation source for the in-flight generation.</summary>
     private CancellationTokenSource _cancelCts;
 
     /// <summary>Serializes generations so a backend with <c>OverQueue &gt; 0</c> (MaxUsages &gt; 1) accepts
-    /// extra requests into a queue but still runs them ONE AT A TIME. HartsyInference shares
-    /// <see cref="_backend"/> / <see cref="_cache"/> / <see cref="_cancelCts"/> across a generation, so
-    /// concurrent execution would collide — this lock makes the over-queue safe by holding extra
-    /// dispatched jobs here until the current one finishes.</summary>
+    /// extra requests into a queue but still runs them ONE AT A TIME. The Engine's caches and device are shared
+    /// across a generation, so concurrent execution would collide — this lock makes the over-queue safe by holding
+    /// extra dispatched jobs here until the current one finishes.</summary>
     private readonly SemaphoreSlim _genLock = new(1, 1);
 
     public override IEnumerable<string> SupportedFeatures
@@ -86,53 +86,39 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             // entirely (Comfy lacks "hartsyinference", we lack "comfyui").
             //
             // Honesty is enforced one layer down: IsValidForThisBackend refuses any comfyui-only
-            // param we can't actually service (custom ComfyUI workflows, the alternate-guidance
-            // node family, GLIGEN, SAM2, etc.), cleanly routing those to a Comfy backend. So
-            // advertising "comfyui" does NOT mean "we silently serve everything Comfy-tagged".
-            // This mirrors the built-in peer SwarmSwarmBackend, which also advertises "comfyui".
-            // It is execution-safe: core never routes us through Comfy's workflow builder on the
-            // basis of this flag — each backend runs its own Generate.
-            //
-            // NOTE: the cleaner long-term fix is a core split of a "standard_sampling" flag out of
-            // "comfyui" (so peer backends advertise that instead of claiming Comfy). If/when core
-            // gains it, add `yield return "standard_sampling";` here. Until then "comfyui" + the
-            // validator guard is the self-contained, stock-core-compatible approach.
+            // param we can't actually service, and every composition feature is checked against the
+            // Engine recipe's own declared ImageFeatures — so advertising a flag here never means
+            // "we silently serve everything tagged with it".
             yield return "hartsyinference";
             yield return "comfyui";
             yield return "text2image";
-            yield return "flux-dev";   // in DisregardedFeatureFlags — informational, but signals that FluxGuidanceScale is honored
-            yield return "lora";       // SD 1.5 / SDXL / Flux supported via LoraStack; SD3 / Z-Image refused at validation time
-            yield return "endstepsearly"; // honored by SamplingParamResolver across all architectures
-            yield return "refiners";   // SDXL refiner: PostApply (any base) + StepSwap (SDXL base only); RefinerUpscale / RefinerVAE refused at validation time
-            yield return "img2img";    // SD 1.5 / SDXL / Flux / SD3 / Z-Image supported via VaeEncoder
-            yield return "inpaint";    // SDXL / Flux / SD3 supported via blend-on-vanilla pipeline path; SD 1.5 / Z-Image refused at validation time
-            yield return "controlnet"; // SDXL-base only in v1, Canny preprocessor only; SD 1.5 / Flux ControlNet + Depth/OpenPose/etc refused at validation time
-            yield return "ipadapter";  // SD 1.5 + SDXL: standard + Plus + Plus-Face + FaceID + FaceID-Plus/PlusV2 (in-engine ArcFace + CLIP-face mix); Flux IPA refused at validation time
-            yield return "variation_seed"; // SD 1.5 / SDXL via InitialNoise slerp (VariationSeedResolver); other archs refused at validation time
-            yield return "video";      // Wan (TI2V / VACE / Animate / S2V) + LTX-Video + LTX-2 (video+generated audio track).
-                                       // Exposes VideoFPS/VideoFormat/boomerang/trim params ("text2video" itself is client-derived
-                                       // from the model's compat class and disregarded for routing). LTX-2 muxes its generated
-                                       // soundtrack into the output container; unsupported video INPUT extras (end frame,
-                                       // video-extend, audio-reference) are refused at validation time.
+            yield return "flux-dev";       // in DisregardedFeatureFlags — informational
+            yield return "lora";           // per-family; gated by the recipe's ImageFeatures.Lora
+            yield return "endstepsearly";  // ImageRequest.EndStepsEarly
+            yield return "refiners";       // per-family; gated by ImageFeatures.Refiner
+            yield return "img2img";        // per-family; gated by ImageFeatures.Img2Img
+            yield return "inpaint";        // per-family; gated by ImageFeatures.Inpaint
+            yield return "controlnet";     // per-family; gated by ImageFeatures.ControlNet
+            yield return "ipadapter";      // per-family; gated by ImageFeatures.IpAdapter
+            yield return "variation_seed"; // per-family; gated by ImageFeatures.VariationSeed
+            yield return "video";          // Wan (T2V/I2V + VACE / Animate / S2V) + LTX-Video + LTX-2 + Lance Video
         }
     }
 
     /// <summary>Bridges HartsyInference's internal logger into Swarm's logging system so
     /// diagnostics like the OOM probe in CudaMemory.Allocate appear in the main log file
-    /// instead of falling into Console.Error (where Swarm captures stdout but routes it
-    /// inconsistently). Idempotent — safe to call multiple times.</summary>
+    /// instead of falling into Console.Error. Idempotent — safe to call multiple times.</summary>
     private static int _loggerWired = 0;
+
     private static void EnsureLoggerWired()
     {
-        if (Interlocked.Exchange(ref _loggerWired, 1) != 0) return;
-        // Don't double-filter. Set HartsyInference's level to Verbose (the chattiest) so
-        // every message reaches the bridge below; Swarm's own MinimumLevel filter then
-        // decides what actually appears in the log/UI. Mirroring Swarm's MinimumLevel
-        // here was fragile: Swarm's level can change at runtime (settings UI, debug flag),
-        // and a stale snapshot meant Verbose progress was getting dropped at the
-        // HartsyInference layer before it ever had a chance to be forwarded.
+        if (Interlocked.Exchange(ref _loggerWired, 1) != 0)
+        {
+            return;
+        }
+        // Don't double-filter: set HartsyInference's level to Verbose so every message reaches the
+        // bridge, and let Swarm's own MinimumLevel decide what actually appears.
         SiLogs.MinLevel = HartsyInference.Core.Logging.LogLevel.Verbose;
-
         SiLogs.SetLogger((level, msg) =>
         {
             switch (level)
@@ -146,6 +132,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             }
         });
     }
+
+    // ─────────────────────────────── 1. Lifecycle ───────────────────────────────
 
     public override async Task Init()
     {
@@ -162,47 +150,23 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         try
         {
             string requested = Settings?.ComputeBackend?.ToLowerInvariant() ?? "auto";
-            int ordinal = ParseGpuId(Settings?.GPU_ID);
+            WarnIfGpuIdUnhonored(Settings?.GPU_ID);
 
-            // Kernels ship in our extension's own output dir, NOT Swarm's main runtime
-            // dir (which is what AppContext.BaseDirectory returns when running inside
-            // the Swarm process). Resolve from this assembly's location instead.
-            string extensionDir = Path.GetDirectoryName(typeof(HartsyInferenceBackend).Assembly.Location) ?? AppContext.BaseDirectory;
-            string ptxDir = string.IsNullOrWhiteSpace(Settings?.PtxDirectory)
-                ? Path.Combine(extensionDir, "Ptx")
-                : Settings.PtxDirectory;
-            string spvDir = Path.Combine(extensionDir, "Spirv");
-
-            AddLoadStatus($"Resolving compute backend (requested='{requested}', ordinal={ordinal})...");
-            AddLoadStatus($"Kernel paths: PTX={ptxDir} (exists={Directory.Exists(ptxDir)}), SPIR-V={spvDir} (exists={Directory.Exists(spvDir)})");
-            _backend = ConstructBackend(requested, ordinal, ptxDir, spvDir);
-            AddLoadStatus($"IBackend ready: {_backend.Capabilities.Name} (device={_backend.Device})");
-
-            // Native FP8 GEMM (Ada/Hopper): compute fp8 checkpoints directly in fp8 instead of upcasting to
-            // fp16 — ~half the transformer VRAM + faster. Opt-in on the engine (default off); we enable it
-            // here per the backend setting. The engine still hard-gates the actual dispatch on Fp8Executor
-            // .IsSupported (SM 8.9+) and the operands being fp8, so enabling on unsupported HW is a safe no-op.
-            if (_backend is CudaBackend cudaBackend)
+            // Kernels ship in our extension's own output dir, NOT Swarm's main runtime dir. The Engine's
+            // BackendFactory already resolves relative to the engine assemblies (which live beside us), so
+            // an override is only needed when the operator moved them.
+            if (!string.IsNullOrWhiteSpace(Settings?.KernelDirectory))
             {
-                int sm = cudaBackend.Context.ComputeCapabilityMajor * 10 + cudaBackend.Context.ComputeCapabilityMinor;
-                string fp8Mode = (Settings?.NativeFp8Gemm ?? "auto").Trim().ToLowerInvariant();
-                bool enableFp8 = fp8Mode switch
-                {
-                    "on" => true,
-                    "off" => false,
-                    _ => sm >= 89, // auto: Ada (8.9) / Hopper (9.0) / Blackwell (10.0+)
-                };
-                cudaBackend.EnableNativeFp8Gemm = enableFp8;
-                AddLoadStatus($"Native FP8 GEMM: {(enableFp8 ? "enabled" : "disabled")} " +
-                    $"(mode={fp8Mode}, SM {cudaBackend.Context.ComputeCapabilityMajor}.{cudaBackend.Context.ComputeCapabilityMinor}).");
-
-                bool cacheCasts = (Settings?.CacheWeightCasts ?? "on").Trim().ToLowerInvariant() != "off";
-                cudaBackend.CacheWeightCasts = cacheCasts;
-                AddLoadStatus($"Weight-cast caching: {(cacheCasts ? "on (fast, ~2x fp8 checkpoint VRAM)" : "off (re-cast per use, ~half weight VRAM)")}.");
-                Logs.Debug($"[HartsyInference] CacheWeightCasts={cacheCasts}");
+                BackendFactory.KernelDirOverride = Settings.KernelDirectory;
             }
+            string ptxDir = BackendFactory.KernelDir(BackendFactory.PtxDirName);
+            string spvDir = BackendFactory.KernelDir(BackendFactory.SpirvDirName);
+            AddLoadStatus($"Kernel paths: PTX={ptxDir} (exists={Directory.Exists(ptxDir)}), SPIR-V={spvDir} (exists={Directory.Exists(spvDir)})");
 
-            _cache = new PipelineCache(_backend, Settings?.MaxCachedPipelines ?? 1);
+            AddLoadStatus($"Constructing HartsyInference.Engine (compute='{requested}')...");
+            _engine = new InferenceEngine(requested);
+            AddLoadStatus($"Engine ready: {_engine.BackendDescription}");
+
             // MaxUsages is what the scheduler checks to decide when to route a request to a different
             // backend (BackendHandler: in-use once Usages >= MaxUsages). Mirror ComfyUI's model:
             // MaxUsages = 1 (the live gen) + OverQueue (extra waiting slots). OverQueue = -1 → MaxUsages 0
@@ -210,12 +174,11 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             int overQueue = Math.Max(-1, Settings?.OverQueue ?? 0);
             MaxUsages = 1 + overQueue;
 
-            // RUNNING = alive and ready to accept generations.
-            // IDLE in Swarm means "alive but currently unavailable" (e.g. remote API
-            // disconnected) — it would make BackendHandler skip us for routing.
+            // RUNNING = alive and ready to accept generations. IDLE in Swarm means "alive but currently
+            // unavailable", which would make BackendHandler skip us for routing.
             Status = BackendStatus.RUNNING;
-            AddLoadStatus("Ready. Pick a Flux .safetensors checkpoint to generate.");
-            Logs.Init($"[HartsyInference] Backend #{BackendData?.ID} live on {_backend.Capabilities.Name}");
+            AddLoadStatus($"Ready. Drivable image families: {string.Join(", ", RecipeRegistry.RegisteredNames)}.");
+            Logs.Init($"[HartsyInference] Backend #{BackendData?.ID} live ({_engine.BackendDescription})");
         }
         catch (Exception ex)
         {
@@ -224,50 +187,891 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             Logs.Error($"[HartsyInference] Backend #{BackendData?.ID} init failed: {ex}");
             throw;
         }
+    }
 
+    public override async Task Shutdown()
+    {
+        Status = BackendStatus.DISABLED;
+        _cancelCts?.Cancel();
+        _cancelCts = null;
+        _engine?.Dispose();
+        _engine = null;
+        CurrentModelName = null;
         await Task.CompletedTask;
     }
 
-    /// <summary>Resolve the user's compute-backend choice into a live HartsyInference IBackend.</summary>
+    public override async Task<bool> FreeMemory(bool systemRam)
+    {
+        if (_engine is null)
+        {
+            return false;
+        }
+        _engine.FreeMemory();
+        if (systemRam)
+        {
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+        }
+        CurrentModelName = null;
+        await Task.CompletedTask;
+        return true;
+    }
+
+    /// <summary>Triggered by Swarm when the user clicks Cancel.</summary>
+    public void RequestCancel()
+    {
+        _cancelCts?.Cancel();
+    }
+
+    /// <summary>The Engine constructs its device on ordinal 0 only; say so rather than silently ignoring the setting.</summary>
+    private static void WarnIfGpuIdUnhonored(string gpuId)
+    {
+        if (string.IsNullOrWhiteSpace(gpuId))
+        {
+            return;
+        }
+        string first = gpuId.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).FirstOrDefault() ?? "0";
+        if (int.TryParse(first, out int ordinal) && ordinal == 0)
+        {
+            return;
+        }
+        Logs.Warning($"[HartsyInference] GPU_ID='{gpuId}' is not honored: HartsyInference.Engine constructs its device on ordinal 0. "
+            + "Running on GPU 0. (Engine gap: InferenceEngine takes a backend selector but no device ordinal.)");
+    }
+
+    // ─────────────────────────────── 2. Load ───────────────────────────────
+
+    public override async Task<bool> LoadModel(T2IModel model, T2IParamInput input)
+    {
+        await Task.CompletedTask;
+        if (model is null || _engine is null)
+        {
+            return false;
+        }
+        string compat = model.ModelClass?.CompatClass?.ID;
+        if (!ModelSupport.IsArchitectureSupported(compat))
+        {
+            Logs.Warning($"[HartsyInference] LoadModel: architecture '{compat}' isn't drivable. Returning false so another backend can handle it.");
+            return false;
+        }
+        // The Engine loads (and caches) the pipeline lazily inside its generate call, keyed on the checkpoint
+        // path plus the request's LoRA/component identity — there is no separate load step to drive here, and
+        // duplicating one would only fight its cache.
+        CurrentModelName = model.Name;
+        return true;
+    }
+
+    // ─────────────────────────────── 3. Generate ───────────────────────────────
+
+    public override async Task<Image[]> Generate(T2IParamInput input)
+    {
+        List<Image> images = [];
+        await GenerateLive(input, "single", obj =>
+        {
+            if (obj is Image img)
+            {
+                images.Add(img);
+            }
+            else if (obj is T2IEngine.ImageOutput o && o.File is Image of)
+            {
+                images.Add(of);
+            }
+        });
+        return [.. images];
+    }
+
+    public override async Task GenerateLive(T2IParamInput input, string batchId, Action<object> takeOutput)
+    {
+        // Status stays RUNNING throughout — it's the resting healthy state, not a "currently busy" flag.
+        // BackendData.Usages is what tracks active utilization.
+        //
+        // Serialize: when OverQueue > 0 the scheduler may dispatch multiple jobs to us; run them one at a
+        // time. Acquire BEFORE touching _cancelCts so the per-gen token belongs to the job holding the GPU.
+        await _genLock.WaitAsync();
+        // Link to the input's InterruptToken (session.SessInterrupt) so the gen-page "stop" button
+        // actually cancels us — that's the token Swarm trips on stop.
+        _cancelCts = CancellationTokenSource.CreateLinkedTokenSource(input.InterruptToken);
+        long startMs = Environment.TickCount64;
+        try
+        {
+            T2IModel model = input.Get(T2IParamTypes.Model)
+                ?? throw new InvalidOperationException("No model selected.");
+            string compat = model.ModelClass?.CompatClass?.ID;
+            ModelSupport.Family family = ModelSupport.Resolve(compat);
+            if (family is null || !ModelSupport.IsArchitectureSupported(compat))
+            {
+                throw new InvalidOperationException($"HartsyInference: {ModelSupport.WhyNotSupported(compat)}");
+            }
+
+            string promptPreview = input.Get(T2IParamTypes.Prompt) ?? "";
+            if (promptPreview.Length > 80)
+            {
+                promptPreview = promptPreview[..80] + "…";
+            }
+            Logs.Verbose($"[HartsyInference] Backend #{BackendData?.ID} accepted job batch='{batchId}' model='{model.Name}' "
+                + $"compat='{compat}' family='{family.Id}' ({family.Kind}) prompt=\"{promptPreview}\"");
+
+            CurrentModelName = model.Name;
+            CancellationToken cancel = _cancelCts.Token;
+            ModelSpec spec = ModelSupport.BuildSpec(model, family);
+            IProgress<StepPreview> progress = BuildProgressBridge(batchId, takeOutput);
+
+            Image[] outputs = family.Kind switch
+            {
+                ModelSupport.Kind.Video => [await GenerateVideo(spec, input, progress, cancel)],
+                ModelSupport.Kind.Music => [await GenerateMusic(spec, input, progress, cancel)],
+                _ => [await GenerateImage(spec, input, family, progress, cancel)],
+            };
+
+            long totalMs = Environment.TickCount64 - startMs;
+            int idx = 0;
+            foreach (Image img in outputs)
+            {
+                Logs.Verbose($"[HartsyInference] Yielding output {idx + 1}/{outputs.Length} batch='{batchId}' "
+                    + $"(genTime={totalMs}ms, bytes={img.RawData?.Length ?? 0})");
+                takeOutput(new T2IEngine.ImageOutput
+                {
+                    File = img,
+                    IsReal = true,
+                    GenTimeMS = totalMs,
+                });
+                idx++;
+            }
+            Logs.Verbose($"[HartsyInference] Job batch='{batchId}' complete: {outputs.Length} output(s) in {totalMs}ms.");
+        }
+        catch (OperationCanceledException)
+        {
+            Logs.Info("[HartsyInference] Generation cancelled by user.");
+        }
+        finally
+        {
+            _cancelCts?.Dispose();
+            _cancelCts = null;
+            _genLock.Release(); // hand the GPU to the next queued generation, if any
+            // No Status change here: we stay RUNNING (alive+ready) regardless of whether the generation
+            // succeeded. ERRORED would be wrong — the backend is healthy, only this one request failed.
+        }
+    }
+
+    /// <summary>Runs a still-image generation and marshals the Engine's RGB result into a SwarmUI image.</summary>
+    private async Task<Image> GenerateImage(ModelSpec spec, T2IParamInput input, ModelSupport.Family family,
+        IProgress<StepPreview> progress, CancellationToken cancel)
+    {
+        ImageRequest request = BuildImageRequest(input, family);
+        ImageResult result = await _engine.Images.GenerateAsync(spec, request, progress, cancel);
+        return RgbToImage.FromHwcRgb(result.Rgb, result.Width, result.Height);
+    }
+
+    /// <summary>Runs a video generation, collecting the streamed frames and muxing them into a container.</summary>
+    private async Task<Image> GenerateVideo(ModelSpec spec, T2IParamInput input, IProgress<StepPreview> progress, CancellationToken cancel)
+    {
+        VideoRequest request = BuildVideoRequest(input);
+        List<byte[]> frames = [];
+        int width = 0, height = 0;
+        await foreach (VideoFrame frame in _engine.Video.GenerateAsync(spec, request, progress, cancel))
+        {
+            frames.Add(frame.Rgb);
+            width = frame.Width;
+            height = frame.Height;
+        }
+        if (frames.Count == 0)
+        {
+            throw new InvalidOperationException("HartsyInference: the video pipeline produced no frames.");
+        }
+        if (input.Get(T2IParamTypes.VideoBoomerang, false))
+        {
+            for (int i = frames.Count - 2; i > 0; i--)
+            {
+                frames.Add(frames[i]);
+            }
+        }
+        string format = input.Get(T2IParamTypes.VideoFormat, "h264-mp4");
+        return VideoOutputEncoder.Encode([.. frames], width, height, request.Fps, format, cancel);
+    }
+
+    /// <summary>Runs a music generation; the Engine returns an encoded WAV container, which Swarm carries as an
+    /// <see cref="Image"/> keyed by <see cref="MediaType.AudioWav"/> exactly like every other audio output.</summary>
+    private async Task<Image> GenerateMusic(ModelSpec spec, T2IParamInput input, IProgress<StepPreview> progress, CancellationToken cancel)
+    {
+        MusicRequest request = BuildMusicRequest(input);
+        AudioResult result = await _engine.Music.GenerateAsync(spec, request, progress, cancel);
+        Logs.Verbose($"[HartsyInference] Music: {result.DurationSeconds:0.0}s @ {result.SampleRate} Hz ({result.Format}).");
+        return new Image(result.Data, MediaType.AudioWav);
+    }
+
+    /// <summary>Bridges the Engine's <see cref="StepPreview"/> ticks onto Swarm's <c>takeOutput</c> progress
+    /// contract: every tick forwards a <c>{batch_index, overall_percent, current_percent}</c> JObject (or the
+    /// richer preview JObject when the Engine supplied preview pixels), and every 5% boundary also logs an
+    /// ASCII progress bar.</summary>
+    private IProgress<StepPreview> BuildProgressBridge(string batchId, Action<object> takeOutput)
+    {
+        PreviewEncoder previewEncoder = new(Settings?.Previews ?? true);
+        int lastLoggedThreshold = -1;
+        return new InlineProgress<StepPreview>(p =>
+        {
+            double overall = p.TotalSteps > 0 ? Math.Clamp((double)p.Step / p.TotalSteps, 0.0, 1.0) : 0.0;
+            int threshold = (int)(overall * 20); // 0..20 buckets of 5%
+            if (threshold != lastLoggedThreshold)
+            {
+                lastLoggedThreshold = threshold;
+                Logs.Verbose($"[HartsyInference] Progress batch='{batchId}' {RenderProgressBar(overall)} step {p.Step}/{p.TotalSteps}");
+            }
+            JObject previewObj = previewEncoder.TryEncode(p, batchId, overall);
+            // When we have a preview encoded, send the richer JObject (preview + percent in one message —
+            // matches Comfy's contract). Otherwise just the percent.
+            takeOutput(previewObj ?? new JObject
+            {
+                ["batch_index"] = batchId,
+                ["overall_percent"] = overall,
+                ["current_percent"] = overall,
+            });
+        });
+    }
+
+    /// <summary>An <see cref="IProgress{T}"/> that invokes on the reporting thread. <see cref="Progress{T}"/>
+    /// would post to a captured SynchronizationContext and reorder (or drop) ticks fired from the sampler thread.</summary>
+    private sealed class InlineProgress<T>(Action<T> handler) : IProgress<T>
+    {
+        private readonly Action<T> _handler = handler;
+
+        public void Report(T value) => _handler(value);
+    }
+
     /// <summary>Renders an ASCII progress bar for log lines: <c>[████████░░░░░░░░░░░░] 40.0%</c>.
-    /// 20 cells wide so each cell represents exactly 5% — matches the 5%-threshold throttling
-    /// in <c>progressBridge</c>, so the bar visibly grows by one filled cell per logged line.</summary>
+    /// 20 cells wide so each cell is exactly 5% — matching the 5%-threshold log throttling.</summary>
     private static string RenderProgressBar(double fraction, int width = 20)
     {
         fraction = Math.Clamp(fraction, 0.0, 1.0);
         int filled = (int)Math.Round(fraction * width);
-        if (filled > width) filled = width;
+        if (filled > width)
+        {
+            filled = width;
+        }
         return $"[{new string('█', filled)}{new string('░', width - filled)}] {fraction * 100:F1}%";
     }
 
-    /// <summary>Maps the <c>PreviewMethod</c> setting string to the <see cref="PreviewEncoder.Method"/>
-    /// enum. Unknown values silently fall through to <see cref="PreviewEncoder.Method.Latent2Rgb"/>
-    /// so a typo doesn't disable previews entirely.</summary>
-    private static PreviewEncoder.Method ParsePreviewMethod(string raw) => (raw?.ToLowerInvariant()) switch
+    // ─────────────────────────────── 4. Request mapping ───────────────────────────────
+    //
+    // Everything below is the ONLY place T2IParamTypes values are read. Each mapper produces one Engine-native
+    // request record; anything the Engine's flat contract doesn't name rides in the Extra bag under a documented
+    // key. Params we cannot express at all are refused in IsValidForThisBackend rather than silently dropped.
+
+    /// <summary>Maps the Swarm request onto the Engine's <see cref="ImageRequest"/>.</summary>
+    private static ImageRequest BuildImageRequest(T2IParamInput input, ModelSupport.Family family)
     {
-        "off" or "none" or "false" or "" => PreviewEncoder.Method.Off,
-        "taesd" => PreviewEncoder.Method.Taesd,
-        _ => PreviewEncoder.Method.Latent2Rgb,
-    };
+        string prompt = input.Get(T2IParamTypes.Prompt) ?? "";
+        if (family.Id == "ideogram4" && input.Get(SwarmUIHartsyInference.Ideogram4MagicPromptParam, false))
+        {
+            // Ideogram 4 is trained on structured JSON captions; the expander rewrites a plain prompt through a
+            // running LLM backend. Opt-in, and a no-op that returns the prompt unchanged when unavailable.
+            prompt = Ideogram4MagicPrompt.Expand(
+                prompt,
+                input.Get(T2IParamTypes.Width, 1024),
+                input.Get(T2IParamTypes.Height, 1024),
+                input.Get(SwarmUIHartsyInference.Ideogram4MagicPromptModelParam, ""),
+                input.SourceSession,
+                msg => Logs.Verbose($"[HartsyInference][Ideogram4] {msg}"));
+        }
+        Image initImage = input.Get(T2IParamTypes.InitImage);
+        Image maskImage = input.Get(T2IParamTypes.MaskImage);
+        return new ImageRequest
+        {
+            Prompt = prompt,
+            NegativePrompt = input.Get(T2IParamTypes.NegativePrompt),
+            Width = NullableInt(input, T2IParamTypes.Width),
+            Height = NullableInt(input, T2IParamTypes.Height),
+            Steps = NullableInt(input, T2IParamTypes.Steps),
+            CfgScale = input.TryGet(T2IParamTypes.CFGScale, out double cfg) ? (float)cfg : null,
+            Seed = input.Get(T2IParamTypes.Seed, -1L),
+            ClipSkip = NullableInt(input, T2IParamTypes.ClipStopAtLayer),
+            Sampler = input.Get(SwarmUIHartsyInference.SamplerParam, null),
+            Scheduler = null, // the Engine resolves the family's canonical schedule; Comfy's Scheduler param has no analogue
+            SigmaShift = input.TryGet(T2IParamTypes.SigmaShift, out double shift) ? shift : null,
+            EndStepsEarly = input.TryGet(T2IParamTypes.EndStepsEarly, out double endEarly) ? endEarly : null,
+            InstructPix2PixCfg = input.TryGet(T2IParamTypes.IP2PCFG2, out double ip2p) ? ip2p : null,
+            Batch = 1, // Swarm drives batching itself: one Generate call per image
+            Components = BuildComponents(input),
+            Loras = BuildLoras(input),
+            ControlNets = BuildControlNets(input),
+            IpAdapter = BuildIpAdapter(input),
+            Refiner = BuildRefiner(input),
+            Img2Img = initImage is null ? null : new Img2Img
+            {
+                InitImage = ToEngineImage(initImage),
+                Creativity = input.Get(T2IParamTypes.InitImageCreativity, 0.6),
+            },
+            Inpaint = maskImage is null ? null : new Inpaint
+            {
+                Mask = ToEngineImage(maskImage),
+                Grow = input.Get(T2IParamTypes.MaskGrow, 0),
+                Blur = input.Get(T2IParamTypes.MaskBlur, 0),
+                ShrinkGrow = input.Get(T2IParamTypes.MaskShrinkGrow, 0),
+            },
+            Regional = BuildRegional(input, prompt),
+            VariationSeed = BuildVariationSeed(input),
+            Extra = BuildImageExtra(input),
+        };
+    }
+
+    /// <summary>Per-request swappable-component overrides (VAE + the text encoders the user picked).</summary>
+    private static ComponentOverrides BuildComponents(T2IParamInput input)
+    {
+        ComponentOverrides overrides = new()
+        {
+            Vae = ModelPath(input.Get(T2IParamTypes.VAE)),
+            T5Xxl = ModelPath(input.Get(T2IParamTypes.T5XXLModel)),
+            ClipL = ModelPath(input.Get(T2IParamTypes.ClipLModel)),
+            ClipG = ModelPath(input.Get(T2IParamTypes.ClipGModel)),
+            ClipVision = ModelPath(input.Get(T2IParamTypes.ClipVisionModel)),
+            Qwen = ModelPath(input.Get(T2IParamTypes.QwenModel)),
+            Llama = ModelPath(input.Get(T2IParamTypes.LLaMAModel)),
+            Gemma = ModelPath(input.Get(T2IParamTypes.GemmaModel)),
+        };
+        bool any = overrides.Vae is not null || overrides.T5Xxl is not null || overrides.ClipL is not null
+            || overrides.ClipG is not null || overrides.ClipVision is not null || overrides.Qwen is not null
+            || overrides.Llama is not null || overrides.Gemma is not null;
+        return any ? overrides : null;
+    }
+
+    /// <summary>Maps the Loras / LoraWeights / LoraTencWeights / LoraSectionConfinement parallel lists onto the
+    /// Engine's <see cref="LoraStack"/>. Names are resolved to on-disk paths through Swarm's LoRA model set.</summary>
+    private static LoraStack BuildLoras(T2IParamInput input)
+    {
+        if (!input.TryGet(T2IParamTypes.Loras, out List<string> names) || names is null || names.Count == 0)
+        {
+            return null;
+        }
+        input.TryGet(T2IParamTypes.LoraWeights, out List<string> weights);
+        input.TryGet(T2IParamTypes.LoraTencWeights, out List<string> tencWeights);
+        input.TryGet(T2IParamTypes.LoraSectionConfinement, out List<string> confinements);
+        Program.T2IModelSets.TryGetValue("LoRA", out T2IModelHandler loraHandler);
+        List<LoraEntry> entries = new(names.Count);
+        for (int i = 0; i < names.Count; i++)
+        {
+            string name = names[i];
+            if (string.IsNullOrWhiteSpace(name))
+            {
+                continue;
+            }
+            T2IModel loraModel = loraHandler?.GetModel(name);
+            string path = loraModel?.RawFilePath;
+            if (path is null)
+            {
+                throw new SwarmUserErrorException($"HartsyInference: LoRA '{name}' was not found in the LoRA model folder.");
+            }
+            entries.Add(new LoraEntry
+            {
+                Model = path,
+                Weight = ParseAt(weights, i, 1.0),
+                TextEncoderWeight = tencWeights is not null && i < tencWeights.Count ? ParseAt(tencWeights, i, 1.0) : null,
+                SectionConfinement = confinements is not null && i < confinements.Count && !string.IsNullOrWhiteSpace(confinements[i])
+                    ? confinements[i]
+                    : null,
+            });
+        }
+        return entries.Count == 0 ? null : new LoraStack { Entries = entries };
+    }
+
+    /// <summary>Maps Swarm's three ControlNet slots onto the Engine's conditioning list. The hint image is passed
+    /// through as-is: annotator preprocessing (Canny/Depth/OpenPose/…) stays a SwarmUI-side concern and is applied
+    /// before the image reaches this param.</summary>
+    private static IReadOnlyList<ControlNetConditioning> BuildControlNets(T2IParamInput input)
+    {
+        T2IParamTypes.ControlNetParamHolder[] holders = T2IParamTypes.Controlnets;
+        if (holders is null)
+        {
+            return null;
+        }
+        List<ControlNetConditioning> layers = [];
+        foreach (T2IParamTypes.ControlNetParamHolder holder in holders)
+        {
+            if (holder?.Model is null)
+            {
+                continue;
+            }
+            T2IModel cnModel = input.Get(holder.Model);
+            if (cnModel is null)
+            {
+                continue;
+            }
+            Image hint = input.Get(holder.Image) ?? input.Get(T2IParamTypes.InitImage);
+            if (hint is null)
+            {
+                throw new SwarmUserErrorException(
+                    $"HartsyInference: ControlNet '{cnModel.Name}' has no control image. Set the ControlNet Image (or an Init Image).");
+            }
+            layers.Add(new ControlNetConditioning
+            {
+                Model = cnModel.RawFilePath,
+                Image = ToEngineImage(hint),
+                Strength = input.Get(holder.Strength, 1.0),
+                Start = input.Get(holder.Start, 0.0),
+                End = input.Get(holder.End, 1.0),
+            });
+        }
+        return layers.Count == 0 ? null : layers;
+    }
+
+    /// <summary>Maps the image-prompt inputs onto the Engine's IP-Adapter conditioning. The adapter model itself
+    /// rides the Extra bag under the Engine's documented <c>ipadapter.model</c> key.</summary>
+    private static IpAdapter BuildIpAdapter(T2IParamInput input)
+    {
+        if (!input.TryGet(T2IParamTypes.PromptImages, out List<Image> promptImages) || promptImages is null || promptImages.Count == 0)
+        {
+            return null;
+        }
+        return new IpAdapter
+        {
+            PromptImages = [.. promptImages.Select(ToEngineImage)],
+            Grouping = input.Get(T2IParamTypes.SmartImagePromptResizing, false),
+            FaceIdV2Weight = input.TryGet(SwarmUIHartsyInference.FaceIdV2WeightParam, out double faceId) ? faceId : null,
+        };
+    }
+
+    /// <summary>Maps the refiner group onto the Engine's second-pass config.</summary>
+    private static Refiner BuildRefiner(T2IParamInput input)
+    {
+        T2IModel refinerModel = input.Get(T2IParamTypes.RefinerModel);
+        if (refinerModel is null)
+        {
+            return null;
+        }
+        return new Refiner
+        {
+            Model = refinerModel.RawFilePath,
+            Vae = ModelPath(input.Get(T2IParamTypes.RefinerVAE)),
+            Method = input.Get(T2IParamTypes.RefinerMethod, null),
+            Control = input.TryGet(T2IParamTypes.RefinerControl, out double control) ? control : null,
+            Steps = NullableInt(input, T2IParamTypes.RefinerSteps),
+            CfgScale = input.TryGet(T2IParamTypes.RefinerCFGScale, out double refinerCfg) ? refinerCfg : null,
+            Upscale = input.TryGet(T2IParamTypes.RefinerUpscale, out double upscale) && upscale > 1e-6 ? upscale : null,
+        };
+    }
+
+    /// <summary>Regional / segment prompting: the plan is the raw prompt (the Engine parses the
+    /// <c>&lt;region&gt;</c>/<c>&lt;segment&gt;</c> syntax), plus the mask-shaping and per-segment overrides.</summary>
+    private static Regional BuildRegional(T2IParamInput input, string prompt)
+    {
+        if (!HasRegionalSyntax(prompt) && !HasRegionalSyntax(input.Get(T2IParamTypes.NegativePrompt)))
+        {
+            return null;
+        }
+        return new Regional
+        {
+            Plan = prompt,
+            SortOrder = input.Get(T2IParamTypes.SegmentSortOrder, null),
+            MaskGrow = input.Get(T2IParamTypes.SegmentMaskGrow, 0),
+            MaskBlur = input.Get(T2IParamTypes.SegmentMaskBlur, 0),
+            MaskOversize = input.Get(T2IParamTypes.SegmentMaskOversize, 0),
+            Steps = NullableInt(input, T2IParamTypes.SegmentSteps),
+            CfgScale = input.TryGet(T2IParamTypes.SegmentCFGScale, out double segCfg) ? segCfg : null,
+        };
+    }
+
+    /// <summary>True when the text carries Swarm's regional / segment prompt syntax.</summary>
+    private static bool HasRegionalSyntax(string text) =>
+        !string.IsNullOrEmpty(text)
+        && (text.Contains("<region:", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("<segment:", StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>Variation-seed blending; null unless a non-zero strength AND a seed were both supplied.</summary>
+    private static VariationSeed BuildVariationSeed(T2IParamInput input)
+    {
+        if (!input.TryGet(T2IParamTypes.VariationSeedStrength, out double strength) || strength <= 0)
+        {
+            return null;
+        }
+        if (!input.TryGet(T2IParamTypes.VariationSeed, out long varSeed))
+        {
+            return null;
+        }
+        return new VariationSeed { Seed = varSeed, Strength = strength };
+    }
+
+    /// <summary>Everything the Engine's flat image contract doesn't name: its own documented Extra keys plus this
+    /// extension's registered custom params.</summary>
+    private static IReadOnlyDictionary<string, object> BuildImageExtra(T2IParamInput input)
+    {
+        Dictionary<string, object> extra = new(StringComparer.Ordinal);
+        // Engine-documented keys (Features/HartsyInference.Engine.Features.RequestExtras.cs).
+        if (T2IParamTypes.TryGetType("useipadapter", out T2IParamType ipaType, input)
+            && input.TryGetRaw(ipaType, out object ipaRaw)
+            && ipaRaw is string ipaModel && !string.IsNullOrWhiteSpace(ipaModel) && ipaModel != "None")
+        {
+            extra[HartsyInference.Engine.Features.RequestExtras.IpAdapterModel] = ipaModel;
+        }
+        if (input.Get(T2IParamTypes.ClipVisionModel) is T2IModel clipVision)
+        {
+            extra[HartsyInference.Engine.Features.RequestExtras.IpAdapterClipVision] = clipVision.RawFilePath;
+        }
+        // Extension-registered custom params.
+        if (input.TryGet(SwarmUIHartsyInference.DtypeOverrideParam, out string dtype) && !string.IsNullOrWhiteSpace(dtype))
+        {
+            extra["hartsy.dtype_override"] = dtype;
+        }
+        if (input.TryGet(SwarmUIHartsyInference.TileVaeThresholdParam, out int tileThreshold))
+        {
+            extra["hartsy.tile_vae_threshold"] = tileThreshold;
+        }
+        if (input.TryGet(SwarmUIHartsyInference.Ideogram4MagicPromptParam, out bool magic))
+        {
+            extra["hartsy.ideogram4_magic_prompt"] = magic;
+        }
+        if (input.TryGet(SwarmUIHartsyInference.Ideogram4MagicPromptModelParam, out string magicModel) && !string.IsNullOrWhiteSpace(magicModel))
+        {
+            extra["hartsy.ideogram4_magic_prompt_model"] = magicModel;
+        }
+        return extra;
+    }
+
+    /// <summary>Maps the Swarm request onto the Engine's <see cref="VideoRequest"/>.</summary>
+    private static VideoRequest BuildVideoRequest(T2IParamInput input)
+    {
+        Image initImage = input.Get(T2IParamTypes.InitImage);
+        Image endFrame = input.Get(T2IParamTypes.VideoEndFrame);
+        int frames = input.TryGet(T2IParamTypes.Text2VideoFrames, out int t2vFrames) && t2vFrames > 0
+            ? t2vFrames
+            : input.Get(T2IParamTypes.VideoFrames, 25);
+        Dictionary<string, object> extra = new(StringComparer.Ordinal);
+        if (input.Get(SwarmUIHartsyInference.AnimateReferenceImageParam) is Image reference)
+        {
+            extra[HartsyInference.Engine.Recipes.Video.WanAnimateRecipePipeline.ReferenceImageKey] = ToEngineImage(reference);
+        }
+        if (input.TryGet(SwarmUIHartsyInference.AnimateAutoPreprocessParam, out bool autoPreprocess))
+        {
+            extra["hartsy.animate_auto_preprocess"] = autoPreprocess;
+        }
+        if (input.Get(SwarmUIHartsyInference.AnimatePoseVideoParam) is Image poseVideo)
+        {
+            extra["hartsy.animate_pose_video"] = ToEngineImage(poseVideo);
+        }
+        if (input.Get(SwarmUIHartsyInference.AnimateFaceVideoParam) is Image faceVideo)
+        {
+            extra["hartsy.animate_face_video"] = ToEngineImage(faceVideo);
+        }
+        return new VideoRequest
+        {
+            Prompt = input.Get(T2IParamTypes.Prompt) ?? "",
+            NegativePrompt = input.Get(T2IParamTypes.NegativePrompt),
+            Width = input.Get(T2IParamTypes.Width, 704),
+            Height = input.Get(T2IParamTypes.Height, 480),
+            Steps = NullableInt(input, T2IParamTypes.VideoSteps) ?? NullableInt(input, T2IParamTypes.Steps),
+            CfgScale = input.TryGet(T2IParamTypes.VideoCFG, out double videoCfg) ? (float)videoCfg
+                : input.TryGet(T2IParamTypes.CFGScale, out double baseCfg) ? (float)baseCfg : null,
+            Seed = input.Get(T2IParamTypes.Seed, -1L),
+            InitImage = initImage is null ? null : ToEngineImage(initImage),
+            VideoModel = ModelPath(input.Get(T2IParamTypes.VideoModel)),
+            VideoSwapModel = ModelPath(input.Get(T2IParamTypes.VideoSwapModel)),
+            VideoSwapPercent = input.TryGet(T2IParamTypes.VideoSwapPercent, out double swapPercent) ? swapPercent : null,
+            VideoExtendModel = ModelPath(input.Get(T2IParamTypes.VideoExtendModel)),
+            VideoResolution = input.Get(T2IParamTypes.VideoResolution, null),
+            Fps = input.Get(T2IParamTypes.VideoFPS, 25),
+            VideoFormat = input.Get(T2IParamTypes.VideoFormat, null),
+            // Boomerang is applied to the decoded frames on the way out (see GenerateVideo) so the Engine
+            // doesn't waste a second pass; the flag is still carried for pipelines that want it.
+            VideoBoomerang = input.Get(T2IParamTypes.VideoBoomerang, false),
+            VideoEndFrame = endFrame is null ? null : ToEngineImage(endFrame),
+            VideoAudioInput = ToAudioClip(input.Get(T2IParamTypes.VideoAudioInput)),
+            VideoAudioReference = ToAudioClip(input.Get(T2IParamTypes.VideoAudioReference)),
+            Frames = frames,
+            TrimVideoStartFrames = input.Get(T2IParamTypes.TrimVideoStartFrames, 0),
+            TrimVideoEndFrames = input.Get(T2IParamTypes.TrimVideoEndFrames, 0),
+            Components = BuildComponents(input),
+            Loras = BuildLoras(input),
+            Extra = extra,
+        };
+    }
+
+    /// <summary>Maps Swarm's Text2Audio group onto the Engine's <see cref="MusicRequest"/>.</summary>
+    private static MusicRequest BuildMusicRequest(T2IParamInput input)
+    {
+        long seed = input.Get(T2IParamTypes.Seed, -1L);
+        return new MusicRequest
+        {
+            // ACE-Step convention (which the Engine follows): the prompt carries the lyrics, the style/genre tags
+            // come from Text2AudioStyle. An empty prompt means instrumental.
+            Prompt = input.Get(T2IParamTypes.Prompt) ?? "",
+            Genre = input.Get(T2IParamTypes.Text2AudioStyle, "") ?? "",
+            Duration = input.Get(T2IParamTypes.Text2AudioDuration, 10d),
+            Seed = seed < 0 ? Random.Shared.Next() : (int)(seed & 0x7FFFFFFF),
+            InferSteps = NullableInt(input, T2IParamTypes.Steps),
+            CfgScale = input.TryGet(T2IParamTypes.CFGScale, out double cfg) ? cfg : null,
+            Shift = input.TryGet(T2IParamTypes.SigmaShift, out double shift) ? shift : null,
+            Bpm = input.TryGet(T2IParamTypes.Text2AudioBPM, out long bpm) && bpm > 0 ? (int)bpm : null,
+            KeyScale = input.Get(T2IParamTypes.Text2AudioKeyScale, "") ?? "",
+            TimeSignature = input.Get(T2IParamTypes.Text2AudioTimeSignature, "") ?? "",
+            VocalLanguage = input.Get(T2IParamTypes.Text2AudioLanguage, "") ?? "",
+        };
+    }
+
+    // ─── mapping helpers ───
+
+    /// <summary>An int param's value, or null when the request didn't set it (so the Engine's family default wins).</summary>
+    private static int? NullableInt(T2IParamInput input, T2IRegisteredParam<int> param) =>
+        input.TryGet(param, out int value) && value > 0 ? value : null;
+
+    /// <summary>Parses the i-th entry of a Swarm parallel string list as a double.</summary>
+    private static double ParseAt(List<string> list, int index, double fallback)
+    {
+        if (list is null || index >= list.Count || !double.TryParse(list[index], System.Globalization.NumberStyles.Float,
+            System.Globalization.CultureInfo.InvariantCulture, out double value))
+        {
+            return fallback;
+        }
+        return value;
+    }
+
+    /// <summary>A picked model's on-disk path, or null when nothing was picked.</summary>
+    private static string ModelPath(T2IModel model) => model?.RawFilePath;
+
+    /// <summary>Decodes a SwarmUI image into the Engine's raw RGB24 payload.</summary>
+    private static EngineImage ToEngineImage(Image image)
+    {
+        (byte[] rgb, int width, int height) = RgbToImage.ToHwcRgb(image);
+        return new EngineImage { Rgb = rgb, Width = width, Height = height };
+    }
+
+    /// <summary>Wraps a SwarmUI audio param as the Engine's encoded-audio payload.</summary>
+    private static AudioClip ToAudioClip(AudioFile audio) =>
+        audio is null ? null : new AudioClip { Data = audio.RawData, Format = audio.Type?.Extension };
+
+    // ─────────────────────────────── 5. Validation (the honesty guard) ───────────────────────────────
+
+    /// <summary>Cleaned IDs of "comfyui"-tagged params we genuinely service, so the comfy-only guard in
+    /// <see cref="IsValidForThisBackend"/> doesn't falsely refuse them.</summary>
+    private static readonly HashSet<string> HonoredComfyParams =
+        ["sampler", "scheduler", "refinersampler", "refinerscheduler", "refinerupscalemethod"];
+
+    /// <summary>Swarm prompt-syntax tags that need conditioning machinery the Engine's recipes do not expose on the
+    /// request contract at all. Feeding these raw into a text encoder would silently corrupt the generation.
+    /// <c>region</c>/<c>segment</c> are NOT here — they map to <see cref="Regional"/> and are gated per-family.</summary>
+    private static readonly System.Text.RegularExpressions.Regex UnsupportedPromptSyntax =
+        new(@"<(object|clear|embed)\s*:|<break\s*>",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    public override bool IsValidForThisBackend(T2IParamInput input)
+    {
+        T2IModel model = input.Get(T2IParamTypes.Model);
+        if (model is null)
+        {
+            return true; // let other validators speak
+        }
+        string compat = model.ModelClass?.CompatClass?.ID;
+        if (!ModelSupport.IsArchitectureSupported(compat))
+        {
+            input.RefusalReasons.Add($"HartsyInference: {ModelSupport.WhyNotSupported(compat)}");
+            return false;
+        }
+        ModelSupport.Family family = ModelSupport.Resolve(compat);
+
+        // Prompt-syntax features with no Engine contract: refuse with the tag named rather than silently feeding
+        // the tag text into the tokenizer (silent bad output is worse than a clean refusal that routes to Comfy).
+        foreach (string promptText in new[] { input.Get(T2IParamTypes.Prompt), input.Get(T2IParamTypes.NegativePrompt) })
+        {
+            if (string.IsNullOrEmpty(promptText))
+            {
+                continue;
+            }
+            System.Text.RegularExpressions.Match match = UnsupportedPromptSyntax.Match(promptText);
+            if (match.Success)
+            {
+                string tag = match.Value.TrimStart('<').TrimEnd(':', '>', ' ');
+                input.RefusalReasons.Add(
+                    $"HartsyInference: the '<{tag}:...>' prompt syntax isn't supported (no equivalent on the engine's request contract). "
+                    + "Remove the tag, or use a ComfyUI backend for this generation.");
+                return false;
+            }
+        }
+
+        // The two-stage "generate an image, then animate it with a separate video model" flow (Comfy's
+        // ImageToVideoGenInfo, driven by the Video Model param) has no Engine equivalent — refuse upfront rather
+        // than silently returning a still image.
+        if (family.Kind != ModelSupport.Kind.Video && input.Get(T2IParamTypes.VideoModel) is not null)
+        {
+            input.RefusalReasons.Add(
+                "HartsyInference: the image-then-animate flow (Video Model param) isn't supported. "
+                + "For image-to-video, select a video model as the main model and set an Init Image instead.");
+            return false;
+        }
+
+        if (family.Kind == ModelSupport.Kind.Music && !ValidateMusic(input))
+        {
+            return false;
+        }
+        if (family.Kind == ModelSupport.Kind.Video && !ValidateVideo(input))
+        {
+            return false;
+        }
+        if (family.Kind == ModelSupport.Kind.Image && !ValidateImageFeatures(input, compat, family))
+        {
+            return false;
+        }
+        return ValidateComfyOnlyParams(input);
+    }
+
+    /// <summary>Music models: refuse the image-only knobs that make no sense for an audio output.</summary>
+    private static bool ValidateMusic(T2IParamInput input)
+    {
+        if (input.Get(T2IParamTypes.InitImage) is not null)
+        {
+            input.RefusalReasons.Add("HartsyInference: this is a music model — remove the Init Image.");
+            return false;
+        }
+        if (input.Get(T2IParamTypes.RefinerModel) is not null)
+        {
+            input.RefusalReasons.Add("HartsyInference: refiners can't run over audio outputs. Remove the Refiner Model selection.");
+            return false;
+        }
+        if (input.TryGet(T2IParamTypes.Loras, out List<string> loras) && loras is not null && loras.Count > 0)
+        {
+            input.RefusalReasons.Add("HartsyInference: LoRAs aren't supported for music models. Remove the LoRA selection.");
+            return false;
+        }
+        return true;
+    }
+
+    /// <summary>Video models: the Engine's <see cref="VideoRequest"/> has no composition phase yet (its
+    /// VideoService rejects a LoRA stack outright), and a refiner over an encoded clip is meaningless.</summary>
+    private static bool ValidateVideo(T2IParamInput input)
+    {
+        if (input.TryGet(T2IParamTypes.Loras, out List<string> loras) && loras is not null && loras.Count > 0)
+        {
+            input.RefusalReasons.Add(
+                "HartsyInference: LoRAs aren't supported for video models yet — the engine's video composition phase "
+                + "isn't wired. Remove the LoRA selection.");
+            return false;
+        }
+        if (input.Get(T2IParamTypes.RefinerModel) is not null)
+        {
+            input.RefusalReasons.Add("HartsyInference: refiners can't run over video outputs. Remove the Refiner Model selection.");
+            return false;
+        }
+        return true;
+    }
+
+    /// <summary>Checks every composition object the request would produce against the features the Engine's recipe
+    /// for this family actually declares, and refuses by name. This is the honesty guard: it is driven by
+    /// <see cref="IArchitectureRecipe.Supports"/>, so it can never claim more than the Engine will really apply.</summary>
+    private static bool ValidateImageFeatures(T2IParamInput input, string compat, ModelSupport.Family family)
+    {
+        ImageFeatures supported = ModelSupport.SupportedFeatures(compat);
+        List<(ImageFeatures Feature, string Name, bool Requested)> checks =
+        [
+            (ImageFeatures.Lora, "LoRAs", input.TryGet(T2IParamTypes.Loras, out List<string> loras) && loras is not null && loras.Count > 0),
+            (ImageFeatures.ControlNet, "ControlNet", AnyControlNetSelected(input)),
+            (ImageFeatures.IpAdapter, "IP-Adapter / image prompting", input.TryGet(T2IParamTypes.PromptImages, out List<Image> imgs) && imgs is not null && imgs.Count > 0),
+            (ImageFeatures.Refiner, "Refiners", input.Get(T2IParamTypes.RefinerModel) is not null),
+            (ImageFeatures.Img2Img, "img2img (Init Image)", input.Get(T2IParamTypes.InitImage) is not null),
+            (ImageFeatures.Inpaint, "inpainting (Mask Image)", input.Get(T2IParamTypes.MaskImage) is not null),
+            (ImageFeatures.Regional, "regional / segment prompting",
+                HasRegionalSyntax(input.Get(T2IParamTypes.Prompt)) || HasRegionalSyntax(input.Get(T2IParamTypes.NegativePrompt))),
+            (ImageFeatures.VariationSeed, "Variation Seed",
+                input.TryGet(T2IParamTypes.VariationSeedStrength, out double varStrength) && varStrength > 0
+                && input.TryGet(T2IParamTypes.VariationSeed, out long _)),
+        ];
+        foreach ((ImageFeatures feature, string name, bool requested) in checks)
+        {
+            if (requested && (supported & feature) == 0)
+            {
+                input.RefusalReasons.Add(
+                    $"HartsyInference: {name} isn't supported on architecture '{compat}' (engine family '{family.Id}'). "
+                    + $"That family's recipe applies: {(supported == ImageFeatures.None ? "text-to-image only" : supported.ToString())}. "
+                    + "Remove it or pick a model from a supported architecture.");
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /// <summary>True when any of Swarm's ControlNet slots has a model picked.</summary>
+    private static bool AnyControlNetSelected(T2IParamInput input)
+    {
+        T2IParamTypes.ControlNetParamHolder[] holders = T2IParamTypes.Controlnets;
+        if (holders is null)
+        {
+            return false;
+        }
+        foreach (T2IParamTypes.ControlNetParamHolder holder in holders)
+        {
+            if (holder?.Model is not null && input.Get(holder.Model) is not null)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>ComfyUI-only param guard. We advertise "comfyui" (see <see cref="SupportedFeatures"/>) so
+    /// comfyui-tagged requests reach this validator rather than being pre-filtered out; here we honour that by
+    /// refusing — and cleanly routing to a Comfy backend — any comfyui-tagged param actually set that we can't
+    /// service. The check is driven by the params' own FeatureFlag so it auto-covers future Comfy params.</summary>
+    private static bool ValidateComfyOnlyParams(T2IParamInput input)
+    {
+        // input.InternalSet.ValuesInput is the map of params actually set on the request, keyed by cleaned
+        // param ID — the authoritative "what did the user send" list.
+        Dictionary<string, object> setParams = input.InternalSet.ValuesInput;
+
+        // Explicit safety net first: a custom ComfyUI workflow (the raw node-graph IR, or the stored-workflow
+        // selector that expands into it) is the one we must never accept.
+        foreach (string wfKey in new[] { "comfyworkflowraw", "comfyuicustomworkflow" })
+        {
+            if (setParams.TryGetValue(wfKey, out object wfVal) && !string.IsNullOrWhiteSpace($"{wfVal}"))
+            {
+                input.RefusalReasons.Add(
+                    "HartsyInference: custom ComfyUI workflows aren't supported by this backend. "
+                    + "Use a ComfyUI backend for this generation.");
+                return false;
+            }
+        }
+        foreach (string paramId in setParams.Keys.ToArray())
+        {
+            if (HonoredComfyParams.Contains(paramId))
+            {
+                continue;
+            }
+            if (!T2IParamTypes.TryGetType(paramId, out T2IParamType pType, input) || pType.FeatureFlag is null)
+            {
+                continue;
+            }
+            if (!pType.FeatureFlag.Split(',').Contains("comfyui"))
+            {
+                continue;
+            }
+            string valStr = $"{setParams[paramId]}";
+            // Skip params left at their default / ignore value — they have no effect.
+            if (valStr == pType.Default || (pType.IgnoreIf is not null && valStr == pType.IgnoreIf))
+            {
+                continue;
+            }
+            input.RefusalReasons.Add(
+                $"HartsyInference: the '{pType.Name}' parameter is a ComfyUI-only feature this backend "
+                + "can't service. Remove it, or use a ComfyUI backend for this generation.");
+            return false;
+        }
+        return true;
+    }
+
+    // ─────────────────────────────── 6. Engine auto-update ───────────────────────────────
 
     /// <summary>Checks NuGet for a newer HartsyInference engine and, when the <c>AutoUpdate</c> setting opts in,
-    /// rebuilds this extension against it. Mirrors the ComfyUI backend's "update on launch" toggle — but because the
-    /// engine is an <b>in-process</b> library (not an external process Swarm can relaunch), a fetched update is
-    /// <i>staged</i> into the extension's build output and only takes effect on the next SwarmUI start. 'aggressive'
-    /// clears NuGet caches and calls <see cref="Program.RequestRestart"/> so the new build loads automatically.
-    /// Best-effort: any failure is logged and the current engine keeps running.</summary>
-    /// <summary>Returns true if a newer engine was staged and the backend should now refuse to run on the
-    /// stale in-process version (forcing the user to restart). False when up to date, when staging failed,
-    /// when 'aggressive' is restarting anyway, or when the loop-guard tripped (run degraded, don't brick).</summary>
+    /// rebuilds this extension against it. Because the engine is an <b>in-process</b> library (not an external
+    /// process Swarm can relaunch), a fetched update is <i>staged</i> into the extension's build output and only
+    /// takes effect on the next SwarmUI start. 'aggressive' clears NuGet caches and calls
+    /// <see cref="Program.RequestRestart"/> so the new build loads automatically.
+    /// <para>Returns true if a newer engine was staged and the backend should now refuse to run on the stale
+    /// in-process version (forcing the user to restart). False when up to date, when staging failed, when
+    /// 'aggressive' is restarting anyway, or when the loop-guard tripped (run degraded, don't brick).</para></summary>
     private async Task<bool> MaybeAutoUpdateEngine()
     {
         string mode = (Settings?.AutoUpdate ?? "false").Trim().ToLowerInvariant();
-        if (mode is "false" or "" or "0" or "no" or "off") return false;
+        if (mode is "false" or "" or "0" or "no" or "off")
+        {
+            return false;
+        }
         bool aggressive = mode is "aggressive" or "force";
-        // Boot-loop guard: when 'aggressive' stages an update and restarts, we record the target version.
-        // If we come back up STILL behind that exact version, the restore isn't advancing (e.g. a version
-        // race or a stuck floating restore) — so we refuse to auto-restart again and surface an error
-        // instead of cycling forever.
+        // Boot-loop guard: when 'aggressive' stages an update and restarts, we record the target version. If we
+        // come back up STILL behind that exact version, the restore isn't advancing — refuse to auto-restart
+        // again and surface an error instead of cycling forever.
         string updateMarker = Path.Combine(
             Path.GetDirectoryName(typeof(HartsyInferenceBackend).Assembly.Location) ?? ".",
             ".hartsy-engine-update-pending");
@@ -276,7 +1080,11 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             string loaded = LoadedEngineVersion();
             string latest = await LatestEnginePackageVersion();
             AddLoadStatus($"Auto-update: loaded engine={loaded ?? "unknown"}, latest published={latest ?? "unknown"}.");
-            if (latest is null) { AddLoadStatus("Auto-update: could not query NuGet; skipping."); return false; }
+            if (latest is null)
+            {
+                AddLoadStatus("Auto-update: could not query NuGet; skipping.");
+                return false;
+            }
             if (loaded is not null && !IsNewerAlpha(latest, loaded))
             {
                 // Up to date — a prior staged update (if any) applied successfully, so clear the marker.
@@ -291,8 +1099,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             string pending = File.Exists(updateMarker) ? File.ReadAllText(updateMarker).Trim() : null;
             if (aggressive && string.Equals(pending, latest, StringComparison.Ordinal))
             {
-                Logs.Error($"[HartsyInference] Auto-update: engine {latest} was already staged on a previous restart but the running engine is still {loaded}. " +
-                    $"Not auto-restarting again (avoiding a boot loop). The rebuild's NuGet restore isn't resolving {latest} — check for a version race or a stale floating-version restore.");
+                Logs.Error($"[HartsyInference] Auto-update: engine {latest} was already staged on a previous restart but the running engine is still {loaded}. "
+                    + $"Not auto-restarting again (avoiding a boot loop). The rebuild's NuGet restore isn't resolving {latest}.");
                 AddLoadStatus($"Auto-update: {latest} did not apply after a restart — auto-restart paused to avoid a loop (see logs).");
                 return false; // run degraded on the old engine rather than bricking the backend
             }
@@ -305,14 +1113,10 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             }
             AddLoadStatus($"Auto-update: verifying engine {latest} compiles against this extension (this can take a minute)...");
             string dir = Path.GetDirectoryName(csproj);
-            // Verification build BEFORE we touch anything: a freshly-published engine can have breaking
-            // API changes (e.g. a type that stops implementing IDisposable). This build goes to the
-            // csproj's DEFAULT output — NOT Swarm's load folder — purely as a compile check, and Swarm
-            // deletes the stray bin/obj on next start anyway. RestoreForceEvaluate re-resolves the
-            // floating alpha.* (with RestoreNoHttpCache in the csproj it hits the live feed, not the
-            // stale HTTP cache), so this also pre-warms the global-packages folder with `latest`.
-            (int code, string output) = await RunDotnet(
-                $"build \"{csproj}\" -c Release /p:RestoreForceEvaluate=true", dir);
+            // Verification build BEFORE we touch anything: a freshly-published engine can have breaking API
+            // changes. This build goes to the csproj's DEFAULT output — NOT Swarm's load folder — purely as a
+            // compile check. RestoreForceEvaluate re-resolves the floating alpha.*, pre-warming the packages folder.
+            (int code, string output) = await RunDotnet($"build \"{csproj}\" -c Release /p:RestoreForceEvaluate=true", dir);
             if (code != 0)
             {
                 Logs.Error($"[HartsyInference] Auto-update: engine {latest} does NOT compile against this extension — staying on the current engine. Build output:\n{output}");
@@ -320,26 +1124,23 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 return false;
             }
 
-            // The engine is an IN-PROCESS library: it can't hot-swap, and SwarmUI's
-            // ExtensionsManager.BuildExtension keys its "already built, skip rebuild" decision on the
-            // extension's GIT COMMIT hash — NOT on the engine NuGet version. A new engine publish doesn't
-            // change our commit, so the cached `<dllName>-<hash>.dll` persists and Swarm skips the build
-            // forever (the new engine is never restored into the load folder). So to actually apply
-            // `latest` we must INVALIDATE that cached build: delete the hash-named DLL so File.Exists(target)
-            // is false on next start → Swarm does a clean rebuild (its restore pulls `latest` and copies the
-            // new engine DLLs into the load folder where it resolves them).
+            // The engine is an IN-PROCESS library: it can't hot-swap, and SwarmUI's ExtensionsManager.BuildExtension
+            // keys its "already built, skip rebuild" decision on the extension's GIT COMMIT hash — NOT on the engine
+            // NuGet version. So to actually apply `latest` we must INVALIDATE that cached build.
             string selfDll = typeof(HartsyInferenceBackend).Assembly.Location;
             try
             {
                 // On Linux, unlinking the loaded/mmap'd assembly is allowed — the running process keeps its
                 // mapping so THIS session is unaffected; the file is simply gone from disk for next start.
-                // (On Windows the file is locked; the catch below tells the user to delete it manually.)
-                if (File.Exists(selfDll)) File.Delete(selfDll);
+                if (File.Exists(selfDll))
+                {
+                    File.Delete(selfDll);
+                }
             }
             catch (Exception delEx)
             {
-                Logs.Warning($"[HartsyInference] Auto-update: couldn't invalidate cached build '{selfDll}' ({delEx.Message}). " +
-                    $"Delete that file (or its folder under src/bin/extensions/) and restart to load engine {latest}.");
+                Logs.Warning($"[HartsyInference] Auto-update: couldn't invalidate cached build '{selfDll}' ({delEx.Message}). "
+                    + $"Delete that file (or its folder under src/bin/extensions/) and restart to load engine {latest}.");
                 AddLoadStatus($"Auto-update: couldn't invalidate cached build — delete '{Path.GetFileName(selfDll)}' manually and restart.");
                 return false;
             }
@@ -348,17 +1149,13 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             {
                 Logs.Warning("[HartsyInference] AutoUpdate=aggressive — requesting a SwarmUI restart to rebuild and load the new engine.");
                 AddLoadStatus($"Auto-update: engine {latest} verified — restarting SwarmUI to rebuild and apply.");
-                // Record the target so the boot-loop guard above can detect if the restart didn't take.
                 try { File.WriteAllText(updateMarker, latest); }
                 catch (Exception mEx) { Logs.Debug($"[HartsyInference] Auto-update: couldn't write update marker: {mEx.Message}"); }
                 Program.RequestRestart();
                 return false; // process is restarting; no need to error the backend
             }
-            else
-            {
-                AddLoadStatus($"Auto-update: engine {latest} staged — RESTART SwarmUI to load it.");
-                return true; // staged but not loaded: caller errors the backend so it won't run stale
-            }
+            AddLoadStatus($"Auto-update: engine {latest} staged — RESTART SwarmUI to load it.");
+            return true; // staged but not loaded: caller errors the backend so it won't run stale
         }
         catch (Exception ex)
         {
@@ -371,10 +1168,17 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     /// <summary>The NuGet version baked into the loaded engine assembly (e.g. "1.0.0-alpha.11"), or null.</summary>
     private static string LoadedEngineVersion()
     {
-        System.Reflection.Assembly asm = typeof(IBackend).Assembly;
-        string info = asm.GetCustomAttribute<System.Reflection.AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+        Assembly asm = typeof(IBackend).Assembly;
+        string info = asm.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
         // Informational version may carry a build-metadata suffix ("1.0.0-alpha.11+abc123"); trim it.
-        if (info is not null) { int plus = info.IndexOf('+'); if (plus >= 0) info = info[..plus]; }
+        if (info is not null)
+        {
+            int plus = info.IndexOf('+');
+            if (plus >= 0)
+            {
+                info = info[..plus];
+            }
+        }
         return info;
     }
 
@@ -386,13 +1190,18 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             using HttpClient http = new() { Timeout = TimeSpan.FromSeconds(20) };
             string json = await http.GetStringAsync("https://api.nuget.org/v3-flatcontainer/hartsyinference/index.json");
             JObject parsed = JObject.Parse(json);
-            JArray versions = parsed["versions"] as JArray;
-            if (versions is null) return null;
+            if (parsed["versions"] is not JArray versions)
+            {
+                return null;
+            }
             string best = null;
             foreach (JToken v in versions)
             {
                 string s = v.ToString();
-                if (best is null || IsNewerAlpha(s, best)) best = s;
+                if (best is null || IsNewerAlpha(s, best))
+                {
+                    best = s;
+                }
             }
             return best;
         }
@@ -404,20 +1213,29 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     }
 
     /// <summary>True if <paramref name="candidate"/> is a newer "1.0.0-alpha.N" than <paramref name="current"/>
-    /// (compares the trailing alpha number; non-alpha or unparseable forms fall back to ordinal string compare).</summary>
+    /// (compares the trailing alpha number; unparseable forms fall back to ordinal string compare).</summary>
     private static bool IsNewerAlpha(string candidate, string current)
     {
-        int Num(string v)
+        static int Num(string v)
         {
             int dash = v.LastIndexOf("alpha.", StringComparison.OrdinalIgnoreCase);
-            if (dash < 0) return -1;
+            if (dash < 0)
+            {
+                return -1;
+            }
             string tail = v[(dash + "alpha.".Length)..];
             int dot = tail.IndexOfAny(['.', '-', '+']);
-            if (dot >= 0) tail = tail[..dot];
+            if (dot >= 0)
+            {
+                tail = tail[..dot];
+            }
             return int.TryParse(tail, out int n) ? n : -1;
         }
         int a = Num(candidate), b = Num(current);
-        if (a >= 0 && b >= 0) return a > b;
+        if (a >= 0 && b >= 0)
+        {
+            return a > b;
+        }
         return string.CompareOrdinal(candidate, current) > 0;
     }
 
@@ -428,7 +1246,10 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         for (int i = 0; i < 8 && dir is not null; i++)
         {
             string[] found = Directory.GetFiles(dir, "*.csproj", SearchOption.TopDirectoryOnly);
-            if (found.Length > 0) return found[0];
+            if (found.Length > 0)
+            {
+                return found[0];
+            }
             dir = Path.GetDirectoryName(dir);
         }
         return null;
@@ -449,1503 +1270,5 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         string stderr = await proc.StandardError.ReadToEndAsync();
         await proc.WaitForExitAsync();
         return (proc.ExitCode, (stdout + "\n" + stderr).Trim());
-    }
-
-    /// <summary>Parse the <c>GPU_ID</c> setting (mirrors Comfy's GPU_ID field) into a device ordinal.
-    /// Accepts a single number ("0", "1", …). A Comfy-style "0,1" list is tolerated but only the
-    /// first ordinal is used — HartsyInference runs one GPU per backend (add a backend per GPU for
-    /// multi-GPU). Falls back to 0 on empty/garbage.</summary>
-    private static int ParseGpuId(string gpuId)
-    {
-        if (string.IsNullOrWhiteSpace(gpuId)) return 0;
-        string first = gpuId.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).FirstOrDefault() ?? "0";
-        if (int.TryParse(first, out int ordinal) && ordinal >= 0)
-        {
-            if (gpuId.Contains(','))
-            {
-                Logs.Warning($"[HartsyInference] GPU_ID='{gpuId}' lists multiple GPUs, but HartsyInference uses one GPU per backend — using GPU {ordinal}. Add a separate backend per GPU for multi-GPU.");
-            }
-            return ordinal;
-        }
-        Logs.Warning($"[HartsyInference] GPU_ID='{gpuId}' isn't a valid GPU number — defaulting to GPU 0.");
-        return 0;
-    }
-
-    private static IBackend ConstructBackend(string choice, int ordinal, string ptxDir, string spvDir)
-    {
-        if (choice == "cpu")
-        {
-            return new CpuBackend();
-        }
-        if (choice == "cuda")
-        {
-            return new CudaBackend(ordinal, ptxDir);
-        }
-        if (choice == "vulkan")
-        {
-            return new VulkanBackend(ordinal, spvDir);
-        }
-
-        var attempts = new List<string>();
-        try { return new CudaBackend(ordinal, ptxDir); }
-        catch (Exception ex) { attempts.Add($"CUDA: {ex.Message}"); }
-
-        try { return new VulkanBackend(ordinal, spvDir); }
-        catch (Exception ex) { attempts.Add($"Vulkan: {ex.Message}"); }
-
-        Logs.Info($"[HartsyInference] Auto-backend falling through to CPU. Tried: {string.Join(" | ", attempts)}");
-        return new CpuBackend();
-    }
-
-    public override async Task Shutdown()
-    {
-        Status = BackendStatus.DISABLED;
-        _cancelCts?.Cancel();
-        _cancelCts = null;
-
-        _cache?.DisposeAll();
-        _cache = null;
-
-        (_backend as IDisposable)?.Dispose();
-        _backend = null;
-
-        CurrentModelName = null;
-        await Task.CompletedTask;
-    }
-
-    public override async Task<bool> LoadModel(T2IModel model, T2IParamInput input)
-    {
-        if (model is null) return false;
-
-        string compat = model.ModelClass?.CompatClass?.ID;
-
-        // Already cached? Skip. Wan MoE pairs cache under an extended key (base + low-noise expert +
-        // boundary) so a pair/split change reloads; EffectiveCacheKey is model.Name for everything else.
-        if (CurrentModelName == model.Name && IsCached(compat, WanVideoLoader.EffectiveCacheKey(model, input)))
-        {
-            return true;
-        }
-
-        // If input is null we can't read encoder/VAE selections — defer the heavy
-        // load to GenerateLive where input is guaranteed. Just confirm the architecture.
-        if (input is null)
-        {
-            CurrentModelName = model.Name;
-            return ModelSupport.IsArchitectureSupported(compat);
-        }
-
-        Status = BackendStatus.LOADING;
-        try
-        {
-            // Make room BEFORE the new model's weights allocate: evict outgoing pipelines now (Put-time eviction
-            // ran only after the load, so both models' device residency briefly coexisted — the SD3.5/Ideogram-4
-            // model-switch OOMs). When that empties the cache entirely, also wipe every cached device allocation:
-            // entry disposal alone does NOT release preloaded weights (the backend weight cache keeps them and
-            // their Tensors alive), so each switch used to leak the outgoing model's full preloaded set.
-            _cache.MakeRoomForLoad();
-            if (_cache.IsEmpty)
-            {
-                _backend.FreeAllDeviceMemory();
-            }
-
-            if (compat == Sd15Loader.Sd15CompatClassId)
-            {
-                await Task.Run(() =>
-                {
-                    Sd15CacheEntry entry = Sd15Loader.Load(_backend, model, input, msg => AddLoadStatus(msg));
-                    _cache.PutSd15(entry);
-                });
-            }
-            else if (compat == SdxlLoader.SdxlCompatClassId)
-            {
-                await Task.Run(() =>
-                {
-                    SdxlCacheEntry entry = SdxlLoader.Load(_backend, model, input, msg => AddLoadStatus(msg));
-                    _cache.PutSdxl(entry);
-                });
-            }
-            else if (Sd3Loader.IsSd3Compat(compat))
-            {
-                await Task.Run(() =>
-                {
-                    Sd3CacheEntry entry = Sd3Loader.Load(_backend, model, input, msg => AddLoadStatus(msg));
-                    _cache.PutSd3(entry);
-                });
-            }
-            else if (compat == FluxLoader.Flux1CompatClassId)
-            {
-                await Task.Run(() =>
-                {
-                    FluxCacheEntry entry = FluxLoader.Load(_backend, model, input, msg => AddLoadStatus(msg));
-                    _cache.PutFlux(entry);
-                });
-            }
-            else if (Flux2Loader.IsFlux2Compat(compat))
-            {
-                await Task.Run(() =>
-                {
-                    Flux2CacheEntry entry = Flux2Loader.Load(_backend, model, input, msg => AddLoadStatus(msg));
-                    _cache.PutFlux2(entry);
-                });
-            }
-            else if (compat == ChromaLoader.ChromaCompatClassId)
-            {
-                await Task.Run(() =>
-                {
-                    ChromaCacheEntry entry = ChromaLoader.Load(_backend, model, input, msg => AddLoadStatus(msg));
-                    _cache.PutChroma(entry);
-                });
-            }
-            else if (compat == ChromaRadianceLoader.ChromaRadianceCompatClassId)
-            {
-                await Task.Run(() =>
-                {
-                    ChromaRadianceCacheEntry entry = ChromaRadianceLoader.Load(_backend, model, input, msg => AddLoadStatus(msg));
-                    _cache.PutChromaRadiance(entry);
-                });
-            }
-            else if (compat == ZetaChromaLoader.ZetaChromaCompatClassId)
-            {
-                await Task.Run(() =>
-                {
-                    ZetaChromaCacheEntry entry = ZetaChromaLoader.Load(_backend, model, input, msg => AddLoadStatus(msg));
-                    _cache.PutZetaChroma(entry);
-                });
-            }
-            else if (compat == AuraFlowLoader.AuraFlowCompatClassId)
-            {
-                await Task.Run(() =>
-                {
-                    AuraFlowCacheEntry entry = AuraFlowLoader.Load(_backend, model, input, msg => AddLoadStatus(msg));
-                    _cache.PutAuraFlow(entry);
-                });
-            }
-            else if (compat == FLiteLoader.FLiteCompatClassId)
-            {
-                await Task.Run(() =>
-                {
-                    FLiteCacheEntry entry = FLiteLoader.Load(_backend, model, input, msg => AddLoadStatus(msg));
-                    _cache.PutFLite(entry);
-                });
-            }
-            else if (compat == Ideogram4Loader.Ideogram4CompatClassId)
-            {
-                await Task.Run(() =>
-                {
-                    Ideogram4CacheEntry entry = Ideogram4Loader.Load(_backend, model, input, msg => AddLoadStatus(msg));
-                    _cache.PutIdeogram4(entry);
-                });
-            }
-            else if (compat == BooguImageLoader.BooguImageCompatClassId)
-            {
-                await Task.Run(() =>
-                {
-                    BooguImageCacheEntry entry = BooguImageLoader.Load(_backend, model, input, msg => AddLoadStatus(msg));
-                    _cache.PutBooguImage(entry);
-                });
-            }
-            else if (compat == ErnieImageLoader.ErnieImageCompatClassId)
-            {
-                await Task.Run(() =>
-                {
-                    ErnieImageCacheEntry entry = ErnieImageLoader.Load(_backend, model, input, msg => AddLoadStatus(msg));
-                    _cache.PutErnieImage(entry);
-                });
-            }
-            else if (compat == Lumina2Loader.Lumina2CompatClassId)
-            {
-                await Task.Run(() =>
-                {
-                    Lumina2CacheEntry entry = Lumina2Loader.Load(_backend, model, input, msg => AddLoadStatus(msg));
-                    _cache.PutLumina2(entry);
-                });
-            }
-            else if (compat == HunyuanImageLoader.HunyuanImageCompatClassId)
-            {
-                await Task.Run(() =>
-                {
-                    HunyuanImageCacheEntry entry = HunyuanImageLoader.Load(_backend, model, input, msg => AddLoadStatus(msg));
-                    _cache.PutHunyuanImage(entry);
-                });
-            }
-            else if (compat == OmniGen2Loader.OmniGen2CompatClassId)
-            {
-                await Task.Run(() =>
-                {
-                    OmniGen2CacheEntry entry = OmniGen2Loader.Load(_backend, model, input, msg => AddLoadStatus(msg));
-                    _cache.PutOmniGen2(entry);
-                });
-            }
-            else if (compat == ZImageLoader.ZImageCompatClassId)
-            {
-                await Task.Run(() =>
-                {
-                    ZImageCacheEntry entry = ZImageLoader.Load(_backend, model, input, msg => AddLoadStatus(msg));
-                    _cache.PutZImage(entry);
-                });
-            }
-            else if (compat == AnimaLoader.AnimaCompatClassId)
-            {
-                await Task.Run(() =>
-                {
-                    AnimaCacheEntry entry = AnimaLoader.Load(_backend, model, input, msg => AddLoadStatus(msg));
-                    _cache.PutAnima(entry);
-                });
-            }
-            else if (compat == HiDreamLoader.HiDreamI1CompatClassId)
-            {
-                await Task.Run(() =>
-                {
-                    HiDreamCacheEntry entry = HiDreamLoader.Load(_backend, model, input, msg => AddLoadStatus(msg));
-                    _cache.PutHiDream(entry);
-                });
-            }
-            else if (compat == QwenImageLoader.QwenImageCompatClassId)
-            {
-                await Task.Run(() =>
-                {
-                    QwenImageCacheEntry entry = QwenImageLoader.Load(_backend, model, input, msg => AddLoadStatus(msg));
-                    _cache.PutQwenImage(entry);
-                });
-            }
-            else if (compat == WanVideoLoader.Wan22_5BCompatClassId
-                || compat == WanVideoLoader.Wan21_1_3BCompatClassId
-                || compat == WanVideoLoader.Wan21_14BCompatClassId)
-            {
-                await Task.Run(() =>
-                {
-                    // Every Wan conditioning variant shares the plain-Wan compat class but drives a different engine
-                    // pipeline; route off the detected variant (VACE control / Animate / S2V / plain T2V-I2V).
-                    switch (WanModelVariants.Detect(model))
-                    {
-                        case WanModelVariants.Variant.Vace:
-                            _cache.PutWanVace(WanVaceLoader.Load(_backend, model, input, msg => AddLoadStatus(msg)));
-                            break;
-                        case WanModelVariants.Variant.Animate:
-                            _cache.PutWanAnimate(WanAnimateLoader.Load(_backend, model, input, msg => AddLoadStatus(msg)));
-                            break;
-                        case WanModelVariants.Variant.S2V:
-                            _cache.PutWanS2V(WanS2VLoader.Load(_backend, model, input, msg => AddLoadStatus(msg)));
-                            break;
-                        default:
-                            _cache.PutWanVideo(WanVideoLoader.Load(_backend, model, input, msg => AddLoadStatus(msg)));
-                            break;
-                    }
-                });
-            }
-            else if (compat == LtxVideoLoader.LtxVideoCompatClassId)
-            {
-                await Task.Run(() =>
-                {
-                    LtxVideoCacheEntry entry = LtxVideoLoader.Load(_backend, model, input, msg => AddLoadStatus(msg));
-                    _cache.PutLtxVideo(entry);
-                });
-            }
-            else if (compat == LtxVideo2Loader.LtxVideo2CompatClassId)
-            {
-                await Task.Run(() =>
-                {
-                    LtxVideo2CacheEntry entry = LtxVideo2Loader.Load(_backend, model, input, msg => AddLoadStatus(msg));
-                    _cache.PutLtxVideo2(entry);
-                });
-            }
-            else if (compat == AceStepLoader.AceStepCompatClassId)
-            {
-                await Task.Run(() =>
-                {
-                    if (model.ModelClass?.ID == AceStepLoader.AceStepV1ClassId)
-                    {
-                        AceStepCacheEntry entry = AceStepLoader.Load(_backend, model, input, msg => AddLoadStatus(msg));
-                        _cache.PutAceStep(entry);
-                    }
-                    else
-                    {
-                        AceStep15CacheEntry entry = AceStep15Loader.Load(_backend, model, input, msg => AddLoadStatus(msg));
-                        _cache.PutAceStep15(entry);
-                    }
-                });
-            }
-            else if (compat == MusicGenLoader.MusicGenCompatClassId)
-            {
-                await Task.Run(() =>
-                {
-                    MusicGenCacheEntry entry = MusicGenLoader.Load(_backend, model, input, msg => AddLoadStatus(msg));
-                    _cache.PutMusicGen(entry);
-                });
-            }
-            else if (compat == YueLoader.YueCompatClassId)
-            {
-                await Task.Run(() =>
-                {
-                    YueCacheEntry entry = YueLoader.Load(_backend, model, input, msg => AddLoadStatus(msg));
-                    _cache.PutYue(entry);
-                });
-            }
-            else if (compat == LanceLoader.LanceCompatClassId || compat == LanceLoader.LanceVideoCompatClassId)
-            {
-                await Task.Run(() =>
-                {
-                    LanceCacheEntry entry = LanceLoader.Load(_backend, model, input, msg => AddLoadStatus(msg));
-                    _cache.PutLance(entry);
-                });
-            }
-            else if (compat == LensLoader.LensCompatClassId)
-            {
-                await Task.Run(() =>
-                {
-                    LensCacheEntry entry = LensLoader.Load(_backend, model, input, msg => AddLoadStatus(msg));
-                    _cache.PutLens(entry);
-                });
-            }
-            else if (compat == Krea2Loader.Krea2CompatClassId)
-            {
-                await Task.Run(() =>
-                {
-                    Krea2CacheEntry entry = Krea2Loader.Load(_backend, model, input, msg => AddLoadStatus(msg));
-                    _cache.PutKrea2(entry);
-                });
-            }
-            else
-            {
-                Logs.Warning($"[HartsyInference] LoadModel: architecture '{compat}' not supported. Returning false so another backend can handle it.");
-                return false;
-            }
-
-            CurrentModelName = model.Name;
-            return true;
-        }
-        catch (Exception ex)
-        {
-            Logs.Error($"[HartsyInference] LoadModel failed for '{model.Name}' ({compat}): {ex}");
-            return false;
-        }
-        finally
-        {
-            Status = BackendStatus.RUNNING;
-        }
-    }
-
-    public override async Task<Image[]> Generate(T2IParamInput input)
-    {
-        var images = new List<Image>();
-        await GenerateLive(input, "single", obj =>
-        {
-            if (obj is Image img) images.Add(img);
-            else if (obj is T2IEngine.ImageOutput o && o.File is Image of) images.Add(of);
-        });
-        return images.ToArray();
-    }
-
-    public override async Task GenerateLive(T2IParamInput input, string batchId, Action<object> takeOutput)
-    {
-        // Status stays RUNNING throughout — it's the resting healthy state, not a
-        // "currently busy" flag. BackendData.Usages is what tracks active utilization.
-        //
-        // Serialize: when OverQueue > 0 the scheduler may dispatch multiple jobs to us; run them one at
-        // a time. Extra jobs wait here (holding a Usage slot, exactly like ComfyUI's queue) until the
-        // current generation releases the lock. Acquire BEFORE touching _cancelCts so the per-gen token
-        // belongs to the job that actually holds the GPU.
-        await _genLock.WaitAsync();
-        // Link to the input's InterruptToken (session.SessInterrupt) so the gen-page "stop"
-        // button actually cancels us — that's the token Swarm trips on stop, exactly like the
-        // ComfyUI backend passes user_input.InterruptToken into its job loop. Without the link
-        // _cancelCts only ever fired from Shutdown(), so stop did nothing mid-generation.
-        _cancelCts = CancellationTokenSource.CreateLinkedTokenSource(input.InterruptToken);
-        long startMs = Environment.TickCount64;
-
-        try
-        {
-            T2IModel model = input.Get(T2IParamTypes.Model)
-                ?? throw new InvalidOperationException("No model selected.");
-            string compat = model.ModelClass?.CompatClass?.ID;
-            if (!ModelSupport.IsArchitectureSupported(compat))
-            {
-                throw new InvalidOperationException($"HartsyInference doesn't yet support architecture '{compat}'.");
-            }
-
-            // Verbose: full job acceptance line with the parameters that drive timing /
-            // memory. Mirrors Comfy backend's "Will await a job, do parse..." +
-            // "Will use workflow: ..." pair — same density of information.
-            int wantedSteps = input.Get(T2IParamTypes.Steps);
-            int wantedW = input.Get(T2IParamTypes.Width);
-            int wantedH = input.Get(T2IParamTypes.Height);
-            long wantedSeed = input.Get(T2IParamTypes.Seed);
-            string promptPreview = input.Get(T2IParamTypes.Prompt) ?? "";
-            if (promptPreview.Length > 80) promptPreview = promptPreview[..80] + "…";
-            Logs.Verbose($"[HartsyInference] Backend #{BackendData?.ID} accepted job batch='{batchId}' " +
-                $"model='{model.Name}' compat='{compat}' {wantedW}x{wantedH} steps={wantedSteps} seed={wantedSeed} " +
-                $"prompt=\"{promptPreview}\"");
-
-            // Ensure model is loaded. Log cache hit/miss so the slow first-gen vs fast
-            // repeat-gen pattern is obvious in the timeline.
-            bool cacheHit = CurrentModelName == model.Name && IsCached(compat, WanVideoLoader.EffectiveCacheKey(model, input));
-            if (cacheHit)
-            {
-                Logs.Verbose($"[HartsyInference] Model cache HIT — '{model.Name}' already resident, skipping load.");
-            }
-            else
-            {
-                Logs.Verbose($"[HartsyInference] Model cache MISS — loading '{model.Name}' (current='{CurrentModelName ?? "<none>"}')");
-                long loadStartMs = Environment.TickCount64;
-                if (!await LoadModel(model, input))
-                {
-                    throw new InvalidOperationException($"Failed to load model '{model.Name}'.");
-                }
-                Logs.Verbose($"[HartsyInference] Model load complete in {Environment.TickCount64 - loadStartMs}ms.");
-            }
-
-            CancellationToken cancel = _cancelCts.Token;
-            // The pipeline now fires progress at heartbeat cadence (~500 ms) plus on each
-            // step / VAE-tile completion — that's hundreds of callbacks per generation.
-            // For takeOutput we forward EVERY one (the UI bar wants smooth motion). For
-            // the log line we throttle to 5%-boundary crossings so the developer sees
-            // ~20 progress lines per gen instead of 200, with an ASCII bar attached.
-            // The preview encoder is throttled internally (≤4/sec).
-            int lastLoggedThreshold = -1;
-            PreviewEncoder.Method previewMethod = ParsePreviewMethod(Settings?.PreviewMethod);
-            PreviewEncoder previewEncoder = new(
-                previewMethod,
-                backend: previewMethod == PreviewEncoder.Method.Taesd ? _backend : null,
-                taesdResolver: previewMethod == PreviewEncoder.Method.Taesd
-                    ? (arch => TaesdResolver.Resolve(arch, msg => AddLoadStatus(msg)))
-                    : null);
-            Action<GenerationProgress> progressBridge = (p) =>
-            {
-                double overall = p.OverallPercent >= 0 ? p.OverallPercent : (double)p.Step / Math.Max(p.TotalSteps, 1);
-                int threshold = (int)(overall * 20); // 0..20 buckets of 5%
-                if (threshold != lastLoggedThreshold)
-                {
-                    lastLoggedThreshold = threshold;
-                    Logs.Verbose($"[HartsyInference] Progress batch='{batchId}' {RenderProgressBar(overall)} step {p.Step}/{p.TotalSteps}");
-                }
-                JObject previewObj = previewEncoder.Enabled
-                    ? previewEncoder.TryEncode(p, batchId, overall)
-                    : null;
-                // When we have a preview encoded, send the richer JObject (preview + percent
-                // in one message — matches Comfy's contract). Otherwise just the percent.
-                if (previewObj is not null)
-                {
-                    takeOutput(previewObj);
-                }
-                else
-                {
-                    takeOutput(new JObject
-                    {
-                        ["batch_index"] = batchId,
-                        ["overall_percent"] = overall,
-                        ["current_percent"] = overall,
-                    });
-                }
-            };
-
-            // Resolve LoRAs once on the calling thread (touches Swarm's model handler;
-            // throws SwarmUserErrorException for missing files which Swarm displays cleanly).
-            List<LoraResolver.LoraSpec> loras = LoraResolver.Resolve(input);
-
-            // Resolve refiner spec early. For StepSwap on SDXL we need the refiner UNet
-            // available DURING the base call (not after) — pre-load the refiner cache entry
-            // here on the calling thread so AddLoadStatus diagnostics surface in the UI,
-            // then pass the refiner UNet through to the SDXL pipeline.
-            RefinerResolver.RefinerSpec refinerSpec = RefinerResolver.Resolve(input);
-            // A Wan-14B model in the Refiner slot is the Wan2.2 MoE low-noise expert — consumed inside
-            // WanVideoLoader (validated in IsValidForThisBackend), never a refine pass over the output.
-            if (refinerSpec is not null && WanVideoLoader.ResolveLowNoiseModel(model, input) is not null)
-            {
-                refinerSpec = null;
-            }
-            RefinerSwapConfig refinerSwapForSdxl = null;
-            bool refinerHandledInPipeline = false;
-            if (refinerSpec is not null
-                && refinerSpec.Method == "StepSwap"
-                && compat == SdxlLoader.SdxlCompatClassId)
-            {
-                RefinerCacheEntry refinerEntryForSwap = _cache.TryGetRefiner(refinerSpec.Model.Name);
-                if (refinerEntryForSwap is null)
-                {
-                    refinerEntryForSwap = RefinerLoader.Load(_backend, refinerSpec.Model, msg => AddLoadStatus(msg));
-                    _cache.PutRefiner(refinerEntryForSwap);
-                }
-                refinerSwapForSdxl = new RefinerSwapConfig
-                {
-                    RefinerUnet = refinerEntryForSwap.RefinerUnet,
-                    Strength = refinerSpec.Strength,
-                };
-                refinerHandledInPipeline = true;
-            }
-
-            // IP-Adapter (SDXL + SD 1.5). Resolve on the calling thread so AddLoadStatus
-            // and the IPA + CLIP-Vision auto-download surface in the UI; image projection
-            // runs once here (before the lambda) and the resulting tokens flow through the
-            // arch-specific loader. `using` ensures the spec's owned image-token tensors
-            // are disposed at the end of the try block.
-            HartsyInference.Diffusion.Adapters.IpAdapterBaseModel? ipaBaseModel = null;
-            if (compat == SdxlLoader.SdxlCompatClassId) ipaBaseModel = HartsyInference.Diffusion.Adapters.IpAdapterBaseModel.Sdxl;
-            else if (compat == Sd15Loader.Sd15CompatClassId) ipaBaseModel = HartsyInference.Diffusion.Adapters.IpAdapterBaseModel.Sd15;
-            using IpAdapterResolver.ResolvedSpec ipaSpec = ipaBaseModel.HasValue
-                ? IpAdapterResolver.Resolve(input, _backend, ipaBaseModel.Value,
-                    msg => AddLoadStatus(msg),
-                    cacheLookup: path => _cache.TryGetIpAdapter(path),
-                    cachePut: entry => _cache.PutIpAdapter(entry))
-                : null;
-
-            // FaceID ships half its effect as a rank-128 UNet LoRA — inject it into the normal
-            // LoRA merge path (kohya SDXL/SD15 format, handled by the engine's KohyaSdMapper).
-            if (ipaSpec?.FaceIdLoraPath is string faceIdLoraPath)
-            {
-                AddLoadStatus($"Applying IP-Adapter FaceID companion LoRA ({Path.GetFileName(faceIdLoraPath)}).");
-                loras.Add(new LoraResolver.LoraSpec
-                {
-                    FilePath = faceIdLoraPath,
-                    ModelStrength = ipaSpec.FaceIdLoraStrength,
-                    TencStrength = ipaSpec.FaceIdLoraStrength,
-                });
-            }
-
-            Image[] images = await Task.Run(() =>
-            {
-                if (compat == Sd15Loader.Sd15CompatClassId)
-                {
-                    Sd15CacheEntry entry = _cache.TryGetSd15(model.Name)
-                        ?? throw new InvalidOperationException("SD 1.5 model loaded but not in cache.");
-                    return loras.Count > 0
-                        ? Sd15Loader.GenerateWithLoras(entry, loras, _backend, input, progressBridge, cancel, ipaSpec?.Conditionings)
-                        : Sd15Loader.Generate(entry, _backend, input, progressBridge, cancel, ipaSpec?.Conditionings);
-                }
-                if (compat == SdxlLoader.SdxlCompatClassId)
-                {
-                    SdxlCacheEntry entry = _cache.TryGetSdxl(model.Name)
-                        ?? throw new InvalidOperationException("SDXL model loaded but not in cache.");
-                    return loras.Count > 0
-                        ? SdxlLoader.GenerateWithLoras(entry, loras, _backend, input, progressBridge, cancel, refinerSwapForSdxl, ipaSpec?.Conditionings)
-                        : SdxlLoader.Generate(entry, _backend, input, progressBridge, cancel, refinerSwapForSdxl, ipaSpec?.Conditionings);
-                }
-                if (Sd3Loader.IsSd3Compat(compat))
-                {
-                    Sd3CacheEntry entry = _cache.TryGetSd3(model.Name)
-                        ?? throw new InvalidOperationException("SD3 model loaded but not in cache.");
-                    // LoRA path for SD3 not implemented — refused upfront in IsValidForThisBackend.
-                    return Sd3Loader.Generate(entry, input, progressBridge, cancel);
-                }
-                if (compat == FluxLoader.Flux1CompatClassId)
-                {
-                    FluxCacheEntry entry = _cache.TryGetFlux(model.Name)
-                        ?? throw new InvalidOperationException("Flux model loaded but not in cache.");
-                    return loras.Count > 0
-                        ? FluxLoader.GenerateWithLoras(entry, loras, _backend, input, progressBridge, cancel)
-                        : FluxLoader.Generate(entry, input, progressBridge, cancel);
-                }
-                if (Flux2Loader.IsFlux2Compat(compat))
-                {
-                    Flux2CacheEntry entry = _cache.TryGetFlux2(model.Name)
-                        ?? throw new InvalidOperationException("Flux.2 model loaded but not in cache.");
-                    // LoRA path for Flux.2 not implemented — refused upfront in IsValidForThisBackend.
-                    return Flux2Loader.Generate(entry, input, progressBridge, cancel);
-                }
-                if (compat == ChromaLoader.ChromaCompatClassId)
-                {
-                    ChromaCacheEntry entry = _cache.TryGetChroma(model.Name)
-                        ?? throw new InvalidOperationException("Chroma model loaded but not in cache.");
-                    return ChromaLoader.Generate(entry, input, progressBridge, cancel);
-                }
-                if (compat == ChromaRadianceLoader.ChromaRadianceCompatClassId)
-                {
-                    ChromaRadianceCacheEntry entry = _cache.TryGetChromaRadiance(model.Name)
-                        ?? throw new InvalidOperationException("Chroma Radiance model loaded but not in cache.");
-                    return ChromaRadianceLoader.Generate(entry, input, progressBridge, cancel);
-                }
-                if (compat == ZetaChromaLoader.ZetaChromaCompatClassId)
-                {
-                    ZetaChromaCacheEntry entry = _cache.TryGetZetaChroma(model.Name)
-                        ?? throw new InvalidOperationException("Zeta-Chroma model loaded but not in cache.");
-                    return ZetaChromaLoader.Generate(entry, _backend, input, progressBridge, cancel);
-                }
-                if (compat == AuraFlowLoader.AuraFlowCompatClassId)
-                {
-                    AuraFlowCacheEntry entry = _cache.TryGetAuraFlow(model.Name)
-                        ?? throw new InvalidOperationException("AuraFlow model loaded but not in cache.");
-                    return AuraFlowLoader.Generate(entry, input, progressBridge, cancel);
-                }
-                if (compat == FLiteLoader.FLiteCompatClassId)
-                {
-                    FLiteCacheEntry entry = _cache.TryGetFLite(model.Name)
-                        ?? throw new InvalidOperationException("F-Lite model loaded but not in cache.");
-                    return FLiteLoader.Generate(entry, input, progressBridge, cancel);
-                }
-                if (compat == Ideogram4Loader.Ideogram4CompatClassId)
-                {
-                    Ideogram4CacheEntry entry = _cache.TryGetIdeogram4(model.Name)
-                        ?? throw new InvalidOperationException("Ideogram 4 model loaded but not in cache.");
-                    // LoRA / img2img / inpaint / IPA / ControlNet not implemented for Ideogram 4 —
-                    // refused upfront in IsValidForThisBackend (not in any per-feature allow list).
-                    return Ideogram4Loader.Generate(entry, input, progressBridge, cancel);
-                }
-                if (compat == BooguImageLoader.BooguImageCompatClassId)
-                {
-                    BooguImageCacheEntry entry = _cache.TryGetBooguImage(model.Name)
-                        ?? throw new InvalidOperationException("Boogu-Image model loaded but not in cache.");
-                    // Text-to-image, or reference-image edit when an Init Image is present (allowed in the
-                    // img2img gate below). LoRA / inpaint mask / ControlNet / IPA refused in IsValidForThisBackend.
-                    return BooguImageLoader.Generate(entry, _backend, input, progressBridge, cancel);
-                }
-                if (compat == ErnieImageLoader.ErnieImageCompatClassId)
-                {
-                    ErnieImageCacheEntry entry = _cache.TryGetErnieImage(model.Name)
-                        ?? throw new InvalidOperationException("ERNIE-Image model loaded but not in cache.");
-                    return ErnieImageLoader.Generate(entry, input, progressBridge, cancel);
-                }
-                if (compat == Lumina2Loader.Lumina2CompatClassId)
-                {
-                    Lumina2CacheEntry entry = _cache.TryGetLumina2(model.Name)
-                        ?? throw new InvalidOperationException("Lumina-2 model loaded but not in cache.");
-                    return Lumina2Loader.Generate(entry, _backend, input, progressBridge, cancel);
-                }
-                if (compat == HunyuanImageLoader.HunyuanImageCompatClassId)
-                {
-                    HunyuanImageCacheEntry entry = _cache.TryGetHunyuanImage(model.Name)
-                        ?? throw new InvalidOperationException("HunyuanImage model loaded but not in cache.");
-                    return HunyuanImageLoader.Generate(entry, input, progressBridge, cancel);
-                }
-                if (compat == OmniGen2Loader.OmniGen2CompatClassId)
-                {
-                    OmniGen2CacheEntry entry = _cache.TryGetOmniGen2(model.Name)
-                        ?? throw new InvalidOperationException("OmniGen2 model loaded but not in cache.");
-                    return OmniGen2Loader.Generate(entry, _backend, input, progressBridge, cancel);
-                }
-                if (compat == ZImageLoader.ZImageCompatClassId)
-                {
-                    ZImageCacheEntry entry = _cache.TryGetZImage(model.Name)
-                        ?? throw new InvalidOperationException("Z-Image model loaded but not in cache.");
-                    // LoRA path for Z-Image not implemented — refused upfront in IsValidForThisBackend.
-                    return ZImageLoader.Generate(entry, _backend, input, progressBridge, cancel);
-                }
-                if (compat == AnimaLoader.AnimaCompatClassId)
-                {
-                    AnimaCacheEntry entry = _cache.TryGetAnima(model.Name)
-                        ?? throw new InvalidOperationException("Anima model loaded but not in cache.");
-                    // LoRA / img2img / inpaint not implemented for Anima — refused upfront in IsValidForThisBackend.
-                    return AnimaLoader.Generate(entry, _backend, input, progressBridge, cancel);
-                }
-                if (compat == HiDreamLoader.HiDreamI1CompatClassId)
-                {
-                    HiDreamCacheEntry entry = _cache.TryGetHiDream(model.Name)
-                        ?? throw new InvalidOperationException("HiDream model loaded but not in cache.");
-                    // LoRA / img2img / inpaint not implemented for HiDream — refused upfront in IsValidForThisBackend.
-                    return HiDreamLoader.Generate(entry, _backend, input, progressBridge, cancel);
-                }
-                if (compat == QwenImageLoader.QwenImageCompatClassId)
-                {
-                    QwenImageCacheEntry entry = _cache.TryGetQwenImage(model.Name)
-                        ?? throw new InvalidOperationException("Qwen-Image model loaded but not in cache.");
-                    // LoRA / img2img (edit) / inpaint not implemented for Qwen-Image — refused upfront in IsValidForThisBackend.
-                    return QwenImageLoader.Generate(entry, _backend, input, progressBridge, cancel);
-                }
-                if (compat == WanVideoLoader.Wan22_5BCompatClassId
-                    || compat == WanVideoLoader.Wan21_1_3BCompatClassId
-                    || compat == WanVideoLoader.Wan21_14BCompatClassId)
-                {
-                    // Route to the loader matching the detected Wan conditioning variant (must match LoadModel).
-                    switch (WanModelVariants.Detect(model))
-                    {
-                        case WanModelVariants.Variant.Vace:
-                        {
-                            WanVaceCacheEntry vaceEntry = _cache.TryGetWanVace(model.Name)
-                                ?? throw new InvalidOperationException("Wan VACE model loaded but not in cache.");
-                            return WanVaceLoader.Generate(vaceEntry, _backend, input, progressBridge, cancel);
-                        }
-                        case WanModelVariants.Variant.Animate:
-                        {
-                            WanAnimateCacheEntry animEntry = _cache.TryGetWanAnimate(model.Name)
-                                ?? throw new InvalidOperationException("Wan Animate model loaded but not in cache.");
-                            return WanAnimateLoader.Generate(animEntry, _backend, input, progressBridge, cancel);
-                        }
-                        case WanModelVariants.Variant.S2V:
-                        {
-                            WanS2VCacheEntry s2vEntry = _cache.TryGetWanS2V(model.Name)
-                                ?? throw new InvalidOperationException("Wan S2V model loaded but not in cache.");
-                            return WanS2VLoader.Generate(s2vEntry, _backend, input, progressBridge, cancel);
-                        }
-                        default:
-                        {
-                            WanVideoCacheEntry entry = _cache.TryGetWanVideo(WanVideoLoader.EffectiveCacheKey(model, input))
-                                ?? throw new InvalidOperationException("Wan video model loaded but not in cache.");
-                            // Video-extend / end-frame not implemented for Wan — refused upfront in IsValidForThisBackend.
-                            return loras.Count > 0
-                                ? WanVideoLoader.GenerateWithLoras(entry, loras, _backend, input, progressBridge, cancel)
-                                : WanVideoLoader.Generate(entry, _backend, input, progressBridge, cancel);
-                        }
-                    }
-                }
-                if (compat == LtxVideoLoader.LtxVideoCompatClassId)
-                {
-                    LtxVideoCacheEntry entry = _cache.TryGetLtxVideo(model.Name)
-                        ?? throw new InvalidOperationException("LTX-Video model loaded but not in cache.");
-                    // I2V / LoRA / audio not implemented for LTX — refused upfront in IsValidForThisBackend.
-                    return LtxVideoLoader.Generate(entry, _backend, input, progressBridge, cancel);
-                }
-                if (compat == LtxVideo2Loader.LtxVideo2CompatClassId)
-                {
-                    LtxVideo2CacheEntry entry = _cache.TryGetLtxVideo2(model.Name)
-                        ?? throw new InvalidOperationException("LTX-2 model loaded but not in cache.");
-                    return LtxVideo2Loader.Generate(entry, _backend, input, progressBridge, cancel);
-                }
-                if (compat == AceStepLoader.AceStepCompatClassId)
-                {
-                    if (model.ModelClass?.ID == AceStepLoader.AceStepV1ClassId)
-                    {
-                        AceStepCacheEntry entry = _cache.TryGetAceStep(model.Name)
-                            ?? throw new InvalidOperationException("ACE-Step model loaded but not in cache.");
-                        // LoRA / reference-audio refused upfront in IsValidForThisBackend.
-                        return AceStepLoader.Generate(entry, _backend, input, progressBridge, cancel);
-                    }
-                    AceStep15CacheEntry entry15 = _cache.TryGetAceStep15(model.Name)
-                        ?? throw new InvalidOperationException("ACE-Step 1.5 model loaded but not in cache.");
-                    // Turbo: fixed 8-step no-CFG; timbre/cover hooks are engine Phase-2 TODOs.
-                    return AceStep15Loader.Generate(entry15, _backend, input, progressBridge, cancel);
-                }
-                if (compat == MusicGenLoader.MusicGenCompatClassId)
-                {
-                    MusicGenCacheEntry entry = _cache.TryGetMusicGen(model.Name)
-                        ?? throw new InvalidOperationException("MusicGen model loaded but not in cache.");
-                    return MusicGenLoader.Generate(entry, _backend, input, progressBridge, cancel);
-                }
-                if (compat == YueLoader.YueCompatClassId)
-                {
-                    YueCacheEntry entry = _cache.TryGetYue(model.Name)
-                        ?? throw new InvalidOperationException("YuE model loaded but not in cache.");
-                    return YueLoader.Generate(entry, _backend, input, progressBridge, cancel);
-                }
-                if (compat == LanceLoader.LanceCompatClassId || compat == LanceLoader.LanceVideoCompatClassId)
-                {
-                    LanceCacheEntry entry = _cache.TryGetLance(model.Name)
-                        ?? throw new InvalidOperationException("Lance model loaded but not in cache.");
-                    // LoRA / editing / I2V refused upfront in IsValidForThisBackend (T2I + T2V only).
-                    return LanceLoader.Generate(entry, _backend, input, progressBridge, cancel);
-                }
-                if (compat == LensLoader.LensCompatClassId)
-                {
-                    LensCacheEntry entry = _cache.TryGetLens(model.Name)
-                        ?? throw new InvalidOperationException("Lens model loaded but not in cache.");
-                    // LoRA / img2img / inpaint not implemented for Lens — refused upfront in IsValidForThisBackend.
-                    return LensLoader.Generate(entry, input, progressBridge, cancel);
-                }
-                if (compat == Krea2Loader.Krea2CompatClassId)
-                {
-                    Krea2CacheEntry entry = _cache.TryGetKrea2(model.Name)
-                        ?? throw new InvalidOperationException("Krea 2 model loaded but not in cache.");
-                    // Krea 2 is text-to-image only; LoRA / img2img / inpaint refused upfront in IsValidForThisBackend.
-                    return Krea2Loader.Generate(entry, input, progressBridge, cancel);
-                }
-                throw new InvalidOperationException($"No generator wired for compat '{compat}'.");
-            }, cancel);
-
-            // Optional: SDXL refiner pass over each base image (PostApply).
-            // The refiner accepts ANY base architecture's pixel output, so this works
-            // regardless of which base pipeline produced `images`. Skipped when StepSwap
-            // was already applied in-pipeline above (refinerHandledInPipeline=true).
-            if (refinerSpec is not null && !refinerHandledInPipeline)
-            {
-                images = await Task.Run(() => RefinePass(images, refinerSpec, input, progressBridge, cancel), cancel);
-            }
-
-            // Segment refinement (<segment:...>): detect/segment → mask → re-denoise the region with
-            // the segment's prompt via the arch's existing img2img+inpaint path. YOLO targets use the
-            // detector; free-text targets use CLIPSeg. Validation guaranteed the arch is inpaint-capable.
-            if (SegmentRefiner.HasSegments(input))
-            {
-                Image[] preSegment = images;
-                images = await Task.Run(() => SegmentRefiner.Apply(
-                    _backend, preSegment, input,
-                    reGenerate: segInput => RunSegmentRedenoise(model, compat, segInput, cancel),
-                    log: msg => Logs.Verbose($"[HartsyInference] {msg}"),
-                    cancel: cancel), cancel);
-            }
-
-            // Yield final images.
-            long totalMs = Environment.TickCount64 - startMs;
-            int idx = 0;
-            foreach (Image img in images)
-            {
-                Logs.Verbose($"[HartsyInference] Yielding image {idx + 1}/{images.Length} batch='{batchId}' (genTime={totalMs}ms, bytes={img.RawData?.Length ?? 0})");
-                takeOutput(new T2IEngine.ImageOutput
-                {
-                    File = img,
-                    IsReal = true,
-                    GenTimeMS = totalMs,
-                });
-                idx++;
-            }
-            Logs.Verbose($"[HartsyInference] Job batch='{batchId}' complete: {images.Length} image(s) in {totalMs}ms.");
-        }
-        catch (OperationCanceledException)
-        {
-            Logs.Info("[HartsyInference] Generation cancelled by user.");
-        }
-        finally
-        {
-            _cancelCts?.Dispose();
-            _cancelCts = null;
-            _genLock.Release(); // hand the GPU to the next queued generation, if any
-            // No Status change here: we stay RUNNING (alive+ready) regardless of
-            // whether the generation succeeded or failed. ERRORED would be wrong
-            // because the *backend* is still healthy — only this one request errored.
-        }
-    }
-
-    /// <summary>Run the SDXL refiner over each image produced by the base stage.
-    /// Loads the refiner pipeline lazily (cached after first use), then runs
-    /// <see cref="RefinerLoader.Refine"/> per image. Validation in
-    /// <see cref="IsValidForThisBackend"/> guarantees the refiner model is the
-    /// official SDXL refiner and the method is "PostApply" by the time we get here.</summary>
-    private Image[] RefinePass(
-        Image[] baseImages,
-        RefinerResolver.RefinerSpec spec,
-        T2IParamInput input,
-        Action<GenerationProgress> progressBridge,
-        CancellationToken cancel)
-    {
-        if (baseImages is null || baseImages.Length == 0) return baseImages;
-
-        // Lazy-load the refiner pipeline (cached for repeat generations).
-        RefinerCacheEntry refinerEntry = _cache.TryGetRefiner(spec.Model.Name);
-        if (refinerEntry is null)
-        {
-            refinerEntry = RefinerLoader.Load(_backend, spec.Model, msg => AddLoadStatus(msg));
-            _cache.PutRefiner(refinerEntry);
-        }
-
-        Image[] refined = new Image[baseImages.Length];
-        for (int i = 0; i < baseImages.Length; i++)
-        {
-            cancel.ThrowIfCancellationRequested();
-            Logs.Info($"[HartsyInference] Refining image {i + 1}/{baseImages.Length} (strength={spec.Strength}, steps={spec.Steps}, cfg={spec.CfgScale}).");
-            refined[i] = RefinerLoader.Refine(
-                refinerEntry, baseImages[i], input,
-                steps: spec.Steps,
-                strength: spec.Strength,
-                cfgScale: spec.CfgScale,
-                onProgress: progressBridge,
-                cancel: cancel);
-        }
-        return refined;
-    }
-
-    /// <summary>Re-denoise one segment region by dispatching the cloned input (InitImage + MaskImage +
-    /// segment prompt already set) through the active architecture's existing img2img+inpaint path.
-    /// Only the inpaint-capable arches reach here (validation enforces it). Progress is swallowed —
-    /// the base gen already drove the UI bar; segment passes are short.</summary>
-    private Image[] RunSegmentRedenoise(T2IModel model, string compat, T2IParamInput segInput, CancellationToken cancel)
-    {
-        static void NoProgress(GenerationProgress _) { }
-        if (compat == SdxlLoader.SdxlCompatClassId)
-        {
-            SdxlCacheEntry entry = _cache.TryGetSdxl(model.Name)
-                ?? throw new InvalidOperationException("SDXL model not in cache for segment re-denoise.");
-            return SdxlLoader.Generate(entry, _backend, segInput, NoProgress, cancel, refinerSwap: null, ipAdapters: null);
-        }
-        if (compat == FluxLoader.Flux1CompatClassId)
-        {
-            FluxCacheEntry entry = _cache.TryGetFlux(model.Name)
-                ?? throw new InvalidOperationException("Flux model not in cache for segment re-denoise.");
-            return FluxLoader.Generate(entry, segInput, NoProgress, cancel);
-        }
-        if (Sd3Loader.IsSd3Compat(compat))
-        {
-            Sd3CacheEntry entry = _cache.TryGetSd3(model.Name)
-                ?? throw new InvalidOperationException("SD3 model not in cache for segment re-denoise.");
-            return Sd3Loader.Generate(entry, segInput, NoProgress, cancel);
-        }
-        throw new InvalidOperationException($"Segment re-denoise not supported for compat '{compat}'.");
-    }
-
-    /// <summary>Swarm prompt-syntax tags that a backend must service via conditioning /
-    /// regional machinery we don't have yet. Comfy handles these through
-    /// SwarmClipTextEncodeAdvanced + mask nodes; if we let them through, the tag text
-    /// would be fed RAW into the text encoder and silently corrupt the generation.
-    /// Refuse instead. NOTE: <c>segment</c> is handled separately (YOLO segment refinement
-    /// IS supported on inpaint-capable arches) so it's NOT in this regex.</summary>
-    private static readonly System.Text.RegularExpressions.Regex UnsupportedPromptSyntax =
-        new(@"<(object|region|clear|embed)\s*:|<break\s*>",
-            System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Compiled);
-
-    /// <summary>Cleaned IDs of "comfyui"-tagged params we genuinely service, so the
-    /// comfy-only guard in <see cref="IsValidForThisBackend"/> doesn't falsely refuse them.
-    /// Comfy's Sampler/Scheduler are courtesy-mapped by SamplingParamResolver; the refiner
-    /// sampler/scheduler/upscale-method feed our refiner path. Everything else tagged
-    /// "comfyui" is a Comfy-node-only feature we can't run, so it's refused and routed to Comfy.</summary>
-    private static readonly HashSet<string> HonoredComfyParams =
-        ["sampler", "scheduler", "refinersampler", "refinerscheduler", "refinerupscalemethod",
-         "stylemodelmergestrength", "stylemodelmultiplystrength", "stylemodelapplystart"];
-
-    /// <summary>Architectures whose pipelines have the inpaint blend path — the only ones that
-    /// can run YOLO segment re-denoise (which is img2img + mask under the hood).</summary>
-    private static bool IsInpaintCapable(string compat) =>
-        compat == SdxlLoader.SdxlCompatClassId
-        || compat == FluxLoader.Flux1CompatClassId
-        || Sd3Loader.IsSd3Compat(compat);
-
-    public override bool IsValidForThisBackend(T2IParamInput input)
-    {
-        T2IModel model = input.Get(T2IParamTypes.Model);
-        if (model is null) return true; // let other validators speak
-
-        string compat = model.ModelClass?.CompatClass?.ID;
-
-        // Prompt-syntax features we can't service yet: refuse with the tag named rather
-        // than silently feeding the tag text into the tokenizer (silent bad output is
-        // worse than a clean refusal that routes the request to a Comfy backend if one
-        // is configured). Exception: regional conditioning (<region>/<object>) is implemented
-        // for Z-Image (RegionalPromptResolver → engine RegionalPlan), so allow it there.
-        bool regionsOk = compat == ZImageLoader.ZImageCompatClassId;
-        foreach (string promptText in new[] { input.Get(T2IParamTypes.Prompt), input.Get(T2IParamTypes.NegativePrompt) })
-        {
-            if (string.IsNullOrEmpty(promptText)) continue;
-            foreach (System.Text.RegularExpressions.Match match in UnsupportedPromptSyntax.Matches(promptText))
-            {
-                string tag = match.Value.TrimStart('<').TrimEnd(':', '>', ' ');
-                if (regionsOk && (tag == "region" || tag == "object"))
-                {
-                    continue; // handled by RegionalPromptResolver for Z-Image
-                }
-                input.RefusalReasons.Add(
-                    $"HartsyInference: the '<{tag}:...>' prompt syntax isn't supported yet "
-                    + "(needs regional-conditioning machinery). Remove the tag, "
-                    + "or use a ComfyUI backend for this generation.");
-                return false;
-            }
-        }
-
-        // Segment refinement (<segment:yolo-...>): supported on inpaint-capable arches with YOLO
-        // targets. Refuse cleanly for non-inpaint arches or non-YOLO (text/CLIP-Seg) targets.
-        if (SegmentRefiner.HasSegments(input))
-        {
-            if (!IsInpaintCapable(compat))
-            {
-                input.RefusalReasons.Add(
-                    $"HartsyInference: '<segment:>' refinement needs an inpaint-capable architecture "
-                    + $"(SDXL, Flux, or SD3); got '{compat}'. Remove the segment tag or switch models.");
-                return false;
-            }
-            // Both target kinds are supported: 'yolo-...' via the YOLO detector, any other text via CLIPSeg.
-        }
-
-        // Variation seed: wired for SD 1.5 + SDXL (spatial [1,4,H/8,W/8]) and Flux
-        // ([1,16,H/8,W/8] unpacked) via InitialNoise slerp. SD3 doesn't inject
-        // InitialNoise in its pipeline yet (engine work), so it stays refused.
-        if (input.TryGet(T2IParamTypes.VariationSeedStrength, out double varStrength) && varStrength > 0
-            && input.TryGet(T2IParamTypes.VariationSeed, out long _))
-        {
-            bool varSeedSupported = compat == Sd15Loader.Sd15CompatClassId
-                || compat == SdxlLoader.SdxlCompatClassId
-                || compat == FluxLoader.Flux1CompatClassId;
-            if (!varSeedSupported)
-            {
-                input.RefusalReasons.Add(
-                    $"HartsyInference: Variation Seed is currently supported on SD 1.5, SDXL, and Flux (got '{compat}'). "
-                    + "Disable the Variation Seed group or pick a supported model.");
-                return false;
-            }
-        }
-        if (!ModelSupport.IsArchitectureSupported(compat))
-        {
-            // Be specific about WHY this architecture is unsupported. HartsyInference itself
-            // has pipelines for many more architectures than the SwarmUI extension currently
-            // dispatches to — we just haven't wired the per-arch loader (text-encoder selection,
-            // VAE auto-download, tokenizer setup, IsValidForThisBackend rules) yet. Distinguish
-            // those cases from architectures HartsyInference doesn't support at all.
-            string status = ModelSupport.WhyNotSupported(compat);
-            input.RefusalReasons.Add($"HartsyInference: {status}");
-            return false;
-        }
-
-        // The two-stage "generate an image, then animate it with a separate video model" flow
-        // (Comfy's ImageToVideoGenInfo, driven by the Video Model param) isn't implemented for ANY
-        // architecture — refuse upfront rather than silently returning a still image.
-        if (input.Get(T2IParamTypes.VideoModel) is not null)
-        {
-            input.RefusalReasons.Add(
-                "HartsyInference: the image-then-animate flow (Video Model param) isn't supported. "
-                + "For image-to-video, select a Wan 2.2 TI2V model as the main model and set an Init Image instead.");
-            return false;
-        }
-
-        // Audio architectures (ACE-Step v1 + v1.5, MusicGen, YuE): both ACE generations now have
-        // engine pipelines — v1 checkpoints route to AceStepLoader, anything else under the
-        // ace-step-1_5 compat routes to AceStep15Loader. Refuse image-only features that make no
-        // sense for audio.
-        if (compat == AceStepLoader.AceStepCompatClassId
-            || compat == MusicGenLoader.MusicGenCompatClassId
-            || compat == YueLoader.YueCompatClassId)
-        {
-            if (input.Get(T2IParamTypes.InitImage) is not null)
-            {
-                input.RefusalReasons.Add("HartsyInference: this is a music model — remove the Init Image.");
-                return false;
-            }
-            if (input.Get(T2IParamTypes.RefinerModel) is not null)
-            {
-                input.RefusalReasons.Add("HartsyInference: refiners can't run over audio outputs. Remove the Refiner Model selection.");
-                return false;
-            }
-            if (input.TryGet(T2IParamTypes.Loras, out List<string> audioLoras) && audioLoras is not null && audioLoras.Count > 0)
-            {
-                input.RefusalReasons.Add("HartsyInference: LoRAs aren't supported for music models yet. Remove the LoRA selection.");
-                return false;
-            }
-            return true;
-        }
-
-        // Video architectures: Wan2.2 TI2V-5B does T2V + I2V (init image → VAE-encoded first-frame
-        // conditioning); LTX-Video is T2V only (no image hook in the transformer yet).
-        //   - End frame / video-extend / audio params: Comfy-only flows we don't implement.
-        //   - Refiner over a video output would feed mp4 bytes into the SDXL refiner — refuse.
-        bool isVideoArch = compat == WanVideoLoader.Wan22_5BCompatClassId
-            || compat == WanVideoLoader.Wan21_1_3BCompatClassId
-            || compat == WanVideoLoader.Wan21_14BCompatClassId
-            || compat == LtxVideoLoader.LtxVideoCompatClassId
-            || compat == LtxVideo2Loader.LtxVideo2CompatClassId
-            || compat == LanceLoader.LanceVideoCompatClassId;
-        if (isVideoArch)
-        {
-            WanModelVariants.Variant wanVariant = WanModelVariants.Detect(model);
-            bool hasWanLoras = input.TryGet(T2IParamTypes.Loras, out List<string> wanLoras) && wanLoras is not null && wanLoras.Count > 0;
-
-            // Wan VACE (control-video): the Init Image slot is the control clip and is REQUIRED; LoRA not wired.
-            if (wanVariant == WanModelVariants.Variant.Vace)
-            {
-                if (input.Get(T2IParamTypes.InitImage) is null)
-                {
-                    input.RefusalReasons.Add(
-                        "HartsyInference: Wan VACE needs a control video (or image) in the Init Image slot — "
-                        + "that's the pose/depth/edge/sketch sequence the generation follows.");
-                    return false;
-                }
-                if (hasWanLoras)
-                {
-                    input.RefusalReasons.Add("HartsyInference: LoRAs aren't supported for Wan VACE yet. Remove the LoRA selection.");
-                    return false;
-                }
-            }
-            // Wan Animate (driving-video): the Init Image slot is the driving/pose video and is REQUIRED; LoRA not wired.
-            if (wanVariant == WanModelVariants.Variant.Animate)
-            {
-                if (input.Get(T2IParamTypes.InitImage) is null)
-                {
-                    input.RefusalReasons.Add(
-                        "HartsyInference: Wan Animate needs a driving video in the Init Image slot (the pose/motion "
-                        + "sequence to animate). For faithful results supply an already pose-rendered video.");
-                    return false;
-                }
-                if (hasWanLoras)
-                {
-                    input.RefusalReasons.Add("HartsyInference: LoRAs aren't supported for Wan Animate yet. Remove the LoRA selection.");
-                    return false;
-                }
-            }
-            // Wan S2V (speech-to-video): the Video Audio Input param is the driving speech and is REQUIRED.
-            if (wanVariant == WanModelVariants.Variant.S2V)
-            {
-                if (input.Get(T2IParamTypes.VideoAudioInput) is null)
-                {
-                    input.RefusalReasons.Add(
-                        "HartsyInference: Wan S2V needs speech in the Video Audio Input param — that's what drives the video.");
-                    return false;
-                }
-                if (hasWanLoras)
-                {
-                    input.RefusalReasons.Add("HartsyInference: LoRAs aren't supported for Wan S2V yet. Remove the LoRA selection.");
-                    return false;
-                }
-            }
-            if (input.Get(T2IParamTypes.InitImage) is not null && compat == LtxVideoLoader.LtxVideoCompatClassId)
-            {
-                input.RefusalReasons.Add(
-                    "HartsyInference: image-to-video isn't supported for LTX-Video (text-to-video only). "
-                    + "Remove the Init Image, or use a Wan 2.2 TI2V model for image-to-video.");
-                return false;
-            }
-            if (input.Get(T2IParamTypes.InitImage) is not null && compat == LanceLoader.LanceVideoCompatClassId)
-            {
-                input.RefusalReasons.Add(
-                    "HartsyInference: image-to-video isn't supported for Lance yet (text-to-video only — the "
-                    + "image-editing/I2V path needs the frozen Qwen2.5-VL ViT, which the engine defers). "
-                    + "Remove the Init Image, or use a Wan 2.2 TI2V model for image-to-video.");
-                return false;
-            }
-            if (input.Get(T2IParamTypes.VideoEndFrame) is not null)
-            {
-                input.RefusalReasons.Add("HartsyInference: video end-frame conditioning isn't supported yet. Remove the Video End Image.");
-                return false;
-            }
-            if (input.Get(T2IParamTypes.VideoExtendModel) is not null)
-            {
-                input.RefusalReasons.Add("HartsyInference: video extending isn't supported yet. Remove the Video Extend Model selection.");
-                return false;
-            }
-            // Only Wan S2V consumes a driving audio input; every other video arch refuses it. Reference audio
-            // (LTX-2 IC-LoRA) isn't supported by any wired model.
-            if ((input.Get(T2IParamTypes.VideoAudioInput) is not null && wanVariant != WanModelVariants.Variant.S2V)
-                || input.Get(T2IParamTypes.VideoAudioReference) is not null)
-            {
-                input.RefusalReasons.Add("HartsyInference: audio-conditioned video isn't supported here (use a Wan S2V model for audio-driven video). Remove the audio input.");
-                return false;
-            }
-            // Wan2.2 A14B MoE pairs: a Wan-14B model in the Refiner slot (Swarm's documented Wan 2.2 pair
-            // convention) or in Video Swap Model is the low-noise expert, consumed by WanVideoLoader — any
-            // other refiner/swap selection on a video arch is refused.
-            bool isMoePair = WanVideoLoader.ResolveLowNoiseModel(model, input) is not null;
-            if (isMoePair && wanVariant != WanModelVariants.Variant.Base)
-            {
-                input.RefusalReasons.Add(
-                    "HartsyInference: the Wan2.2 expert pair (low-noise model in the Refiner Model / Video Swap Model slot) "
-                    + "only applies to plain T2V/I2V checkpoints — not VACE/Animate/S2V variants. Remove the pair selection.");
-                return false;
-            }
-            if (!isMoePair && input.Get(T2IParamTypes.RefinerModel) is not null)
-            {
-                input.RefusalReasons.Add(
-                    "HartsyInference: refiners can't run over video outputs. Remove the Refiner Model selection. "
-                    + "(Exception: a Wan-14B low-noise expert paired with a Wan-14B high-noise base model.)");
-                return false;
-            }
-            if (!isMoePair && input.Get(T2IParamTypes.VideoSwapModel) is not null)
-            {
-                input.RefusalReasons.Add(
-                    "HartsyInference: Video Swap Model is only supported as the low-noise expert of a Wan2.2 "
-                    + "14B pair (both models must be Wan-14B class). Remove it or pick a matching pair.");
-                return false;
-            }
-        }
-
-        // Z-Image's Qwen3-4B encoder + Flux VAE used to be required-explicit; ZImageLoader
-        // now auto-resolves them via ModelAutoDownloader (mirroring Comfy's GetQwen3_4bModel
-        // + CommonModels "flux-ae" auto-download). User picks via T2IParamTypes.QwenModel /
-        // VAE still take priority — the auto-download only fires when the user left them blank.
-        // No refusal here — let validation pass and let the loader handle resolution at
-        // model-load time, where progress is visible via AddLoadStatus.
-
-        // Refiner support:
-        //   - PostApply (default): pixel-space second pass via SdxlRefinerPipeline. Works
-        //     against any base architecture.
-        //   - StepSwap: latent-handoff mid-denoise via SdxlPipeline's RefinerSwapConfig
-        //     hook. Currently SDXL-base only — the swap reuses the base pipeline's denoise
-        //     loop and is wired only into SdxlPipeline.
-        //   - StepSwapNoisy: not implemented (would re-noise at swap; minor variant).
-        // Refuse upfront on:
-        //   - non-SDXL-refiner model classes (other "refiner" models need pipelines we don't have)
-        //   - StepSwap on a non-SDXL base model (only SdxlPipeline accepts RefinerSwapConfig)
-        //   - StepSwapNoisy / non-StepSwap-non-PostApply methods
-        //   - RefinerUpscale != 1.0 (high-res-fix flow not implemented yet)
-        //   - RefinerVAE set (we use the refiner's bundled VAE; separate VAE replacement not yet wired)
-        T2IModel refinerModel = input.Get(T2IParamTypes.RefinerModel);
-        // A Wan-14B refiner selection on a Wan-14B base is the Wan2.2 MoE low-noise expert (validated in
-        // the video block above, consumed by WanVideoLoader) — not a refine pass; skip the refiner rules.
-        if (refinerModel is not null && WanVideoLoader.ResolveLowNoiseModel(model, input) == refinerModel)
-        {
-            refinerModel = null;
-        }
-        if (refinerModel is not null)
-        {
-            string refinerCompat = refinerModel.ModelClass?.CompatClass?.ID;
-            if (refinerCompat != SdxlLoader.SdxlRefinerCompatClassId)
-            {
-                input.RefusalReasons.Add(
-                    $"HartsyInference: refiner model '{refinerModel.Name}' has compat class '{refinerCompat ?? "unknown"}', " +
-                    $"but only the official SDXL Refiner ('{SdxlLoader.SdxlRefinerCompatClassId}') is currently supported as a refiner.");
-                return false;
-            }
-            string refinerMethod = input.Get(T2IParamTypes.RefinerMethod) ?? "PostApply";
-            if (refinerMethod == "StepSwap")
-            {
-                if (compat != SdxlLoader.SdxlCompatClassId)
-                {
-                    input.RefusalReasons.Add(
-                        $"HartsyInference: refiner method 'StepSwap' is currently SDXL-base only " +
-                        $"(got base architecture '{compat}'). Switch the base model to SDXL or use 'PostApply' instead.");
-                    return false;
-                }
-            }
-            else if (refinerMethod != "PostApply")
-            {
-                input.RefusalReasons.Add(
-                    $"HartsyInference: refiner method '{refinerMethod}' isn't supported. " +
-                    "Use 'PostApply' (any base) or 'StepSwap' (SDXL base only).");
-                return false;
-            }
-            // RefinerUpscale has IgnoreIf:"1", so the default (1.0 = no upscale) is stripped from the
-            // input and reads back as 0. Treat 0 as "absent → 1.0"; only refuse a real upscale (>1) or
-            // downscale (<1) that we don't implement yet.
-            double refinerUpscale = input.Get(T2IParamTypes.RefinerUpscale);
-            if (refinerUpscale > 1e-6 && Math.Abs(refinerUpscale - 1.0) > 1e-6)
-            {
-                input.RefusalReasons.Add(
-                    $"HartsyInference: Refiner Upscale != 1.0 (got {refinerUpscale}) isn't supported yet. " +
-                    "Set Refiner Upscale to 1 or pick a different backend.");
-                return false;
-            }
-            if (input.Get(T2IParamTypes.RefinerVAE) is not null)
-            {
-                input.RefusalReasons.Add(
-                    "HartsyInference: Refiner VAE override isn't supported yet — we use the refiner checkpoint's bundled VAE. " +
-                    "Clear the Refiner VAE selection or pick a different backend.");
-                return false;
-            }
-        }
-
-        // LoRA support: SD 1.5 / SDXL / Flux are wired; SD3 and Z-Image aren't yet
-        // (no upstream LoraTarget for the SD3 transformer or Z-Image's ZImageTransformer
-        // path). Refuse upfront with a clear message rather than silently dropping
-        // the LoRA selection at generation time.
-        if (input.TryGet(T2IParamTypes.Loras, out List<string> selectedLoras)
-            && selectedLoras is not null && selectedLoras.Count > 0)
-        {
-            bool isLoraSupported =
-                compat == Sd15Loader.Sd15CompatClassId
-                || compat == SdxlLoader.SdxlCompatClassId
-                || compat == FluxLoader.Flux1CompatClassId
-                || compat == WanVideoLoader.Wan22_5BCompatClassId
-                || compat == WanVideoLoader.Wan21_1_3BCompatClassId
-                || compat == WanVideoLoader.Wan21_14BCompatClassId;
-            if (!isLoraSupported)
-            {
-                input.RefusalReasons.Add(
-                    $"HartsyInference: LoRAs aren't yet supported on architecture '{compat}'. " +
-                    $"Currently supported: SD 1.5, SDXL, Flux, Wan 2.2. Remove the LoRA selection or pick a model from a supported architecture.");
-                return false;
-            }
-        }
-
-        // Img2img: SD 1.5 / SDXL / Flux / SD3 / Z-Image / Flux.2 all load a VaeEncoder and
-        // run the Img2ImgResolver path. Boogu accepts an Init Image as the reference-image
-        // edit (TI2I) source via its own Qwen3-VL vision-tower path (not Img2ImgResolver).
-        if (input.Get(T2IParamTypes.InitImage) is not null)
-        {
-            bool isImg2ImgSupported =
-                compat == Sd15Loader.Sd15CompatClassId
-                || compat == SdxlLoader.SdxlCompatClassId
-                || compat == FluxLoader.Flux1CompatClassId
-                || Sd3Loader.IsSd3Compat(compat)
-                || compat == ZImageLoader.ZImageCompatClassId
-                || compat == BooguImageLoader.BooguImageCompatClassId // Init Image = the edit reference (TI2I)
-                || compat == OmniGen2Loader.OmniGen2CompatClassId     // Init Image = the edit reference (VAE ref latents + dual guidance)
-                || compat == QwenImageLoader.QwenImageCompatClassId   // img2img via QwenImageVaeEncoder (covers qwen-image-edit checkpoints too)
-                || Flux2Loader.IsFlux2Compat(compat)
-                // Wan video: Init Image = the I2V first frame, not img2img. The loader routes it
-                // (CLIP-I2V / concat-I2V for 14B I2V checkpoints, expand_timesteps for TI2V-5B)
-                // and itself refuses unsupported combos with a specific message.
-                || compat == WanVideoLoader.Wan21_14BCompatClassId
-                || compat == WanVideoLoader.Wan22_5BCompatClassId;
-            if (!isImg2ImgSupported)
-            {
-                input.RefusalReasons.Add(
-                    $"HartsyInference: img2img isn't supported on architecture '{compat}' yet. " +
-                    $"Currently supported: SD 1.5, SDXL, Flux, Flux.2, SD3, Z-Image, Qwen-Image, Boogu, OmniGen2. Remove the Init Image or pick a model from a supported architecture.");
-                return false;
-            }
-        }
-
-        // Inpaint (mask image): blend-on-vanilla path is wired upstream for SDXL,
-        // Flux, and SD3 — the per-step latent blend + post-decode pixel recomposite
-        // run inside each pipeline's GenerateFromTokens when ImageToImageRequest.Mask
-        // is set. SD 1.5 + Z-Image have img2img but no mask wiring yet (mechanical
-        // follow-up; pipelines need the same blend hooks). The dedicated 9-channel
-        // SdxlInpaintPipeline (specialized inpaint checkpoints) remains a stub —
-        // not used by this path, only matters if a user tries that variant directly.
-        if (input.Get(T2IParamTypes.MaskImage) is not null)
-        {
-            bool isInpaintSupported =
-                compat == SdxlLoader.SdxlCompatClassId
-                || compat == FluxLoader.Flux1CompatClassId
-                || Sd3Loader.IsSd3Compat(compat)
-                // Qwen-Image: QwenImagePipeline runs the same blend-on-vanilla path as Flux when
-                // ImageToImageRequest.Mask is set (per-step packed blend + pixel recomposite).
-                || compat == QwenImageLoader.QwenImageCompatClassId;
-            if (!isInpaintSupported)
-            {
-                input.RefusalReasons.Add(
-                    $"HartsyInference: inpainting (mask image) isn't wired for architecture '{compat}' yet. " +
-                    $"Currently supported: SDXL, Flux, SD3, Qwen-Image. Remove the Mask Image or pick a model from a supported architecture.");
-                return false;
-            }
-        }
-
-        // IP-Adapter: SD 1.5 + SDXL base models. Flux IPA needs a separate adapter (DiT
-        // cross-attn), other architectures don't have published IPA checkpoints.
-        if (T2IParamTypes.TryGetType("useipadapter", out T2IParamType ipaType, input)
-            && input.TryGetRaw(ipaType, out object ipaRaw)
-            && ipaRaw is string ipaModel
-            && !string.IsNullOrEmpty(ipaModel)
-            && ipaModel != "None")
-        {
-            bool ipaSupported = compat == SdxlLoader.SdxlCompatClassId
-                || compat == Sd15Loader.Sd15CompatClassId;
-            if (!ipaSupported)
-            {
-                input.RefusalReasons.Add(
-                    $"HartsyInference: IP-Adapter is currently supported on SD 1.5 and SDXL (got base architecture '{compat}'). " +
-                    $"Other architectures (Flux, SD3, Z-Image, Flux.2, AuraFlow, Chroma, F-Lite, ERNIE) don't have IPA wired — Flux needs a DiT-specific adapter, the others don't have published IPA checkpoints. " +
-                    $"Either disable IP-Adapter (set Use IP-Adapter to None) or pick a SD 1.5 / SDXL model.");
-                return false;
-            }
-            // FaceID / FaceID-Plus / PlusV2 are handled in-engine (YOLO11-pose detect + ArcFace IR-50
-            // embed + CLIP-Vision face crop for the Plus variants) — see IpAdapterResolver.
-        }
-
-        // Style model (FLUX.1 Redux): wired for the Flux family only — the redux tokens ride
-        // Flux's joint [txt|img] attention. Refuse on other archs so the selection isn't
-        // silently ignored (the master `usestylemodel` param is `flux-dev`-flagged, which is
-        // a DisregardedFeatureFlag and would otherwise slip through).
-        if (T2IParamTypes.TryGetType("usestylemodel", out T2IParamType styleType, input)
-            && input.TryGetRaw(styleType, out object styleRaw)
-            && styleRaw is string styleModel
-            && !string.IsNullOrEmpty(styleModel)
-            && styleModel != "None")
-        {
-            if (compat != FluxLoader.Flux1CompatClassId)
-            {
-                input.RefusalReasons.Add(
-                    $"HartsyInference: Style Models (FLUX.1 Redux) are supported on Flux.1 models only (got base architecture '{compat}'). " +
-                    $"Set Use Style Model to None or pick a Flux.1 model.");
-                return false;
-            }
-        }
-
-        // ControlNet: SDXL-base only in v1 (Canny preprocessor only). Other base models
-        // and other preprocessors are refused upfront so the user gets a clean error
-        // instead of a runtime exception mid-generation.
-        T2IParamTypes.ControlNetParamHolder[] cnHolders = T2IParamTypes.Controlnets;
-        if (cnHolders is not null)
-        {
-            bool anyCnSelected = false;
-            for (int i = 0; i < cnHolders.Length; i++)
-            {
-                if (cnHolders[i]?.Model is not null && input.Get(cnHolders[i].Model) is not null)
-                {
-                    anyCnSelected = true;
-                    break;
-                }
-            }
-            if (anyCnSelected && compat != SdxlLoader.SdxlCompatClassId && compat != Sd15Loader.Sd15CompatClassId
-                && compat != FluxLoader.Flux1CompatClassId)
-            {
-                input.RefusalReasons.Add(
-                    $"HartsyInference: ControlNet is currently supported on SDXL, SD 1.5 and Flux.1 (got '{compat}'). " +
-                    $"Either remove the ControlNet selection or pick a supported model.");
-                return false;
-            }
-        }
-
-        // ComfyUI-only param guard. We advertise "comfyui" (see SupportedFeatures) so that
-        // comfyui-tagged requests reach this validator rather than being pre-filtered out.
-        // Here we honour that by refusing — and cleanly routing to a Comfy backend — any
-        // comfyui-tagged param actually set on the request that we can't service. The check
-        // is driven by the params' own FeatureFlag so it auto-covers future Comfy params.
-
-        // input.InternalSet.ValuesInput is the (non-obsolete) map of params actually set on the
-        // request, keyed by cleaned param ID — the authoritative "what did the user send" list.
-        Dictionary<string, object> setParams = input.InternalSet.ValuesInput;
-
-        // Explicit safety net first: a custom ComfyUI workflow (the raw node-graph IR, or the
-        // stored-workflow selector that expands into it) is the one we must never accept.
-        foreach (string wfKey in new[] { "comfyworkflowraw", "comfyuicustomworkflow" })
-        {
-            if (setParams.TryGetValue(wfKey, out object wfVal) && !string.IsNullOrWhiteSpace($"{wfVal}"))
-            {
-                input.RefusalReasons.Add(
-                    "HartsyInference: custom ComfyUI workflows aren't supported by this backend. "
-                    + "Use a ComfyUI backend for this generation.");
-                return false;
-            }
-        }
-
-        // Generic sweep over every param actually set on the request.
-        foreach (string paramId in setParams.Keys.ToArray())
-        {
-            if (HonoredComfyParams.Contains(paramId)) { continue; }
-            if (!T2IParamTypes.TryGetType(paramId, out T2IParamType pType, input) || pType.FeatureFlag is null) { continue; }
-            if (!pType.FeatureFlag.Split(',').Contains("comfyui")) { continue; }
-            string valStr = $"{setParams[paramId]}";
-            // Skip params left at their default / ignore value — they have no effect.
-            if (valStr == pType.Default || (pType.IgnoreIf is not null && valStr == pType.IgnoreIf)) { continue; }
-            input.RefusalReasons.Add(
-                $"HartsyInference: the '{pType.Name}' parameter is a ComfyUI-only feature this backend "
-                + "can't service. Remove it, or use a ComfyUI backend for this generation.");
-            return false;
-        }
-
-        return true;
-    }
-
-    public override async Task<bool> FreeMemory(bool systemRam)
-    {
-        bool freed = _cache?.EvictAll() ?? false;
-        if (freed)
-        {
-            // Entry disposal alone leaves preloaded weights in the backend's device cache — wipe it so
-            // "free memory" actually returns the VRAM.
-            _backend?.FreeAllDeviceMemory();
-        }
-
-        if (systemRam)
-        {
-            GC.Collect();
-            GC.WaitForPendingFinalizers();
-        }
-
-        await Task.CompletedTask;
-        return freed;
-    }
-
-    /// <summary>Triggered by Swarm when the user clicks Cancel.</summary>
-    public void RequestCancel()
-    {
-        _cancelCts?.Cancel();
-    }
-
-    /// <summary>True if the cache holds an entry for the given (compat, name) pair.
-    /// Centralizes the per-architecture lookup so LoadModel and GenerateLive don't drift.</summary>
-    private bool IsCached(string compat, string modelName)
-    {
-        if (_cache is null) return false;
-        if (Sd3Loader.IsSd3Compat(compat)) return _cache.TryGetSd3(modelName) is not null;
-        if (Flux2Loader.IsFlux2Compat(compat)) return _cache.TryGetFlux2(modelName) is not null;
-        return compat switch
-        {
-            Sd15Loader.Sd15CompatClassId => _cache.TryGetSd15(modelName) is not null,
-            SdxlLoader.SdxlCompatClassId => _cache.TryGetSdxl(modelName) is not null,
-            FluxLoader.Flux1CompatClassId => _cache.TryGetFlux(modelName) is not null,
-            ChromaLoader.ChromaCompatClassId => _cache.TryGetChroma(modelName) is not null,
-            ChromaRadianceLoader.ChromaRadianceCompatClassId => _cache.TryGetChromaRadiance(modelName) is not null,
-            ZetaChromaLoader.ZetaChromaCompatClassId => _cache.TryGetZetaChroma(modelName) is not null,
-            AuraFlowLoader.AuraFlowCompatClassId => _cache.TryGetAuraFlow(modelName) is not null,
-            FLiteLoader.FLiteCompatClassId => _cache.TryGetFLite(modelName) is not null,
-            Ideogram4Loader.Ideogram4CompatClassId => _cache.TryGetIdeogram4(modelName) is not null,
-            BooguImageLoader.BooguImageCompatClassId => _cache.TryGetBooguImage(modelName) is not null,
-            ErnieImageLoader.ErnieImageCompatClassId => _cache.TryGetErnieImage(modelName) is not null,
-            Lumina2Loader.Lumina2CompatClassId => _cache.TryGetLumina2(modelName) is not null,
-            HunyuanImageLoader.HunyuanImageCompatClassId => _cache.TryGetHunyuanImage(modelName) is not null,
-            OmniGen2Loader.OmniGen2CompatClassId => _cache.TryGetOmniGen2(modelName) is not null,
-            ZImageLoader.ZImageCompatClassId => _cache.TryGetZImage(modelName) is not null,
-            AnimaLoader.AnimaCompatClassId => _cache.TryGetAnima(modelName) is not null,
-            HiDreamLoader.HiDreamI1CompatClassId => _cache.TryGetHiDream(modelName) is not null,
-            QwenImageLoader.QwenImageCompatClassId => _cache.TryGetQwenImage(modelName) is not null,
-            // Every Wan conditioning variant shares the plain-Wan compat classes but caches in its own slot —
-            // check ALL of them. Only probing TryGetWanVideo made every S2V/VACE/Animate repeat-gen a "Model
-            // cache MISS" that rebuilt the whole pipeline (and re-encoded the TE) despite a warm entry.
-            WanVideoLoader.Wan22_5BCompatClassId or WanVideoLoader.Wan21_1_3BCompatClassId
-                or WanVideoLoader.Wan21_14BCompatClassId => _cache.TryGetWanVideo(modelName) is not null
-                    || _cache.TryGetWanS2V(modelName) is not null
-                    || _cache.TryGetWanVace(modelName) is not null
-                    || _cache.TryGetWanAnimate(modelName) is not null,
-            LtxVideoLoader.LtxVideoCompatClassId => _cache.TryGetLtxVideo(modelName) is not null,
-            LtxVideo2Loader.LtxVideo2CompatClassId => _cache.TryGetLtxVideo2(modelName) is not null,
-            AceStepLoader.AceStepCompatClassId => _cache.TryGetAceStep(modelName) is not null || _cache.TryGetAceStep15(modelName) is not null,
-            MusicGenLoader.MusicGenCompatClassId => _cache.TryGetMusicGen(modelName) is not null,
-            YueLoader.YueCompatClassId => _cache.TryGetYue(modelName) is not null,
-            LanceLoader.LanceCompatClassId => _cache.TryGetLance(modelName) is not null,
-            LanceLoader.LanceVideoCompatClassId => _cache.TryGetLance(modelName) is not null,
-            LensLoader.LensCompatClassId => _cache.TryGetLens(modelName) is not null,
-            Krea2Loader.Krea2CompatClassId => _cache.TryGetKrea2(modelName) is not null,
-            _ => false,
-        };
     }
 }

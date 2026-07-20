@@ -114,7 +114,6 @@ public static class HartsyInferenceWebAPI
                 ["current_model"] = backend.CurrentModelName ?? "",
                 ["compute_backend"] = backend.Settings?.ComputeBackend ?? "auto",
                 ["gpu_id"] = backend.Settings?.GPU_ID ?? "0",
-                ["max_cached_pipelines"] = backend.Settings?.MaxCachedPipelines ?? 1,
                 ["usages"] = data.Usages,
             });
         }

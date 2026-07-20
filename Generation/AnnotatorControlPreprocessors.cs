@@ -3,7 +3,7 @@ using SixLabors.ImageSharp.Processing;
 using SwarmUI.Utils;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
-using HartsyInference.ModelHandler.PyTorch;
+using HartsyInference.ModelAssets.PyTorch;
 using HartsyInference.Vision.Annotators;
 using ISImage = SixLabors.ImageSharp.Image;
 using ISSize = SixLabors.ImageSharp.Size;
