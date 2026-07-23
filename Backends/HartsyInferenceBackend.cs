@@ -386,7 +386,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             }
         }
         string format = input.Get(T2IParamTypes.VideoFormat, "h264-mp4");
-        return VideoOutputEncoder.Encode([.. frames], width, height, request.Fps, format, cancel);
+        return VideoOutputEncoder.Encode([.. frames], width, height, request.Fps ?? 25, format, cancel);
     }
 
     /// <summary>Runs a music generation; the Engine returns an encoded WAV container, which Swarm carries as an

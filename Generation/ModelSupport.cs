@@ -71,6 +71,9 @@ public static class ModelSupport
         ["wan-22-5b"] = new("wan-22-5b", Kind.Video),
         ["wan-21-1_3b"] = new("wan-21-1_3b", Kind.Video),
         ["wan-21-14b"] = new("wan-21-14b", Kind.Video),
+        // The hunyuan-video compat class also covers the SkyReels / I2V variants; the Engine recipe drives the
+        // classic 13B text-to-video checkpoint (I2V conditioning is a recipe TODO, not a mapping concern).
+        ["hunyuan-video"] = new("hunyuan-video", Kind.Video),
         ["lightricks-ltx-video"] = new("ltx-video", Kind.Video),
         ["lightricks-ltx-video-2"] = new("ltx-video-2", Kind.Video),
         [ModelClassRegistrations.LanceVideoCompatClassId] = new("lance-video", Kind.Video),
