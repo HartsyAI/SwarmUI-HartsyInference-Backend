@@ -2,7 +2,7 @@ using SixLabors.ImageSharp.PixelFormats;
 using SwarmUI.Utils;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
-using HartsyInference.ModelHandler.PyTorch;
+using HartsyInference.ModelAssets.PyTorch;
 using HartsyInference.Vision.DepthAnything;
 using ISImage = SixLabors.ImageSharp.Image;
 using EngineDepthPreprocessor = HartsyInference.Vision.DepthAnything.DepthAnythingPreprocessor;

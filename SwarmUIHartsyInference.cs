@@ -79,17 +79,10 @@ public class SwarmUIHartsyInference : Extension
         // Register feature flags here if needed before settings load.
         // Most feature flags are advertised dynamically via HartsyInferenceBackend.SupportedFeatures.
 
-        // ACE-Step v1 model class: Swarm core only knows the v1.5 class, so v1 checkpoints would
-        // otherwise be unclassified. Must register before model folders are scanned.
-        Generation.AceStepLoader.RegisterModelClass();
-        // Lance compat + model classes: core has no Lance classes at all; the checkpoints are
-        // folder-models (sharded safetensors + llm_config.json), surfaced by the core
-        // folder-model scanning support. Must register before model folders are scanned.
-        Generation.LanceLoader.RegisterModelClass();
-        // MusicGen + YuE: gen-tab music models (audio params light up via IsAudioModel).
-        Generation.MusicGenLoader.RegisterModelClass();
-        Generation.YueLoader.RegisterModelClass();
-        Generation.FLiteLoader.RegisterModelClass();
+        // Model classes core doesn't know: ACE-Step v1 (core only registers v1.5), Lance image + video
+        // (core has no Lance classes at all — folder models with llm_config.json), MusicGen, YuE, F-Lite.
+        // Must register before model folders are scanned.
+        Generation.ModelClassRegistrations.RegisterAll();
         // Boogu: core now detects it (compat class "boogu") and excludes it from the OmniGen2 probe, so
         // the extension reuses core's classification — no registration needed.
     }

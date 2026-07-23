@@ -1,9 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk.Web">
     <PropertyGroup>
         <AssemblyName>SwarmExtensionHartsyInference</AssemblyName>
-        <!-- Required for pointer-math tensor slicing in a few loaders (e.g. ZImageLoader,
-             ChromaVariantLoaders) — Buffer.MemoryCopy + byte* to extract embedding sub-rows
-             without a managed copy. -->
+        <!-- Required by the ControlNet annotators / Wan-Animate preprocessors (Generation/*Preprocessor.cs,
+             ControlVideoDecoder) — they fill tensor storage through byte*/float* without a managed copy. -->
         <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
         <!-- Make the floating HartsyInference 'alpha.*' reference (below) ACTUALLY resolve to the
              latest published version on every build. Without this, NuGet serves the flat-container
@@ -15,12 +14,12 @@
              of a NEW floating version; already-resolved versions in the global-packages folder are
              unaffected). Pin Version below to a specific alpha.N if you ever need an offline build. -->
         <RestoreNoHttpCache>true</RestoreNoHttpCache>
-        <!-- Engine source toggle (same pattern as SwarmUI-AudioLab): false = published NuGet;
-             true = prebuilt local SharpInference DLLs. MUST default false — this extension is shipped to
+        <!-- Engine source toggle (same pattern as SwarmUI-LLMAssistant): false = published NuGet;
+             true = prebuilt local HartsyInference DLLs. MUST default false — this extension is shipped to
              end users who only have nuget.org, so the pin below must always be a REAL published version.
              Only flip true (via -p:UseLocalHartsy=true) for local engine dev against unpublished DLLs. -->
         <UseLocalHartsy Condition="'$(UseLocalHartsy)' == ''">false</UseLocalHartsy>
-        <HartsyRepo Condition="'$(HartsyRepo)' == ''">$(MSBuildThisFileDirectory)../../../../SharpInference</HartsyRepo>
+        <HartsyRepo Condition="'$(HartsyRepo)' == ''">$(MSBuildThisFileDirectory)../../../../HartsyInference</HartsyRepo>
         <!-- Cli bin is the full engine closure: every HartsyInference.* assembly + Google.Protobuf +
              Microsoft.ML.Tokenizers, all in one folder. -->
         <HartsyLocalBin>$(HartsyRepo)/src/HartsyInference.Cli/bin/Release/net8.0</HartsyLocalBin>
@@ -78,24 +77,26 @@
              dev machine's nuget.config feed and are NOT on nuget.org, so any downloaded copy of this
              extension fails restore with NU1301 (the "missing local dll"-style error). Always pin an
              EXACT version that appears in the flat-container index above. -->
-        <PackageReference Include="HartsyInference" Version="1.0.0-alpha.52" />
+        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.2" />
     </ItemGroup>
 
-    <!-- LOCAL ENGINE: prebuilt DLLs from the SharpInference Cli bin (its full runtime closure). Referenced
+    <!-- LOCAL ENGINE: prebuilt DLLs from the HartsyInference Cli bin (its full runtime closure). Referenced
          directly (Private=true copies them to our output for Swarm's per-extension AssemblyLoadContext),
          plus the CUDA PTX kernels the backend resolves next to the DLL. FIRST build the engine:
-         dotnet build src/HartsyInference.Cli/HartsyInference.Cli.csproj -c Release -f net8.0 (in SharpInference). -->
+         dotnet build src/HartsyInference.Cli/HartsyInference.Cli.csproj -c Release -f net8.0 (in HartsyInference).
+         HartsyInference.Engine is the ONE assembly this extension actually programs against (load + generate);
+         the rest are its runtime closure, copied so the per-extension ALC can resolve them. -->
     <ItemGroup Condition="'$(UseLocalHartsy)' == 'true'">
+        <Reference Include="HartsyInference.Engine"><HintPath>$(HartsyLocalBin)/HartsyInference.Engine.dll</HintPath><Private>true</Private></Reference>
         <Reference Include="HartsyInference.Core"><HintPath>$(HartsyLocalBin)/HartsyInference.Core.dll</HintPath><Private>true</Private></Reference>
-        <Reference Include="HartsyInference.ModelHandler"><HintPath>$(HartsyLocalBin)/HartsyInference.ModelHandler.dll</HintPath><Private>true</Private></Reference>
-        <Reference Include="HartsyInference.Tokenizers"><HintPath>$(HartsyLocalBin)/HartsyInference.Tokenizers.dll</HintPath><Private>true</Private></Reference>
+        <Reference Include="HartsyInference.ModelAssets"><HintPath>$(HartsyLocalBin)/HartsyInference.ModelAssets.dll</HintPath><Private>true</Private></Reference>
         <Reference Include="HartsyInference.LLM"><HintPath>$(HartsyLocalBin)/HartsyInference.LLM.dll</HintPath><Private>true</Private></Reference>
-        <Reference Include="HartsyInference.Phonemizer"><HintPath>$(HartsyLocalBin)/HartsyInference.Phonemizer.dll</HintPath><Private>true</Private></Reference>
         <Reference Include="HartsyInference.Diffusion"><HintPath>$(HartsyLocalBin)/HartsyInference.Diffusion.dll</HintPath><Private>true</Private></Reference>
         <Reference Include="HartsyInference.Audio"><HintPath>$(HartsyLocalBin)/HartsyInference.Audio.dll</HintPath><Private>true</Private></Reference>
         <Reference Include="HartsyInference.Video"><HintPath>$(HartsyLocalBin)/HartsyInference.Video.dll</HintPath><Private>true</Private></Reference>
         <Reference Include="HartsyInference.Vision"><HintPath>$(HartsyLocalBin)/HartsyInference.Vision.dll</HintPath><Private>true</Private></Reference>
-        <Reference Include="HartsyInference.Interactive"><HintPath>$(HartsyLocalBin)/HartsyInference.Interactive.dll</HintPath><Private>true</Private></Reference>
+        <Reference Include="HartsyInference.World"><HintPath>$(HartsyLocalBin)/HartsyInference.World.dll</HintPath><Private>true</Private></Reference>
+        <Reference Include="HartsyInference.ThreeD"><HintPath>$(HartsyLocalBin)/HartsyInference.ThreeD.dll</HintPath><Private>true</Private></Reference>
         <Reference Include="HartsyInference.Cpu"><HintPath>$(HartsyLocalBin)/HartsyInference.Cpu.dll</HintPath><Private>true</Private></Reference>
         <Reference Include="HartsyInference.Cuda"><HintPath>$(HartsyLocalBin)/HartsyInference.Cuda.dll</HintPath><Private>true</Private></Reference>
         <Reference Include="HartsyInference.Vulkan"><HintPath>$(HartsyLocalBin)/HartsyInference.Vulkan.dll</HintPath><Private>true</Private></Reference>

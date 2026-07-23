@@ -1,120 +1,194 @@
+using HartsyInference.Engine;
+using HartsyInference.Engine.Dispatch;
+using HartsyInference.Engine.Recipes;
+
 namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
 /// <summary>
-/// Maps SwarmUI's <c>T2IModel.ModelClass.CompatClass.ID</c> → HartsyInference architecture.
-/// CompatClass IDs are registered in <c>src/Text2Image/T2IModelClassSorter.cs</c>; we
-/// dispatch off them in the backend's LoadModel/GenerateLive.
-///
-/// See docs/05-Pipeline-Translation.md §Architecture detection table.
+/// The single translation table between SwarmUI's <c>T2IModel.ModelClass.CompatClass.ID</c> and the
+/// <c>HartsyInference.Engine</c> family id its recipe is registered under, plus the modality that family runs in.
+/// <para>This is the whole of the extension's "architecture knowledge" now: the Engine owns detection, recipe
+/// construction, pipeline caching and generation, so all this layer has to do is name the family. Whether a family is
+/// actually <i>drivable</i> is never hard-coded here — it is asked of the Engine's
+/// <see cref="RecipeRegistry"/> / <see cref="VideoRecipeRegistry"/> at call time, so the answer can't drift from what
+/// the Engine will really do.</para>
 /// </summary>
 public static class ModelSupport
 {
-    /// <summary>Architectures with a fully wired loader in this extension.</summary>
-    private static readonly HashSet<string> _supportedArchs = new()
+    /// <summary>What a mapped compat class generates.</summary>
+    public enum Kind
     {
-        Sd15Loader.Sd15CompatClassId,             // "stable-diffusion-v1"
-        SdxlLoader.SdxlCompatClassId,             // "stable-diffusion-xl-v1"
-        Sd3Loader.Sd3MediumCompatClassId,         // "stable-diffusion-v3-medium"
-        Sd3Loader.Sd35MediumCompatClassId,        // "stable-diffusion-v3.5-medium"
-        Sd3Loader.Sd35LargeCompatClassId,         // "stable-diffusion-v3.5-large"
-        FluxLoader.Flux1CompatClassId,            // "flux-1"
-        Flux2Loader.Flux2BaseCompatClassId,       // "flux-2"
-        Flux2Loader.Flux2Klein4BCompatClassId,    // "flux-2-klein-4b"
-        Flux2Loader.Flux2Klein9BCompatClassId,    // "flux-2-klein-9b" — loader refuses at runtime if Qwen3-8B preset missing
-        ChromaLoader.ChromaCompatClassId,         // "chroma"
-        ChromaRadianceLoader.ChromaRadianceCompatClassId, // "chroma-radiance" — pixel-space (no VAE); validation-gated numerics
-        ZetaChromaLoader.ZetaChromaCompatClassId, // "zeta-chroma" — pixel-space Qwen3-4B; validation-gated numerics
-        AuraFlowLoader.AuraFlowCompatClassId,     // "auraflow-v1"
-        FLiteLoader.FLiteCompatClassId,           // "f-lite" — wired-untested (no E2E test in HartsyInference yet)
-        Ideogram4Loader.Ideogram4CompatClassId,   // "ideogram-4" — dual 9.3B DiT; ≥22 GB VRAM gate at load time; non-commercial license
-        BooguImageLoader.BooguImageCompatClassId, // "boogu" (core-detected) — 10B OmniGen2/Lumina-2 DiT + Qwen3-VL-8B + FLUX.1 VAE; T2I + reference-image edit (Apache-2.0)
-        ErnieImageLoader.ErnieImageCompatClassId,
-        Lumina2Loader.Lumina2CompatClassId,   // "lumina-2" — Gemma-2-2B live encode (hidden_states[-2])
-        HunyuanImageLoader.HunyuanImageCompatClassId, // "hunyuan-image-2_1" — Qwen2.5-VL-7B live encode (ByT5 glyph branch pending)
-        OmniGen2Loader.OmniGen2CompatClassId, // "omnigen-2" — Qwen2.5-VL-3B live encode (ComfyUI-template parity) // "ernie-image" — Baidu ~8B single-stream DiT + Ministral-3-3B TE + Flux.2 VAE (Apache-2.0)
-        ZImageLoader.ZImageCompatClassId,         // "z-image"
-        AnimaLoader.AnimaCompatClassId,           // "anima" — Cosmos-Predict2-2B family + LlmAdapter
-        HiDreamLoader.HiDreamI1CompatClassId,     // "hidream-i1" — MMDiT + 4 text encoders (CLIP-L/G, T5-XXL, Llama-3.1)
-        QwenImageLoader.QwenImageCompatClassId,   // "qwen-image" — 20B MMDiT + Qwen2.5-VL-7B encoder
-        WanVideoLoader.Wan22_5BCompatClassId,     // "wan-22-5b" — Wan2.2 TI2V-5B text/image-to-video
-        WanVideoLoader.Wan21_1_3BCompatClassId,   // "wan-21-1_3b" — Wan2.1 1.3B T2V + VACE-1.3B (variant routed by WanModelVariants.Detect)
-        WanVideoLoader.Wan21_14BCompatClassId,     // "wan-21-14b" — Wan2.1 14B (T2V + CLIP-I2V) + VACE / Animate / S2V variants + Wan2.2 A14B; all
-                                                  // share this compat and are split to WanVace/WanAnimate/WanS2V/WanVideo loaders by WanModelVariants.Detect
-        LtxVideoLoader.LtxVideoCompatClassId,     // "lightricks-ltx-video" — LTX-Video 0.9 single-file text-to-video
-        LtxVideo2Loader.LtxVideo2CompatClassId,   // "lightricks-ltx-video-2" — LTX-2.3 22B dual-stream text-to-video+audio (validation-pending)
-        AceStepLoader.AceStepCompatClassId,       // "ace-step-1_5" — v1 checkpoints route to AceStepLoader, real v1.5
-                                                  // checkpoints to AceStep15Loader (2B turbo, validation-pending numerics)
-        // MusicGenLoader.MusicGenCompatClassId — moved to _pendingArchs until the engine ships
-        // EnCodec-32kHz + T5-Base presets and the converter's text-encoder path (loader is otherwise complete)
-        // YueLoader.YueCompatClassId — moved to _pendingArchs until HartsyInference ships YueTokenizer (loader is otherwise complete)
-        LanceLoader.LanceCompatClassId,           // "lance" — ByteDance Lance 3B folder-checkpoint T2I (validation-pending numerics)
-        LanceLoader.LanceVideoCompatClassId,      // "lance-video" — Lance 3B Video T2V (validation-pending numerics)
-        LensLoader.LensCompatClassId,             // "lens" — Microsoft Lens 3.8B MMDiT + GPT-OSS-20B encoder (Comfy split files)
-        Krea2Loader.Krea2CompatClassId,           // "krea-2" — Krea 2 12.9B single-stream MMDiT (Qwen3-VL-4B 12-layer tap + text-fusion + Qwen-Image VAE); Base + Turbo (filename-detected)
-        // TODO: SdxlLoader.SdxlRefinerCompatClassId once we wire the refiner two-pass flow.
-    };
+        /// <summary>Still image, via <c>InferenceEngine.Images</c>.</summary>
+        Image,
 
-    /// <summary>Architectures where HartsyInference HAS a working pipeline but the SwarmUI
-    /// extension hasn't wired a loader yet. Refusing one of these isn't "we can't do this";
-    /// it's "the backend code exists but the SwarmUI integration glue (text-encoder selection,
-    /// VAE auto-download, tokenizer wiring, parameter rules) is a TODO." The error message
-    /// for these should suggest using ComfyUI in the meantime, not "this won't work."</summary>
-    private static readonly Dictionary<string, string> _pendingArchs = new()
-    {
-        // Kandinsky 5 / OmniGen 2 / Lumina 2: the HartsyInference pipelines exist and pass structural
-        // tests, but their conditioning encoders are NOT faithfully implemented — the upstream E2E
-        // tests feed PRE-COMPUTED embeddings from .bin dumps (Kandinsky: dual Qwen2.5-VL + CLIP-L with
-        // an unverified prompt template; OmniGen 2: Qwen2.5-VL; Lumina 2: Gemma-2-2B, and HartsyInference
-        // has no Gemma tokenizer at all). Wiring a loader with guessed templates would produce
-        // semantically-wrong conditioning — same reason HunyuanImage is refused below.
-        ["kandinsky5-imglite"] = "Kandinsky 5 Image Lite (engine pipeline needs pre-computed Qwen2.5-VL + CLIP-L embeddings — live encode path unverified)",
-        // ErnieImage: WIRED 2026-06-17 (ErnieImageLoader) — engine shipped ErnieTokenizer in alpha.8, so it
-        // moved to _supportedArchs above. (Was blocked on the missing real Ernie tokenizer.)
-        // YuE: the extension loader (YueLoader.cs) is fully written, but HartsyInference has no
-        // YueTokenizer (the mm SentencePiece wrapper) — lyrics can't be encoded. Same class of
-        // blocker as Ernie. Lift by restoring the TODO(engine-blocked) lines in YueLoader.cs and
-        // re-adding YueCompatClassId to _supportedArchs.
-        [YueLoader.YueCompatClassId] = "YuE (no YuE mm tokenizer in HartsyInference yet — lyrics can't be encoded)",
-        // MusicGen: extension loader (MusicGenLoader.cs) fully written; engine is missing the
-        // EnCodec-32kHz preset, T5-Base preset, and the converter's bundled-text-encoder path.
-        [MusicGenLoader.MusicGenCompatClassId] = "MusicGen (engine missing EnCodec-32kHz/T5-Base presets + text-encoder converter path)",
-    };
+        /// <summary>Video clip, via <c>InferenceEngine.Video</c>.</summary>
+        Video,
 
-    public static bool IsArchitectureSupported(string compatClass)
-    {
-        return !string.IsNullOrEmpty(compatClass) && _supportedArchs.Contains(compatClass);
+        /// <summary>Music / audio, via <c>InferenceEngine.Music</c>.</summary>
+        Music,
     }
 
-    /// <summary>Human-readable explanation of why a given compat class isn't supported.
-    /// Distinguishes "we have the engine but not the loader" (pending) from "this isn't
-    /// implemented anywhere" (genuinely unsupported).</summary>
+    /// <summary>A compat class's Engine family id plus the service that drives it.</summary>
+    public sealed record Family(string Id, Kind Kind);
+
+    /// <summary>SwarmUI compat class → Engine family. Every entry here is a family the Engine has (or is expected to
+    /// have) a registered recipe for; the registry lookup decides whether it is live today.</summary>
+    private static readonly Dictionary<string, Family> _families = new(StringComparer.OrdinalIgnoreCase)
+    {
+        // ── Image (Engine RecipeRegistry family ids) ──
+        ["stable-diffusion-v1"] = new("sd15", Kind.Image),
+        ["stable-diffusion-xl-v1"] = new("sdxl", Kind.Image),
+        ["stable-diffusion-xl-v1-refiner"] = new("sdxl-refiner", Kind.Image),
+        ["stable-diffusion-v3-medium"] = new("sd3", Kind.Image),
+        ["stable-diffusion-v3.5-medium"] = new("sd3", Kind.Image),
+        ["stable-diffusion-v3.5-large"] = new("sd3", Kind.Image),
+        ["flux-1"] = new("flux1", Kind.Image),
+        ["flux-2"] = new("flux2", Kind.Image),
+        ["flux-2-klein-4b"] = new("flux2", Kind.Image),
+        ["flux-2-klein-9b"] = new("flux2", Kind.Image),
+        ["chroma"] = new("chroma", Kind.Image),
+        ["chroma-radiance"] = new("chroma-radiance", Kind.Image),
+        ["zeta-chroma"] = new("zeta-chroma", Kind.Image),
+        ["auraflow-v1"] = new("auraflow", Kind.Image),
+        [ModelClassRegistrations.FLiteCompatClassId] = new("f-lite", Kind.Image),
+        ["ideogram-4"] = new("ideogram4", Kind.Image),
+        ["boogu"] = new("boogu", Kind.Image),
+        ["ernie-image"] = new("ernie-image", Kind.Image),
+        ["lumina-2"] = new("lumina2", Kind.Image),
+        ["hunyuan-image-2_1"] = new("hunyuan-image", Kind.Image),
+        ["omnigen-2"] = new("omnigen2", Kind.Image),
+        ["z-image"] = new("zimage", Kind.Image),
+        ["anima"] = new("anima", Kind.Image),
+        ["hidream-i1"] = new("hidream", Kind.Image),
+        ["qwen-image"] = new("qwen-image", Kind.Image),
+        ["kandinsky5-imglite"] = new("kandinsky5", Kind.Image),
+        [ModelClassRegistrations.LanceCompatClassId] = new("lance-image", Kind.Image),
+        ["lens"] = new("lens", Kind.Image),
+        ["krea-2"] = new("krea2", Kind.Image),
+
+        // ── Video (Engine VideoRecipeRegistry family ids; the Wan compat classes are registered verbatim,
+        //    and WanVideoRecipe sniffs the checkpoint header to route the VACE / Animate / S2V variants) ──
+        ["wan-22-5b"] = new("wan-22-5b", Kind.Video),
+        ["wan-21-1_3b"] = new("wan-21-1_3b", Kind.Video),
+        ["wan-21-14b"] = new("wan-21-14b", Kind.Video),
+        // The hunyuan-video compat class also covers the SkyReels / I2V variants; the Engine recipe drives the
+        // classic 13B text-to-video checkpoint (I2V conditioning is a recipe TODO, not a mapping concern).
+        ["hunyuan-video"] = new("hunyuan-video", Kind.Video),
+        ["lightricks-ltx-video"] = new("ltx-video", Kind.Video),
+        ["lightricks-ltx-video-2"] = new("ltx-video-2", Kind.Video),
+        [ModelClassRegistrations.LanceVideoCompatClassId] = new("lance-video", Kind.Video),
+
+        // ── Music (Engine MusicCatalog descriptor ids) ──
+        ["ace-step-1_5"] = new("acestep", Kind.Music),
+        [ModelClassRegistrations.MusicGenCompatClassId] = new("musicgen", Kind.Music),
+        [ModelClassRegistrations.YueCompatClassId] = new("yue", Kind.Music),
+    };
+
+    /// <summary>The Engine family for <paramref name="compatClass"/>, or null when this compat class has no mapping
+    /// (i.e. the Engine has no such family at all).</summary>
+    public static Family Resolve(string compatClass)
+    {
+        if (string.IsNullOrEmpty(compatClass))
+        {
+            return null;
+        }
+        return _families.TryGetValue(compatClass, out Family family) ? family : null;
+    }
+
+    /// <summary>True when the Engine can actually drive <paramref name="compatClass"/> today: it is mapped to a
+    /// family AND that family has a registered recipe (music descriptors are always registered).</summary>
+    public static bool IsArchitectureSupported(string compatClass)
+    {
+        Family family = Resolve(compatClass);
+        if (family is null)
+        {
+            return false;
+        }
+        return family.Kind switch
+        {
+            Kind.Image => RecipeRegistry.Resolve(family.Id) is not null,
+            Kind.Video => VideoRecipeRegistry.Resolve(family.Id) is not null,
+            Kind.Music => true,
+            _ => false,
+        };
+    }
+
+    /// <summary>The composition features the Engine's recipe for <paramref name="compatClass"/> declares it can
+    /// apply. <see cref="ImageFeatures.None"/> for video/music/unmapped families.</summary>
+    public static ImageFeatures SupportedFeatures(string compatClass)
+    {
+        Family family = Resolve(compatClass);
+        if (family is null || family.Kind != Kind.Image)
+        {
+            return ImageFeatures.None;
+        }
+        return RecipeRegistry.Resolve(family.Id)?.Supports ?? ImageFeatures.None;
+    }
+
+    /// <summary>Human-readable explanation of why a compat class isn't drivable. Distinguishes "the Engine knows this
+    /// family but hasn't lifted its recipe yet" from "the Engine has nothing for this architecture".</summary>
     public static string WhyNotSupported(string compatClass)
     {
         if (string.IsNullOrEmpty(compatClass))
         {
             return "Model has no architecture compat class set — HartsyInference can't dispatch.";
         }
-        if (_pendingArchs.TryGetValue(compatClass, out string friendlyName))
+        Family family = Resolve(compatClass);
+        if (family is null)
         {
-            return $"{friendlyName} ('{compatClass}') is not yet wired into the SwarmUI extension. " +
-                   "HartsyInference itself has the pipeline + checkpoint converter, but the per-architecture " +
-                   "loader (text-encoder selection, VAE auto-download, tokenizer setup) is a TODO. " +
-                   "Use the ComfyUI backend for this architecture in the meantime.";
+            return $"Architecture '{compatClass}' has no HartsyInference family mapping. "
+                + $"Supported today: {string.Join(", ", SupportedArchitectures)}.";
         }
-        return $"Architecture '{compatClass}' is not implemented in HartsyInference. " +
-               $"Supported today: {string.Join(", ", _supportedArchs)}.";
+        string drivable = family.Kind == Kind.Video
+            ? string.Join(", ", VideoRecipeRegistry.RegisteredNames)
+            : string.Join(", ", RecipeRegistry.RegisteredNames);
+        return $"Architecture '{compatClass}' maps to HartsyInference family '{family.Id}', but no "
+            + $"{family.Kind.ToString().ToLowerInvariant()} recipe is registered for it in this engine build. "
+            + $"Currently drivable: {drivable}. Use the ComfyUI backend for this architecture in the meantime.";
     }
 
-    public static IReadOnlyCollection<string> SupportedArchitectures => _supportedArchs;
+    /// <summary>Compat classes the Engine can drive right now.</summary>
+    public static IReadOnlyCollection<string> SupportedArchitectures =>
+        [.. _families.Keys.Where(IsArchitectureSupported).Order(StringComparer.Ordinal)];
 
-    /// <summary>Architectures the engine has a pipeline for but the extension refuses today,
-    /// mapped to the human-readable blocker reason. Surfaced by the WebAPI for admin UX.</summary>
-    public static IReadOnlyDictionary<string, string> PendingArchitectures => _pendingArchs;
+    /// <summary>Compat classes that are mapped to an Engine family whose recipe isn't registered yet, mapped to the
+    /// human-readable blocker. Surfaced by the WebAPI for admin UX.</summary>
+    public static IReadOnlyDictionary<string, string> PendingArchitectures =>
+        _families.Keys.Where(k => !IsArchitectureSupported(k))
+            .Order(StringComparer.Ordinal)
+            .ToDictionary(k => k, WhyNotSupported, StringComparer.Ordinal);
 
-    /// <summary>Stub from earlier scaffolding; legacy step-priority registration is unused
-    /// while we're flat-dispatching from the backend's GenerateLive.</summary>
+    /// <summary>Builds the Engine's load request for a Swarm model: the family id travels as the catalog id (that is
+    /// what the Engine keys its recipe registry on), and the checkpoint path as the resolved local path.</summary>
+    public static ModelSpec BuildSpec(SwarmUI.Text2Image.T2IModel model, Family family)
+    {
+        ArgumentNullException.ThrowIfNull(model);
+        ArgumentNullException.ThrowIfNull(family);
+        Modality modality = family.Kind switch
+        {
+            Kind.Video => Modality.Video,
+            Kind.Music => Modality.Music,
+            _ => Modality.Image,
+        };
+        return new ModelSpec
+        {
+            Requested = family.Id,
+            Modality = modality,
+            LocalPath = model.RawFilePath,
+            Catalog = new CatalogEntry
+            {
+                Id = family.Id,
+                Modality = modality,
+                DisplayName = model.Name,
+                Architecture = family.Id,
+                Status = ModelStatus.Verified,
+            },
+        };
+    }
+
+    /// <summary>Kept for the extension entry point's call order; the Engine's registries are self-registering, so
+    /// there is nothing left to pre-register here.</summary>
     public static void RegisterBuiltins()
     {
-        // No-op; loaders are invoked directly from HartsyInferenceBackend.
     }
 }
