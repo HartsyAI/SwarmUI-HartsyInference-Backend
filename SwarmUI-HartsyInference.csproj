@@ -71,13 +71,18 @@
                         voice source now includes the learnt-padding speaker slots (the missing-rows bug
                         that produced non-speech) + text-token sampling for word pacing; depformer
                         weights-per-step projections made device-resident (63.0 → 9.7 s on a 3060).
-                        Latest published on nuget.org as of this pin (verified via
-                        https://api.nuget.org/v3-flatcontainer/hartsyinference/index.json).
+             (Note: the alpha.* line was reset to 2.0.0-alpha.N during the Engine-architecture rewrite;
+             the alpha.25-alpha.49 history above predates that reset and refers to the old 1.0.0 line.)
+             2.0.0-alpha.3 = latest published on nuget.org as of 2026-07-25; predates the same-day
+             commit that made TextService.FindMmproj public (see SwarmUI-LLMAssistant's HartsyLocalLLMProvider).
+             Pinned here to 2.0.0-alpha.4 in step with that fix and the other two SwarmUI-Hartsy
+             extensions, ahead of the engine repo's manual publish of that version — restore will 404
+             until that push lands on nuget.org.
              NEVER pin a "-local" suffix here: those are locally-packed builds that live only on the
              dev machine's nuget.config feed and are NOT on nuget.org, so any downloaded copy of this
              extension fails restore with NU1301 (the "missing local dll"-style error). Always pin an
              EXACT version that appears in the flat-container index above. -->
-        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.3" />
+        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.4" />
     </ItemGroup>
 
     <!-- LOCAL ENGINE: prebuilt DLLs from the HartsyInference Cli bin (its full runtime closure). Referenced
