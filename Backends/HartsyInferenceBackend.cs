@@ -47,6 +47,9 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         [ConfigComment("Which GPU to use, if multiple are available.\nShould be a single number, like '0' (first GPU), '1' (second GPU), etc.\nIgnored for the CPU compute backend.\nNOTE: the current HartsyInference.Engine facade always constructs its device on ordinal 0 — a non-zero value here is logged and ignored until the Engine exposes device selection.")]
         public string GPU_ID = "0";
 
+        [ConfigComment("How to handle models that do not fit in VRAM.\n'auto' (default): measure free VRAM and stream weights from system RAM only when the model would not otherwise fit. Cards with headroom keep the full-speed resident path, so this costs nothing when it isn't needed.\n'on': always stream, even when the model would fit. Useful when sharing the GPU with another program (e.g. a second backend), or to test the streamed path.\n'off': never stream and never auto-evict — load everything and let an oversized model fail with an out-of-VRAM error. For operators who size their own workloads and want a hard failure rather than a slow generation.\nStreaming is typically 5-8x slower than a fully-resident model, but it is what lets large models run on a 12GB card at all.")]
+        public string LowVram = "auto";
+
         [ConfigComment("Path to the compiled kernel directory (the folder CONTAINING 'Ptx' and 'Spirv').\nEmpty = resolve next to the engine assemblies (the extension's own output folder), which is correct for a normal install.")]
         public string KernelDirectory = "";
 
@@ -151,6 +154,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         {
             string requested = Settings?.ComputeBackend?.ToLowerInvariant() ?? "auto";
             WarnIfGpuIdUnhonored(Settings?.GPU_ID);
+            ApplyLowVramSetting(Settings?.LowVram);
 
             // Kernels ship in our extension's own output dir, NOT Swarm's main runtime dir. The Engine's
             // BackendFactory already resolves relative to the engine assemblies (which live beside us), so
@@ -237,6 +241,26 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         }
         Logs.Warning($"[HartsyInference] GPU_ID='{gpuId}' is not honored: HartsyInference.Engine constructs its device on ordinal 0. "
             + "Running on GPU 0. (Engine gap: InferenceEngine takes a backend selector but no device ordinal.)");
+    }
+
+    /// <summary>Publishes the backend's low-VRAM setting to the engine, which reads it from <c>HARTSY_LOWVRAM</c>.</summary>
+    /// <remarks>An environment variable rather than a constructor argument because the engine resolves the policy
+    /// per generation phase deep inside the pipelines, well below the <c>InferenceEngine</c> surface. That makes it
+    /// process-wide: with two HartsyInference backends configured, the last one to START wins for every generation
+    /// after it — the engine re-reads the variable per phase rather than caching a first answer, precisely so a
+    /// backend that initializes late is not silently ignored. Acceptable today because the engine is a single
+    /// in-process instance sharing one device anyway; revisit if per-backend devices land.</remarks>
+    private static void ApplyLowVramSetting(string mode)
+    {
+        string normalized = string.IsNullOrWhiteSpace(mode) ? "auto" : mode.Trim().ToLowerInvariant();
+        if (normalized is not ("auto" or "on" or "off" or "1" or "0" or "true" or "false"))
+        {
+            Logs.Warning($"[HartsyInference] LowVram='{mode}' is not recognized; using 'auto'. Valid: auto, on, off.");
+            normalized = "auto";
+        }
+        Environment.SetEnvironmentVariable("HARTSY_LOWVRAM", normalized);
+        Logs.Info($"[HartsyInference] Low-VRAM handling: {normalized}"
+            + (normalized == "off" ? " (models larger than VRAM will fail rather than stream)." : "."));
     }
 
     // ─────────────────────────────── 2. Load ───────────────────────────────
