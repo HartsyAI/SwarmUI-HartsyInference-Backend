@@ -65,6 +65,7 @@ public static class ModelSupport
         [ModelClassRegistrations.LanceCompatClassId] = new("lance-image", Kind.Image),
         ["lens"] = new("lens", Kind.Image),
         ["krea-2"] = new("krea2", Kind.Image),
+        ["mage-flow"] = new("mage-flow", Kind.Image),
 
         // ── Video (Engine VideoRecipeRegistry family ids; the Wan compat classes are registered verbatim,
         //    and WanVideoRecipe sniffs the checkpoint header to route the VACE / Animate / S2V variants) ──

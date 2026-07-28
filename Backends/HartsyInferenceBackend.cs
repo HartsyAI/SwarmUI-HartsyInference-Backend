@@ -44,7 +44,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         [ConfigComment("Compute backend to use. 'auto' tries CUDA, then CPU.")]
         public string ComputeBackend = "auto";
 
-        [ConfigComment("Which GPU to use, if multiple are available.\nShould be a single number, like '0' (first GPU), '1' (second GPU), etc.\nIgnored for the CPU compute backend.\nNOTE: the current HartsyInference.Engine facade always constructs its device on ordinal 0 — a non-zero value here is logged and ignored until the Engine exposes device selection.")]
+        [ConfigComment("Which GPU to use, if multiple are available.\nShould be a single number, like '0' (first GPU), '1' (second GPU), etc.\nIgnored for the CPU compute backend.")]
         public string GPU_ID = "0";
 
         [ConfigComment("How to handle models that do not fit in VRAM.\n'auto' (default): measure free VRAM and stream weights from system RAM only when the model would not otherwise fit. Cards with headroom keep the full-speed resident path, so this costs nothing when it isn't needed.\n'on': always stream, even when the model would fit. Useful when sharing the GPU with another program (e.g. a second backend), or to test the streamed path.\n'off': never stream and never auto-evict — load everything and let an oversized model fail with an out-of-VRAM error. For operators who size their own workloads and want a hard failure rather than a slow generation.\nStreaming is typically 5-8x slower than a fully-resident model, but it is what lets large models run on a 12GB card at all.")]
@@ -67,6 +67,12 @@ public class HartsyInferenceBackend : AbstractT2IBackend
 
     /// <summary>The Engine facade. Owns the compute backend, every loaded pipeline, and all generation.</summary>
     private InferenceEngine _engine;
+
+    /// <summary>Device used by the model-driven ControlNet annotators (Depth / OpenPose / SoftEdge / …). The Engine
+    /// keeps its own backend internal, so we own a separate one. It is created lazily — only when a ControlNet
+    /// actually needs a model-driven annotator — so Canny-only or ControlNet-free jobs never allocate a device.</summary>
+    private IBackend _preprocessBackend;
+    private readonly object _preprocessBackendLock = new();
 
     /// <summary>Cancellation source for the in-flight generation.</summary>
     private CancellationTokenSource _cancelCts;
@@ -153,7 +159,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         try
         {
             string requested = Settings?.ComputeBackend?.ToLowerInvariant() ?? "auto";
-            WarnIfGpuIdUnhonored(Settings?.GPU_ID);
+            int? deviceOrdinal = ParseGpuId(Settings?.GPU_ID);
             ApplyLowVramSetting(Settings?.LowVram);
 
             // Kernels ship in our extension's own output dir, NOT Swarm's main runtime dir. The Engine's
@@ -167,8 +173,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             string spvDir = BackendFactory.KernelDir(BackendFactory.SpirvDirName);
             AddLoadStatus($"Kernel paths: PTX={ptxDir} (exists={Directory.Exists(ptxDir)}), SPIR-V={spvDir} (exists={Directory.Exists(spvDir)})");
 
-            AddLoadStatus($"Constructing HartsyInference.Engine (compute='{requested}')...");
-            _engine = new InferenceEngine(requested);
+            AddLoadStatus($"Constructing HartsyInference.Engine (compute='{requested}', device={deviceOrdinal?.ToString() ?? "auto"})...");
+            _engine = new InferenceEngine(requested, deviceOrdinal);
             AddLoadStatus($"Engine ready: {_engine.BackendDescription}");
 
             // MaxUsages is what the scheduler checks to decide when to route a request to a different
@@ -200,6 +206,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         _cancelCts = null;
         _engine?.Dispose();
         _engine = null;
+        DisposePreprocessBackend();
         CurrentModelName = null;
         await Task.CompletedTask;
     }
@@ -211,6 +218,9 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             return false;
         }
         _engine.FreeMemory();
+        // The annotator device holds its own weights (Depth-Anything, OpenPose, …); free it too so "free memory"
+        // actually clears everything this backend is holding.
+        DisposePreprocessBackend();
         if (systemRam)
         {
             GC.Collect();
@@ -227,20 +237,22 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         _cancelCts?.Cancel();
     }
 
-    /// <summary>The Engine constructs its device on ordinal 0 only; say so rather than silently ignoring the setting.</summary>
-    private static void WarnIfGpuIdUnhonored(string gpuId)
+    /// <summary>Parses the configured GPU_ID into the device ordinal handed to the Engine. Swarm allows a
+    /// comma-separated list (one backend instance per device); a single Engine drives one device, so the first
+    /// entry wins. Null (blank/unparseable) lets the Engine pick its own default device.</summary>
+    private static int? ParseGpuId(string gpuId)
     {
         if (string.IsNullOrWhiteSpace(gpuId))
         {
-            return;
+            return null;
         }
-        string first = gpuId.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).FirstOrDefault() ?? "0";
-        if (int.TryParse(first, out int ordinal) && ordinal == 0)
+        string first = gpuId.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).FirstOrDefault() ?? "";
+        if (!int.TryParse(first, out int ordinal) || ordinal < 0)
         {
-            return;
+            Logs.Warning($"[HartsyInference] GPU_ID='{gpuId}' is not a valid device ordinal; letting the Engine choose.");
+            return null;
         }
-        Logs.Warning($"[HartsyInference] GPU_ID='{gpuId}' is not honored: HartsyInference.Engine constructs its device on ordinal 0. "
-            + "Running on GPU 0. (Engine gap: InferenceEngine takes a backend selector but no device ordinal.)");
+        return ordinal;
     }
 
     /// <summary>Publishes the backend's low-VRAM setting to the engine, which reads it from <c>HARTSY_LOWVRAM</c>.</summary>
@@ -481,7 +493,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     // key. Params we cannot express at all are refused in IsValidForThisBackend rather than silently dropped.
 
     /// <summary>Maps the Swarm request onto the Engine's <see cref="ImageRequest"/>.</summary>
-    private static ImageRequest BuildImageRequest(T2IParamInput input, ModelSupport.Family family)
+    private ImageRequest BuildImageRequest(T2IParamInput input, ModelSupport.Family family)
     {
         string prompt = input.Get(T2IParamTypes.Prompt) ?? "";
         if (family.Id == "ideogram4" && input.Get(SwarmUIHartsyInference.Ideogram4MagicPromptParam, false))
@@ -596,10 +608,11 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         return entries.Count == 0 ? null : new LoraStack { Entries = entries };
     }
 
-    /// <summary>Maps Swarm's three ControlNet slots onto the Engine's conditioning list. The hint image is passed
-    /// through as-is: annotator preprocessing (Canny/Depth/OpenPose/…) stays a SwarmUI-side concern and is applied
-    /// before the image reaches this param.</summary>
-    private static IReadOnlyList<ControlNetConditioning> BuildControlNets(T2IParamInput input)
+    /// <summary>Maps Swarm's three ControlNet slots onto the Engine's conditioning list, running the matching
+    /// annotator (Canny/Depth/OpenPose/…) over each hint image first. The Engine's contract expects an
+    /// already-preprocessed hint — annotation is deliberately host-side, since the annotators consume SwarmUI
+    /// images and fetch their own weights through Swarm.</summary>
+    private IReadOnlyList<ControlNetConditioning> BuildControlNets(T2IParamInput input)
     {
         T2IParamTypes.ControlNetParamHolder[] holders = T2IParamTypes.Controlnets;
         if (holders is null)
@@ -624,10 +637,16 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 throw new SwarmUserErrorException(
                     $"HartsyInference: ControlNet '{cnModel.Name}' has no control image. Set the ControlNet Image (or an Init Image).");
             }
+            HartsyInference.Diffusion.Adapters.ControlNetMode mode = ControlNetPreprocessing.DetectMode(cnModel.RawFilePath);
+            AddLoadStatus($"ControlNet '{cnModel.Name}' → {mode} preprocessing.");
+            EngineImage annotated = ControlNetPreprocessing.Preprocess(
+                mode, hint,
+                input.Get(T2IParamTypes.Width, 1024), input.Get(T2IParamTypes.Height, 1024),
+                PreprocessBackend, msg => AddLoadStatus(msg));
             layers.Add(new ControlNetConditioning
             {
                 Model = cnModel.RawFilePath,
-                Image = ToEngineImage(hint),
+                Image = annotated,
                 Strength = input.Get(holder.Strength, 1.0),
                 Start = input.Get(holder.Start, 0.0),
                 End = input.Get(holder.End, 1.0),
@@ -843,6 +862,40 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             return fallback;
         }
         return value;
+    }
+
+    /// <summary>Lazily builds the annotator device, matching the backend's configured compute + GPU_ID so hint
+    /// preprocessing runs where generation does. Separate from the Engine's own backend because
+    /// <c>InferenceEngine.Backend</c> is internal; if that is ever exposed, share it instead of allocating a second
+    /// device context.</summary>
+    private IBackend PreprocessBackend()
+    {
+        IBackend existing = _preprocessBackend;
+        if (existing is not null)
+        {
+            return existing;
+        }
+        lock (_preprocessBackendLock)
+        {
+            if (_preprocessBackend is null)
+            {
+                string selector = Settings?.ComputeBackend?.ToLowerInvariant() ?? "auto";
+                int? ordinal = ParseGpuId(Settings?.GPU_ID);
+                AddLoadStatus($"Creating ControlNet annotator device (compute='{selector}', device={ordinal?.ToString() ?? "auto"})...");
+                _preprocessBackend = BackendFactory.Create(selector, ordinal);
+            }
+            return _preprocessBackend;
+        }
+    }
+
+    /// <summary>Releases the annotator device, if one was created.</summary>
+    private void DisposePreprocessBackend()
+    {
+        lock (_preprocessBackendLock)
+        {
+            _preprocessBackend?.Dispose();
+            _preprocessBackend = null;
+        }
     }
 
     /// <summary>A picked model's on-disk path, or null when nothing was picked.</summary>
