@@ -75,14 +75,15 @@
              the alpha.25-alpha.49 history above predates that reset and refers to the old 1.0.0 line.)
              2.0.0-alpha.3 = latest published on nuget.org as of 2026-07-25; predates the same-day
              commit that made TextService.FindMmproj public (see SwarmUI-LLMAssistant's HartsyLocalLLMProvider).
-             Pinned here to 2.0.0-alpha.4 in step with that fix and the other two SwarmUI-Hartsy
-             extensions, ahead of the engine repo's manual publish of that version — restore will 404
-             until that push lands on nuget.org.
+             Pinned here to 2.0.0-alpha.5, ahead of the engine repo's publish of that version — restore
+             will 404 until that push lands on nuget.org, so merge the engine bump FIRST. alpha.5 is the
+             first version carrying InferenceEngine(selector, ordinal), which is what makes the GPU_ID
+             setting real; pinning any earlier version will not compile this extension.
              NEVER pin a "-local" suffix here: those are locally-packed builds that live only on the
              dev machine's nuget.config feed and are NOT on nuget.org, so any downloaded copy of this
              extension fails restore with NU1301 (the "missing local dll"-style error). Always pin an
              EXACT version that appears in the flat-container index above. -->
-        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.4" />
+        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.5" />
     </ItemGroup>
 
     <!-- LOCAL ENGINE: prebuilt DLLs from the HartsyInference Cli bin (its full runtime closure). Referenced

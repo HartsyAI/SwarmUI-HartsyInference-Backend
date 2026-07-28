@@ -187,6 +187,14 @@ context; requires engine ≥ the build noted in the extension bump.)
 A `GPU_ID` list like `0,1` is accepted but only the first ordinal is used — one
 HartsyInference instance drives one GPU. For multi-GPU, add multiple instances.
 
+**Requires engine ≥ `2.0.0-alpha.5`.** Before that version the engine always built its device on ordinal 0
+and `GPU_ID` was logged and ignored, so every instance silently shared one GPU no matter what you set here.
+
+**The ordinal is CUDA's, not `nvidia-smi`'s.** CUDA enumerates fastest-first by default, so on a mixed-GPU
+machine `GPU_ID=0` is the *fastest* card, which need not be `nvidia-smi`'s index 0 (measured on a
+4090 + 3060 box: ordinal 0 is the 4090, while `nvidia-smi` index 0 is the 3060). To confirm which physical
+card an instance got, watch `nvidia-smi` memory while it generates rather than trusting the number.
+
 ## Known limitations
 
 - **VAE decode is slow** when memory is tight (tens of seconds for 1024²) because of

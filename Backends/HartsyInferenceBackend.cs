@@ -44,7 +44,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         [ConfigComment("Compute backend to use. 'auto' tries CUDA, then CPU.")]
         public string ComputeBackend = "auto";
 
-        [ConfigComment("Which GPU to use, if multiple are available.\nShould be a single number, like '0' (first GPU), '1' (second GPU), etc.\nIgnored for the CPU compute backend.")]
+        [ConfigComment("Which GPU to use, if multiple are available.\nShould be a single number, like '0' (first GPU), '1' (second GPU), etc.\nIgnored for the CPU compute backend.\nThis is a CUDA device ordinal, which is NOT necessarily the same order nvidia-smi shows: CUDA enumerates fastest-first by default, so on a mixed-GPU machine '0' is the fastest card. To confirm which physical GPU you got, watch nvidia-smi memory while a generation runs.\nRun one backend per GPU to use several cards at once.")]
         public string GPU_ID = "0";
 
         [ConfigComment("How to handle models that do not fit in VRAM.\n'auto' (default): measure free VRAM and stream weights from system RAM only when the model would not otherwise fit. Cards with headroom keep the full-speed resident path, so this costs nothing when it isn't needed.\n'on': always stream, even when the model would fit. Useful when sharing the GPU with another program (e.g. a second backend), or to test the streamed path.\n'off': never stream and never auto-evict — load everything and let an oversized model fail with an out-of-VRAM error. For operators who size their own workloads and want a hard failure rather than a slow generation.\nStreaming is typically 5-8x slower than a fully-resident model, but it is what lets large models run on a 12GB card at all.")]
@@ -240,6 +240,9 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     /// <summary>Parses the configured GPU_ID into the device ordinal handed to the Engine. Swarm allows a
     /// comma-separated list (one backend instance per device); a single Engine drives one device, so the first
     /// entry wins. Null (blank/unparseable) lets the Engine pick its own default device.</summary>
+    /// <remarks><b>The ordinal is CUDA's, not <c>nvidia-smi</c>'s.</b> CUDA enumerates fastest-first by default, so
+    /// on a mixed-GPU host <c>GPU_ID=0</c> is the fastest card, which need not be <c>nvidia-smi</c>'s index 0.
+    /// Verified on the dev box: ordinal 0 is the RTX 4090 while <c>nvidia-smi</c> index 0 is the RTX 3060.</remarks>
     private static int? ParseGpuId(string gpuId)
     {
         if (string.IsNullOrWhiteSpace(gpuId))
