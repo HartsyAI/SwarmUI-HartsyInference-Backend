@@ -174,7 +174,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             AddLoadStatus($"Kernel paths: PTX={ptxDir} (exists={Directory.Exists(ptxDir)}), SPIR-V={spvDir} (exists={Directory.Exists(spvDir)})");
 
             AddLoadStatus($"Constructing HartsyInference.Engine (compute='{requested}', device={deviceOrdinal?.ToString() ?? "auto"})...");
-            _engine = new InferenceEngine(requested, deviceOrdinal);
+            _engine = deviceOrdinal.HasValue ? new InferenceEngine(requested, deviceOrdinal.Value) : new InferenceEngine(requested);
             AddLoadStatus($"Engine ready: {_engine.BackendDescription}");
 
             // MaxUsages is what the scheduler checks to decide when to route a request to a different
@@ -885,7 +885,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 string selector = Settings?.ComputeBackend?.ToLowerInvariant() ?? "auto";
                 int? ordinal = ParseGpuId(Settings?.GPU_ID);
                 AddLoadStatus($"Creating ControlNet annotator device (compute='{selector}', device={ordinal?.ToString() ?? "auto"})...");
-                _preprocessBackend = BackendFactory.Create(selector, ordinal);
+                // Create takes only a selector; the ordinal rides as a 'cuda:1' suffix (0 composes back to the bare kind).
+                _preprocessBackend = BackendFactory.Create(BackendFactory.WithOrdinal(selector, ordinal ?? 0));
             }
             return _preprocessBackend;
         }
