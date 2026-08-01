@@ -430,6 +430,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         if (input.TryGet(SwarmUIHartsyInference.VideoRestoreModelParam, out string restoreModel)
             && !string.IsNullOrWhiteSpace(restoreModel))
         {
+            // The resident T2V DiT and SeedVR2's VAE peak cannot share 24 GB.
+            _engine.FreeMemory();
             ModelSpec restoreSpec = ModelResolver.Resolve(restoreModel, null, Modality.Restore);
             RestoreRequest restoreRequest = new()
             {

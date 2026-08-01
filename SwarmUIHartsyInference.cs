@@ -268,6 +268,7 @@ public class SwarmUIHartsyInference : Extension
             "Video Restore Target Width",
             "Width component of the restore target AREA (aspect is preserved; this is not an output width).",
             "1280",
+            Min: 256, Max: 4096, Step: 16,
             Toggleable: true,
             Group: VideoRestoreParamGroup,
             FeatureFlag: "hartsyinference"));
@@ -276,6 +277,7 @@ public class SwarmUIHartsyInference : Extension
             "Video Restore Target Height",
             "Height component of the restore target AREA.",
             "720",
+            Min: 256, Max: 4096, Step: 16,
             Toggleable: true,
             Group: VideoRestoreParamGroup,
             FeatureFlag: "hartsyinference"));
@@ -284,6 +286,7 @@ public class SwarmUIHartsyInference : Extension
             "Video Restore Clip Frames",
             "Frames per restore chunk (rounded to the model's (n-1)%4==0 contract). Lower on tight VRAM — fp32 720p-area needs ~5.",
             "5",
+            Min: 1, Max: 121, Step: 4,
             Toggleable: true,
             Group: VideoRestoreParamGroup,
             FeatureFlag: "hartsyinference"));
@@ -292,6 +295,7 @@ public class SwarmUIHartsyInference : Extension
             "Video Restore Overlap",
             "Frame overlap between restore chunks, cross-faded.",
             "1",
+            Min: 0, Max: 16, Step: 1,
             Toggleable: true,
             Group: VideoRestoreParamGroup,
             FeatureFlag: "hartsyinference"));
