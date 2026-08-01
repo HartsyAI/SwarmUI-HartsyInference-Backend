@@ -65,6 +65,14 @@ public class SwarmUIHartsyInference : Extension
     public static T2IRegisteredParam<bool> Ideogram4MagicPromptParam;
     public static T2IRegisteredParam<string> Ideogram4MagicPromptModelParam;
 
+    public static T2IParamGroup VideoRestoreParamGroup;
+    public static T2IRegisteredParam<string> VideoRestoreModelParam;
+    public static T2IRegisteredParam<int> VideoRestoreWidthParam;
+    public static T2IRegisteredParam<int> VideoRestoreHeightParam;
+    public static T2IRegisteredParam<int> VideoRestoreClipFramesParam;
+    public static T2IRegisteredParam<int> VideoRestoreOverlapParam;
+    public static T2IRegisteredParam<double> VideoRestoreStrengthParam;
+
     public override void OnPreInit()
     {
         Logs.Init("HartsyInference extension pre-init");
@@ -240,6 +248,61 @@ public class SwarmUIHartsyInference : Extension
             "",
             Toggleable: true,
             Group: Ideogram4ParamGroup,
+            FeatureFlag: "hartsyinference"));
+
+        // Video Restore (SeedVR2): optional one-step restoration/upscale pass over the generated frames
+        // before muxing. The target is an AREA (aspect preserved by the model's bicubic area-resize) —
+        // SeedVR2 has no scale factor. Enabled by toggling the model param on; all params are Toggleable
+        // for the same feature-flag reason as Ideogram 4 above.
+        VideoRestoreParamGroup = new("Video Restore", Toggles: false, Open: false, IsAdvanced: true);
+
+        VideoRestoreModelParam = T2IParamTypes.Register<string>(new(
+            "Video Restore Model",
+            "Restore/upscale generated video frames with SeedVR2 before muxing (one extra DiT step).\nToggle ON to enable; seedvr2-3b is the catalog default.",
+            "seedvr2-3b",
+            Toggleable: true,
+            Group: VideoRestoreParamGroup,
+            FeatureFlag: "hartsyinference"));
+
+        VideoRestoreWidthParam = T2IParamTypes.Register<int>(new(
+            "Video Restore Target Width",
+            "Width component of the restore target AREA (aspect is preserved; this is not an output width).",
+            "1280",
+            Toggleable: true,
+            Group: VideoRestoreParamGroup,
+            FeatureFlag: "hartsyinference"));
+
+        VideoRestoreHeightParam = T2IParamTypes.Register<int>(new(
+            "Video Restore Target Height",
+            "Height component of the restore target AREA.",
+            "720",
+            Toggleable: true,
+            Group: VideoRestoreParamGroup,
+            FeatureFlag: "hartsyinference"));
+
+        VideoRestoreClipFramesParam = T2IParamTypes.Register<int>(new(
+            "Video Restore Clip Frames",
+            "Frames per restore chunk (rounded to the model's (n-1)%4==0 contract). Lower on tight VRAM — fp32 720p-area needs ~5.",
+            "5",
+            Toggleable: true,
+            Group: VideoRestoreParamGroup,
+            FeatureFlag: "hartsyinference"));
+
+        VideoRestoreOverlapParam = T2IParamTypes.Register<int>(new(
+            "Video Restore Overlap",
+            "Frame overlap between restore chunks, cross-faded.",
+            "1",
+            Toggleable: true,
+            Group: VideoRestoreParamGroup,
+            FeatureFlag: "hartsyinference"));
+
+        VideoRestoreStrengthParam = T2IParamTypes.Register<double>(new(
+            "Video Restore Strength",
+            "Restoration strength 0..1. 1.0 = pure model output; lower keeps the input's low-frequency band (guards oversharpening on clean input).",
+            "1",
+            Min: 0, Max: 1, Step: 0.05,
+            Toggleable: true,
+            Group: VideoRestoreParamGroup,
             FeatureFlag: "hartsyinference"));
 
         // 2. Register the backend type (single type — no _selfstart vs _api split,

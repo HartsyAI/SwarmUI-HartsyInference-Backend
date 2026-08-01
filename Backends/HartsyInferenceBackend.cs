@@ -14,6 +14,7 @@ using SiLogs = HartsyInference.Core.Logging.Logs;
 using HartsyInference.Engine;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Recipes;
+using HartsyInference.Engine.Registry;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
 using EngineImage = HartsyInference.Engine.Requests.ImageData;
@@ -423,6 +424,30 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             {
                 frames.Add(frames[i]);
             }
+        }
+        // Optional SeedVR2 restore pass (Video Restore param group): frames go straight into the engine's
+        // restore service (no container round-trip), replacing the frame list before muxing.
+        if (input.TryGet(SwarmUIHartsyInference.VideoRestoreModelParam, out string restoreModel)
+            && !string.IsNullOrWhiteSpace(restoreModel))
+        {
+            ModelSpec restoreSpec = ModelResolver.Resolve(restoreModel, null, Modality.Restore);
+            RestoreRequest restoreRequest = new()
+            {
+                Frames = [.. frames.Select(f => new ImageData { Rgb = f, Width = width, Height = height })],
+                TargetWidth = input.TryGet(SwarmUIHartsyInference.VideoRestoreWidthParam, out int rw) ? rw : null,
+                TargetHeight = input.TryGet(SwarmUIHartsyInference.VideoRestoreHeightParam, out int rh) ? rh : null,
+                ClipFrames = input.TryGet(SwarmUIHartsyInference.VideoRestoreClipFramesParam, out int rcf) ? rcf : 5,
+                Overlap = input.TryGet(SwarmUIHartsyInference.VideoRestoreOverlapParam, out int rov) ? rov : 1,
+                Strength = input.TryGet(SwarmUIHartsyInference.VideoRestoreStrengthParam, out double rst) ? (float)rst : null,
+            };
+            List<byte[]> restoredFrames = [];
+            await foreach (VideoFrame restoredFrame in _engine.Restore.RestoreAsync(restoreSpec, restoreRequest, progress, cancel))
+            {
+                restoredFrames.Add(restoredFrame.Rgb);
+                width = restoredFrame.Width;
+                height = restoredFrame.Height;
+            }
+            frames = restoredFrames;
         }
         string format = input.Get(T2IParamTypes.VideoFormat, "h264-mp4");
         return VideoOutputEncoder.Encode([.. frames], width, height, request.Fps ?? 25, format, cancel);

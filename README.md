@@ -91,6 +91,22 @@ per-round narratives live in `benchmarks/results/`. The numbers require no
 configuration — the engine's standard performance profile is default-on
 (see [Performance out of the box](#performance-out-of-the-box)).
 
+### Video Restore (SeedVR2) — new in alpha.6
+
+The **Video Restore** param group (advanced, feature-flagged `hartsyinference`) runs ByteDance's
+SeedVR2 one-step restoration over generated video frames before muxing — upscale, deartifact,
+denoise in a single extra DiT pass, in-process (no container round-trip). Toggle **Video Restore
+Model** on (`seedvr2-3b` default; `seedvr2-7b` registered) and optionally set Target Width/Height
+(an AREA — aspect is preserved by the model's bicubic area-resize; there is no scale factor),
+Clip Frames / Overlap (VRAM chunking; fp32 720p-area needs ~5 on 24 GB), and Strength (<1 keeps
+the input's low-frequency band — the oversharpening guard for lightly-degraded input). The engine
+port is parity-verified against the Python reference at SSIM 0.9995; ground-truth behavior is the
+paper's generative profile (repaints detail: LPIPS improves 26–28% while pixel-metrics prefer
+bicubic). Generate small, restore up. Engine-side docs: `docs/Research/SEEDVR2_ARCHITECTURE.md`
+and `docs/Checklists/MODEL_STATUS_VIDEO.md` in the HartsyInference repo. Standalone
+restore-an-existing-file (outside a generation) ships in the engine CLI (`hartsy restore`) and
+HTTP API (`/v1/native/restore`); an AudioLab-style tab for it here is TODO.
+
 ### Cross-cutting features
 
 Working: prompt/negative/CFG/steps/seed, sampler selection (SD1.5/SDXL) + clip

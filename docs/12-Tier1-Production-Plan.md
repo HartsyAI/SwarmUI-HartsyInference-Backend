@@ -417,8 +417,10 @@ mid-loop.
 
 ## Phase E — Upscaling (deferred)
 
-**Blocked upstream.** HartsyInference.Core has no upscaler loader. File the
-issue, defer to Tier 2 timing.
+**Partially unblocked (2026-08-01).** The engine now ships `HartsyInference.Vision/Upscale`
+(Real-ESRGAN, image) and SeedVR2 restoration (`engine.Restore`, video+image — already wired into this
+extension's Video Restore param group). Remaining scope here is the image-side Refiner-Upscale dropdown
+integration only.
 
 ### E.1 Upstream issue to file
 - `Add upscaler loader (RealESRGAN, 4x-Ultrasharp class) to HartsyInference.Core`.

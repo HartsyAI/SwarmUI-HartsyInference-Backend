@@ -142,8 +142,10 @@ touch points so any of them can be picked up cold.
   pre-loads refiner outside the lambda so `AddLoadStatus` surfaces in the UI;
   post-pass skipped when StepSwap was applied. `PostApply` mode unchanged.
   `StepSwapNoisy` deferred (re-noise at swap is a minor variant).
-- [!] **Upscaling (RealESRGAN / latent upscale)** — blocked upstream:
-  HartsyInference.Core has no upscaler loaders.
+- [!] **Upscaling (RealESRGAN / latent upscale)** — STALE CLAIM CORRECTED 2026-08-01: the engine now HAS
+  upscaler/restoration paths — `HartsyInference.Vision/Upscale` (Real-ESRGAN, image) and the SeedVR2
+  restoration modality (`engine.Restore`, video+image; wired into this extension's Video Restore group).
+  Remaining gap is only the image "Refiner Upscale Method" dropdown integration (comfy-owned param).
 
 ## Tier 2 — Sampling / quality
 
