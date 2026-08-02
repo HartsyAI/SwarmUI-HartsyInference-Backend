@@ -20,6 +20,8 @@ namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 /// </summary>
 public static class AnnotatorControlPreprocessors
 {
+    // s_lock guards loads AND forwards: each cached model is one shared instance whose forward is not re-entrant,
+    // so two backends (or two same-backend generations) must not run it concurrently.
     private static readonly object s_lock = new();
     private static HedPreprocessor s_hed;
     private static LineartPreprocessor s_lineart;
@@ -33,7 +35,11 @@ public static class AnnotatorControlPreprocessors
     {
         HedPreprocessor pre = GetHed(log);
         (byte[] rgb, int w, int h) = DecodeAtValid(input, targetWidth, targetHeight, multiple: 16);
-        float[] unit = pre.Process(backend, rgb, w, h, safe: true);
+        float[] unit;
+        lock (s_lock)
+        {
+            unit = pre.Process(backend, rgb, w, h, safe: true);
+        }
         return UnitMapToConditioning(unit, w, h, targetWidth, targetHeight);
     }
 
@@ -42,7 +48,11 @@ public static class AnnotatorControlPreprocessors
     {
         HedPreprocessor pre = GetHed(log);
         (byte[] rgb, int w, int h) = DecodeAtValid(input, targetWidth, targetHeight, multiple: 16);
-        float[] unit = pre.ProcessScribble(backend, rgb, w, h);
+        float[] unit;
+        lock (s_lock)
+        {
+            unit = pre.ProcessScribble(backend, rgb, w, h);
+        }
         return UnitMapToConditioning(unit, w, h, targetWidth, targetHeight);
     }
 
@@ -51,7 +61,11 @@ public static class AnnotatorControlPreprocessors
     {
         LineartPreprocessor pre = GetLineart(log);
         (byte[] rgb, int w, int h) = DecodeAtValid(input, targetWidth, targetHeight, multiple: 4);
-        float[] unit = pre.Process(backend, rgb, w, h);
+        float[] unit;
+        lock (s_lock)
+        {
+            unit = pre.Process(backend, rgb, w, h);
+        }
         return UnitMapToConditioning(unit, w, h, targetWidth, targetHeight);
     }
 
@@ -60,7 +74,11 @@ public static class AnnotatorControlPreprocessors
     {
         NormalBaePreprocessor pre = GetNormal(log);
         (byte[] rgb, int w, int h) = DecodeAtValid(input, targetWidth, targetHeight, multiple: 32);
-        byte[] normalRgb = pre.Process(backend, rgb, w, h);
+        byte[] normalRgb;
+        lock (s_lock)
+        {
+            normalRgb = pre.Process(backend, rgb, w, h);
+        }
         // RGB24 → [1,3,h,w] [0,1], then rescale each channel to the exact target dims.
         float[][] channels = new float[3][];
         for (int c = 0; c < 3; c++)
@@ -91,7 +109,11 @@ public static class AnnotatorControlPreprocessors
         UperNetSegPreprocessor pre = GetSegment(log);
         const int detect = UperNetSegPreprocessor.ReferenceSize;
         (byte[] rgb, int w, int h) = DecodeAtValid(input, detect, detect, multiple: 32);
-        byte[] classMap = pre.Process(backend, rgb, w, h);
+        byte[] classMap;
+        lock (s_lock)
+        {
+            classMap = pre.Process(backend, rgb, w, h);
+        }
         Tensor output = new Tensor(new TensorShape(1, 3, targetHeight, targetWidth), DType.F32);
         float* dp = (float*)output.DataPointer;
         long plane = (long)targetWidth * targetHeight;

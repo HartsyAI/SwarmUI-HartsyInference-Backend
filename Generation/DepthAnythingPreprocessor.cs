@@ -32,35 +32,40 @@ public static class DepthPreprocessor
     {
         if (input is null) throw new ArgumentNullException(nameof(input));
 
-        DepthAnythingV2Model model = GetOrLoad(log);
         using var src = ISImage.Load<Rgb24>(input.RawData);
         int srcW = src.Width;
         int srcH = src.Height;
         byte[] rgb = new byte[srcW * srcH * 3];
         src.CopyPixelDataTo(rgb);
 
-        EngineDepthPreprocessor pre = new EngineDepthPreprocessor();
-        Tensor pixels = pre.Preprocess(rgb, srcW, srcH);
-        Tensor depth;
-        try
-        {
-            depth = model.Forward(backend, pixels);
-        }
-        finally
-        {
-            pixels.Dispose();
-        }
-
         float[] unitDepth;
-        try
+        // The lock spans forward + free, not just the load: the model object is one shared instance, its forward
+        // is not re-entrant, and the per-use FreeWeights below must not race a sibling backend's in-flight forward.
+        lock (s_lock)
         {
-            unitDepth = EngineDepthPreprocessor.PostprocessToUnit(depth, targetWidth, targetHeight, minMaxNormalize: !fluxScaling);
+            DepthAnythingV2Model model = GetOrLoadLocked(log);
+            EngineDepthPreprocessor pre = new EngineDepthPreprocessor();
+            Tensor pixels = pre.Preprocess(rgb, srcW, srcH);
+            Tensor depth;
+            try
+            {
+                depth = model.Forward(backend, pixels);
+            }
+            finally
+            {
+                pixels.Dispose();
+            }
+
+            try
+            {
+                unitDepth = EngineDepthPreprocessor.PostprocessToUnit(depth, targetWidth, targetHeight, minMaxNormalize: !fluxScaling);
+            }
+            finally
+            {
+                depth.Dispose();
+            }
+            backend.FreeWeights(model.EnumerateWeights());
         }
-        finally
-        {
-            depth.Dispose();
-        }
-        backend.FreeWeights(model.EnumerateWeights());
 
         Tensor output = new Tensor(new TensorShape(1, 3, targetHeight, targetWidth), DType.F32);
         float* dp = (float*)output.DataPointer;
@@ -76,23 +81,21 @@ public static class DepthPreprocessor
         return output;
     }
 
-    private static DepthAnythingV2Model GetOrLoad(Action<string> log)
+    /// <summary>Loads (or returns) the shared model. Caller must hold <see cref="s_lock"/>.</summary>
+    private static DepthAnythingV2Model GetOrLoadLocked(Action<string> log)
     {
-        lock (s_lock)
+        if (s_model is not null)
         {
-            if (s_model is not null)
-            {
-                return s_model;
-            }
-            string path = AnnotatorDownloader.EnsureAnnotator(VitlFileName, VitlUrl, VitlHash, log);
-            log($"Loading Depth-Anything-V2 ViT-L: {path}");
-            PytorchPickleLoader loader = new PytorchPickleLoader();
-            loader.Load(path);
-            DepthAnythingV2Model model = new DepthAnythingV2Model(DepthAnythingPreset.Large);
-            model.LoadWeights(loader.GetAllTensors());
-            s_loader = loader;
-            s_model = model;
-            return model;
+            return s_model;
         }
+        string path = AnnotatorDownloader.EnsureAnnotator(VitlFileName, VitlUrl, VitlHash, log);
+        log($"Loading Depth-Anything-V2 ViT-L: {path}");
+        PytorchPickleLoader loader = new PytorchPickleLoader();
+        loader.Load(path);
+        DepthAnythingV2Model model = new DepthAnythingV2Model(DepthAnythingPreset.Large);
+        model.LoadWeights(loader.GetAllTensors());
+        s_loader = loader;
+        s_model = model;
+        return model;
     }
 }

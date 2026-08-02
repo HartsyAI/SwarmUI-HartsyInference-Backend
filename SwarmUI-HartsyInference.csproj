@@ -88,8 +88,14 @@
              This extension REQUIRES that shape — GenerateVideo does not compile against alpha.6.
              alpha.7 was tagged but never landed on nuget.org, so do NOT pin it.
              2.0.0-alpha.8 = alpha.7 plus the audio/video length fit (a short soundtrack was making
-             ffmpeg -shortest drop the clip's final frame). Pin this. -->
-        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.8" />
+             ffmpeg -shortest drop the clip's final frame).
+             2.0.0-alpha.9 = device-gate/multi-GPU placement support: EngineOptions.LowVram (per-backend
+             low-VRAM policy, instead of the process-wide HARTSY_LOWVRAM env var) and EngineOptions.Placement
+             (PlacementConfig, multi-device component/shard placement), the InferenceEngine(selector,
+             ordinal, options) 3-arg constructor, InferenceEngine.ComputeBackend, and BackendFactory.Validate
+             (selector validation) — all already committed on main but never published past alpha.8, which is
+             what broke this extension's build against the published package. Pin this. -->
+        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.9" />
     </ItemGroup>
 
     <!-- LOCAL ENGINE: prebuilt DLLs from the HartsyInference Cli bin (its full runtime closure). Referenced

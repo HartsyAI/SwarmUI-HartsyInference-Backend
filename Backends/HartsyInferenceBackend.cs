@@ -10,6 +10,7 @@ using SwarmUI.Text2Image;
 using SwarmUI.Utils;
 using Hartsy.Extensions.HartsyInferenceBackend.Generation;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.MemoryManagement;
 using SiLogs = HartsyInference.Core.Logging.Logs;
 using HartsyInference.Engine;
 using HartsyInference.Engine.Dispatch;
@@ -51,6 +52,9 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         [ConfigComment("How to handle models that do not fit in VRAM.\n'auto' (default): measure free VRAM and stream weights from system RAM only when the model would not otherwise fit. Cards with headroom keep the full-speed resident path, so this costs nothing when it isn't needed.\n'on': always stream, even when the model would fit. Useful when sharing the GPU with another program (e.g. a second backend), or to test the streamed path.\n'off': never stream and never auto-evict — load everything and let an oversized model fail with an out-of-VRAM error. For operators who size their own workloads and want a hard failure rather than a slow generation.\nStreaming is typically 5-8x slower than a fully-resident model, but it is what lets large models run on a 12GB card at all.")]
         public string LowVram = "auto";
 
+        [ConfigComment("GPU for the text encoders (CLIP / T5 / umT5), separate from the main GPU_ID.\nEmpty (default) = same GPU as everything else.\nSet to another CUDA ordinal (e.g. '1') to keep the multi-GB text encoders off the main card — the biggest VRAM win on video models (Wan's umT5 is T5-XXL-class) and Flux.\nThe number is a CUDA ordinal like GPU_ID (fastest-first, not nvidia-smi order).")]
+        public string TextEncoderGpuId = "";
+
         [ConfigComment("Path to the compiled kernel directory (the folder CONTAINING 'Ptx' and 'Spirv').\nEmpty = resolve next to the engine assemblies (the extension's own output folder), which is correct for a normal install.")]
         public string KernelDirectory = "";
 
@@ -69,10 +73,12 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     /// <summary>The Engine facade. Owns the compute backend, every loaded pipeline, and all generation.</summary>
     private InferenceEngine _engine;
 
-    /// <summary>Device used by the model-driven ControlNet annotators (Depth / OpenPose / SoftEdge / …). The Engine
-    /// keeps its own backend internal, so we own a separate one. It is created lazily — only when a ControlNet
-    /// actually needs a model-driven annotator — so Canny-only or ControlNet-free jobs never allocate a device.</summary>
+    /// <summary>Device used by the model-driven ControlNet annotators (Depth / OpenPose / SoftEdge / …). Normally
+    /// borrowed from the Engine (<c>InferenceEngine.ComputeBackend</c>) — a second backend on the same device would
+    /// collide with the Engine's per-context CUDA state and its disposal would evict the Engine's resident weights.
+    /// Only when no Engine exists is a standalone device created (and then owned + disposed by us).</summary>
     private IBackend _preprocessBackend;
+    private bool _ownsPreprocessBackend;
     private readonly object _preprocessBackendLock = new();
 
     /// <summary>Cancellation source for the in-flight generation.</summary>
@@ -83,6 +89,12 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     /// across a generation, so concurrent execution would collide — this lock makes the over-queue safe by holding
     /// extra dispatched jobs here until the current one finishes.</summary>
     private readonly SemaphoreSlim _genLock = new(1, 1);
+
+    /// <summary>Live backend count per device key ("cuda:0"), to warn when two backends share one GPU.</summary>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> _liveDeviceCounts = new();
+
+    /// <summary>The device key this instance registered in <see cref="_liveDeviceCounts"/>, for Shutdown to release.</summary>
+    private string _registeredDeviceKey;
 
     public override IEnumerable<string> SupportedFeatures
     {
@@ -161,7 +173,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         {
             string requested = Settings?.ComputeBackend?.ToLowerInvariant() ?? "auto";
             int? deviceOrdinal = ParseGpuId(Settings?.GPU_ID);
-            ApplyLowVramSetting(Settings?.LowVram);
+            LowVramMode? lowVram = ParseLowVramSetting(Settings?.LowVram);
 
             // Kernels ship in our extension's own output dir, NOT Swarm's main runtime dir. The Engine's
             // BackendFactory already resolves relative to the engine assemblies (which live beside us), so
@@ -174,9 +186,28 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             string spvDir = BackendFactory.KernelDir(BackendFactory.SpirvDirName);
             AddLoadStatus($"Kernel paths: PTX={ptxDir} (exists={Directory.Exists(ptxDir)}), SPIR-V={spvDir} (exists={Directory.Exists(spvDir)})");
 
+            // Fail HERE (backend shows ERRORED with the reason) instead of on the first generation: the engine
+            // constructs its device lazily, so a bad GPU_ID would otherwise report RUNNING and die mid-request.
+            BackendFactory.Validate(BackendFactory.WithOrdinal(requested, deviceOrdinal ?? 0));
+
+            // Optional split placement: text encoders on their own GPU. Validated eagerly like the main device.
+            int? textEncoderOrdinal = ParseGpuId(Settings?.TextEncoderGpuId);
+            PlacementConfig? placement = null;
+            if (textEncoderOrdinal.HasValue && textEncoderOrdinal != (deviceOrdinal ?? 0))
+            {
+                string teSelector = BackendFactory.WithOrdinal("cuda", textEncoderOrdinal.Value);
+                BackendFactory.Validate(teSelector);
+                placement = new PlacementConfig { TextEncoderDevice = teSelector };
+                AddLoadStatus($"Text encoders placed on {teSelector} (denoiser/VAE stay on GPU {deviceOrdinal ?? 0}).");
+            }
+
             AddLoadStatus($"Constructing HartsyInference.Engine (compute='{requested}', device={deviceOrdinal?.ToString() ?? "auto"})...");
-            _engine = deviceOrdinal.HasValue ? new InferenceEngine(requested, deviceOrdinal.Value) : new InferenceEngine(requested);
+            EngineOptions engineOptions = new EngineOptions { LowVram = lowVram, Placement = placement };
+            _engine = deviceOrdinal.HasValue
+                ? new InferenceEngine(requested, deviceOrdinal.Value, engineOptions)
+                : new InferenceEngine(requested, engineOptions);
             AddLoadStatus($"Engine ready: {_engine.BackendDescription}");
+            RegisterDeviceUsage(requested, deviceOrdinal ?? 0);
 
             // MaxUsages is what the scheduler checks to decide when to route a request to a different
             // backend (BackendHandler: in-use once Usages >= MaxUsages). Mirror ComfyUI's model:
@@ -200,6 +231,36 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         }
     }
 
+    /// <summary>Tracks how many live backends target one device and notes the sharing tradeoffs: co-residency
+    /// means both models must fit in that GPU's VRAM together, and the engine serializes same-device generations
+    /// (per-backend state is fully isolated; concurrent same-GPU execution arrives with the DeviceGate flip).</summary>
+    private void RegisterDeviceUsage(string requested, int ordinal)
+    {
+        try
+        {
+            string kind = BackendFactory.Resolve(BackendFactory.WithOrdinal(requested, ordinal));
+            if (kind != "cuda" && kind != "vulkan")
+            {
+                return;
+            }
+            string key = $"{kind}:{ordinal}";
+            _registeredDeviceKey = key;
+            int live = _liveDeviceCounts.AddOrUpdate(key, 1, (_, n) => n + 1);
+            if (live > 1)
+            {
+                string warning = $"{live} HartsyInference backends now share device {key}. Their models must co-fit " +
+                    "in that GPU's VRAM, and generations on this device run one at a time (the engine serializes " +
+                    "same-GPU work; concurrent same-GPU execution is planned). Use distinct GPU_IDs for parallel throughput.";
+                AddLoadStatus($"WARNING: {warning}");
+                Logs.Warning($"[HartsyInference] {warning}");
+            }
+        }
+        catch (Exception ex)
+        {
+            Logs.Error($"[HartsyInference] Device-usage registration failed (non-fatal): {ex.Message}");
+        }
+    }
+
     public override async Task Shutdown()
     {
         Status = BackendStatus.DISABLED;
@@ -208,6 +269,11 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         _engine?.Dispose();
         _engine = null;
         DisposePreprocessBackend();
+        if (_registeredDeviceKey is not null)
+        {
+            _liveDeviceCounts.AddOrUpdate(_registeredDeviceKey, 0, (_, n) => Math.Max(0, n - 1));
+            _registeredDeviceKey = null;
+        }
         CurrentModelName = null;
         await Task.CompletedTask;
     }
@@ -219,8 +285,9 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             return false;
         }
         _engine.FreeMemory();
-        // The annotator device holds its own weights (Depth-Anything, OpenPose, …); free it too so "free memory"
-        // actually clears everything this backend is holding.
+        // Annotator weights live on the Engine's backend (borrowed), so the engine free above covers them; dropping
+        // the reference here re-borrows a fresh backend next use in case the engine rebuilt its device. A standalone
+        // annotator device (no engine) is disposed outright.
         DisposePreprocessBackend();
         if (systemRam)
         {
@@ -259,24 +326,27 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         return ordinal;
     }
 
-    /// <summary>Publishes the backend's low-VRAM setting to the engine, which reads it from <c>HARTSY_LOWVRAM</c>.</summary>
-    /// <remarks>An environment variable rather than a constructor argument because the engine resolves the policy
-    /// per generation phase deep inside the pipelines, well below the <c>InferenceEngine</c> surface. That makes it
-    /// process-wide: with two HartsyInference backends configured, the last one to START wins for every generation
-    /// after it — the engine re-reads the variable per phase rather than caching a first answer, precisely so a
-    /// backend that initializes late is not silently ignored. Acceptable today because the engine is a single
-    /// in-process instance sharing one device anyway; revisit if per-backend devices land.</remarks>
-    private static void ApplyLowVramSetting(string mode)
+    /// <summary>Maps the backend's low-VRAM setting to the engine's per-engine policy override. Per-engine (not the
+    /// old <c>HARTSY_LOWVRAM</c> env var, which was process-wide last-writer-wins) so two backends on different-size
+    /// cards keep their own policies. Null = auto (engine measures free VRAM per phase).</summary>
+    private static LowVramMode? ParseLowVramSetting(string mode)
     {
         string normalized = string.IsNullOrWhiteSpace(mode) ? "auto" : mode.Trim().ToLowerInvariant();
-        if (normalized is not ("auto" or "on" or "off" or "1" or "0" or "true" or "false"))
+        LowVramMode? parsed = normalized switch
+        {
+            "auto" => null,
+            "on" or "1" or "true" => LowVramMode.ForceOn,
+            "off" or "0" or "false" => LowVramMode.ForceOff,
+            _ => null,
+        };
+        if (parsed is null && normalized != "auto")
         {
             Logs.Warning($"[HartsyInference] LowVram='{mode}' is not recognized; using 'auto'. Valid: auto, on, off.");
             normalized = "auto";
         }
-        Environment.SetEnvironmentVariable("HARTSY_LOWVRAM", normalized);
         Logs.Info($"[HartsyInference] Low-VRAM handling: {normalized}"
-            + (normalized == "off" ? " (models larger than VRAM will fail rather than stream)." : "."));
+            + (parsed == LowVramMode.ForceOff ? " (models larger than VRAM will fail rather than stream)." : "."));
+        return parsed;
     }
 
     // ─────────────────────────────── 2. Load ───────────────────────────────
@@ -912,10 +982,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         return value;
     }
 
-    /// <summary>Lazily builds the annotator device, matching the backend's configured compute + GPU_ID so hint
-    /// preprocessing runs where generation does. Separate from the Engine's own backend because
-    /// <c>InferenceEngine.Backend</c> is internal; if that is ever exposed, share it instead of allocating a second
-    /// device context.</summary>
+    /// <summary>The annotator device: the Engine's own backend when available (same device, shared caches, no second
+    /// CUDA context), else a lazily created standalone device that we own.</summary>
     private IBackend PreprocessBackend()
     {
         IBackend existing = _preprocessBackend;
@@ -927,23 +995,38 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         {
             if (_preprocessBackend is null)
             {
-                string selector = Settings?.ComputeBackend?.ToLowerInvariant() ?? "auto";
-                int? ordinal = ParseGpuId(Settings?.GPU_ID);
-                AddLoadStatus($"Creating ControlNet annotator device (compute='{selector}', device={ordinal?.ToString() ?? "auto"})...");
-                // Create takes only a selector; the ordinal rides as a 'cuda:1' suffix (0 composes back to the bare kind).
-                _preprocessBackend = BackendFactory.Create(BackendFactory.WithOrdinal(selector, ordinal ?? 0));
+                InferenceEngine engine = _engine;
+                if (engine is not null)
+                {
+                    _preprocessBackend = engine.ComputeBackend;
+                    _ownsPreprocessBackend = false;
+                }
+                else
+                {
+                    string selector = Settings?.ComputeBackend?.ToLowerInvariant() ?? "auto";
+                    int? ordinal = ParseGpuId(Settings?.GPU_ID);
+                    AddLoadStatus($"Creating ControlNet annotator device (compute='{selector}', device={ordinal?.ToString() ?? "auto"})...");
+                    // Create takes only a selector; the ordinal rides as a 'cuda:1' suffix (0 composes back to the bare kind).
+                    _preprocessBackend = BackendFactory.Create(BackendFactory.WithOrdinal(selector, ordinal ?? 0));
+                    _ownsPreprocessBackend = true;
+                }
             }
             return _preprocessBackend;
         }
     }
 
-    /// <summary>Releases the annotator device, if one was created.</summary>
+    /// <summary>Drops the annotator device reference; disposes it only when it was standalone (a borrowed Engine
+    /// backend must never be disposed here — that would evict the Engine's resident weights mid-lifecycle).</summary>
     private void DisposePreprocessBackend()
     {
         lock (_preprocessBackendLock)
         {
-            _preprocessBackend?.Dispose();
+            if (_ownsPreprocessBackend)
+            {
+                _preprocessBackend?.Dispose();
+            }
             _preprocessBackend = null;
+            _ownsPreprocessBackend = false;
         }
     }
 

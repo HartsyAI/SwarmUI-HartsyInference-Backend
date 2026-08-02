@@ -1,4 +1,5 @@
 using System.IO;
+using System.Runtime.CompilerServices;
 using SixLabors.ImageSharp.PixelFormats;
 using SwarmUI.Core;
 using SwarmUI.Text2Image;
@@ -20,35 +21,34 @@ public static class OpenPoseControlPreprocessor
 {
     private const string PoseWeightsFile = "yolo11n-pose-folded.safetensors";
 
-    private static readonly object s_lock = new();
-    private static OpenPosePreprocessor s_preprocessor;
+    /// <summary>Per-backend preprocessor instances: <see cref="OpenPosePreprocessor"/> binds its backend at
+    /// construction, so a single static instance would run every caller on whichever GPU touched it first.
+    /// Weak keys let a disposed backend's entry die with it.</summary>
+    private static readonly ConditionalWeakTable<IBackend, Entry> s_perBackend = new();
 
     /// <summary>Renders the OpenPose skeleton map for <paramref name="input"/> at the generation resolution.</summary>
     public static Tensor Process(Image input, int targetWidth, int targetHeight, IBackend backend, Action<string> log)
     {
         if (input is null) throw new ArgumentNullException(nameof(input));
+        if (backend is null) throw new ArgumentNullException(nameof(backend));
 
-        OpenPosePreprocessor pre = GetOrLoad(backend, log);
-        using var src = ISImage.Load<Rgb24>(input.RawData);
-        byte[] rgb = new byte[src.Width * src.Height * 3];
-        src.CopyPixelDataTo(rgb);
-        Tensor result = pre.Process(rgb, src.Width, src.Height, targetWidth, targetHeight);
-        log($"OpenPose skeleton rendered at {targetWidth}x{targetHeight} (source {src.Width}x{src.Height}).");
-        return result;
-    }
-
-    private static OpenPosePreprocessor GetOrLoad(IBackend backend, Action<string> log)
-    {
-        lock (s_lock)
+        Entry entry = s_perBackend.GetOrCreateValue(backend);
+        // One lock spanning load + forward: the pose model is not safe for concurrent forwards, and the load
+        // must not race a sibling generation on the same backend.
+        lock (entry.RunLock)
         {
-            if (s_preprocessor is not null)
+            if (entry.Preprocessor is null)
             {
-                return s_preprocessor;
+                string path = ResolvePoseWeights();
+                log($"Loading YOLO11n-pose for OpenPose ControlNet preprocessing: {path}");
+                entry.Preprocessor = new OpenPosePreprocessor(backend, path);
             }
-            string path = ResolvePoseWeights();
-            log($"Loading YOLO11n-pose for OpenPose ControlNet preprocessing: {path}");
-            s_preprocessor = new OpenPosePreprocessor(backend, path);
-            return s_preprocessor;
+            using var src = ISImage.Load<Rgb24>(input.RawData);
+            byte[] rgb = new byte[src.Width * src.Height * 3];
+            src.CopyPixelDataTo(rgb);
+            Tensor result = entry.Preprocessor.Process(rgb, src.Width, src.Height, targetWidth, targetHeight);
+            log($"OpenPose skeleton rendered at {targetWidth}x{targetHeight} (source {src.Width}x{src.Height}).");
+            return result;
         }
     }
 
@@ -67,5 +67,12 @@ public static class OpenPoseControlPreprocessor
                 + "Convert Ultralytics 'yolo11n-pose.pt' with tests/python-reference/convert_yolov8_pt_to_safetensors.py.");
         }
         return path;
+    }
+
+    /// <summary>Per-backend cached preprocessor plus its run lock.</summary>
+    private sealed class Entry
+    {
+        public readonly object RunLock = new();
+        public OpenPosePreprocessor Preprocessor;
     }
 }
