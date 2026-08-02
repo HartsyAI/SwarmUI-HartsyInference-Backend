@@ -82,8 +82,14 @@
              NEVER pin a "-local" suffix here: those are locally-packed builds that live only on the
              dev machine's nuget.config feed and are NOT on nuget.org, so any downloaded copy of this
              extension fails restore with NU1301 (the "missing local dll"-style error). Always pin an
-             EXACT version that appears in the flat-container index above. -->
-        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.6" />
+             EXACT version that appears in the flat-container index above.
+             2.0.0-alpha.7 = the generated-audio return path: IVideoService.GenerateAsync returns
+             VideoGenerationResult (frames + AudioBuffer) instead of IAsyncEnumerable&lt;VideoFrame&gt;.
+             This extension REQUIRES that shape — GenerateVideo does not compile against alpha.6.
+             alpha.7 was tagged but never landed on nuget.org, so do NOT pin it.
+             2.0.0-alpha.8 = alpha.7 plus the audio/video length fit (a short soundtrack was making
+             ffmpeg -shortest drop the clip's final frame). Pin this. -->
+        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.8" />
     </ItemGroup>
 
     <!-- LOCAL ENGINE: prebuilt DLLs from the HartsyInference Cli bin (its full runtime closure). Referenced

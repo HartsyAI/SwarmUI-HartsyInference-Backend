@@ -406,14 +406,16 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     private async Task<Image> GenerateVideo(ModelSpec spec, T2IParamInput input, IProgress<StepPreview> progress, CancellationToken cancel)
     {
         VideoRequest request = BuildVideoRequest(input);
+        VideoGenerationResult generated = await _engine.Video.GenerateAsync(spec, request, progress, cancel);
         List<byte[]> frames = [];
         int width = 0, height = 0;
-        await foreach (VideoFrame frame in _engine.Video.GenerateAsync(spec, request, progress, cancel))
+        foreach (VideoFrame frame in generated.Frames)
         {
             frames.Add(frame.Rgb);
             width = frame.Width;
             height = frame.Height;
         }
+        VideoOutputEncoder.AudioTrack audio = ToAudioTrack(generated.Audio);
         if (frames.Count == 0)
         {
             throw new InvalidOperationException("HartsyInference: the video pipeline produced no frames.");
@@ -452,7 +454,23 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             frames = restoredFrames;
         }
         string format = input.Get(T2IParamTypes.VideoFormat, "h264-mp4");
-        return VideoOutputEncoder.Encode([.. frames], width, height, request.Fps ?? 25, format, cancel);
+        if (audio is not null && !VideoOutputEncoder.FormatSupportsAudio(format))
+        {
+            Logs.Warning($"[HartsyInference] Video format '{format}' cannot carry audio; the {audio.SampleRate} Hz track is not muxed.");
+            audio = null;
+        }
+        return VideoOutputEncoder.Encode([.. frames], width, height, request.Fps ?? 25, format, cancel, audio);
+    }
+
+    /// <summary>Adapts the Engine's planar <see cref="AudioBuffer"/> onto the encoder's stereo mux track.</summary>
+    private static VideoOutputEncoder.AudioTrack ToAudioTrack(AudioBuffer audio)
+    {
+        if (audio is null || audio.IsEmpty)
+        {
+            return null;
+        }
+        (float[] left, float[] right) = audio.ToStereo();
+        return new VideoOutputEncoder.AudioTrack { Left = left, Right = right, SampleRate = audio.SampleRate };
     }
 
     /// <summary>Runs a music generation; the Engine returns an encoded WAV container, which Swarm carries as an
