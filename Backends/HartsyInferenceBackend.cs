@@ -55,6 +55,9 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         [ConfigComment("GPU for the text encoders (CLIP / T5 / umT5), separate from the main GPU_ID.\nEmpty (default) = same GPU as everything else.\nSet to another CUDA ordinal (e.g. '1') to keep the multi-GB text encoders off the main card — the biggest VRAM win on video models (Wan's umT5 is T5-XXL-class) and Flux.\nThe number is a CUDA ordinal like GPU_ID (fastest-first, not nvidia-smi order).")]
         public string TextEncoderGpuId = "";
 
+        [ConfigComment("Second GPU to run CFG's negative-prompt branch on, concurrent with the positive branch on the main GPU_ID — a latency win (not a VRAM win) when the denoiser fits on BOTH cards, since the weights are REPLICATED, not split.\nEmpty (default) = off; CFG runs sequentially on GPU_ID as usual.\nSet to another CUDA ordinal (e.g. '1') to enable it. Currently wired for Wan video (T2V/TI2V, single-expert checkpoints only — Wan2.2 A14B MoE checkpoints fall back to sequential automatically).\nThe number is a CUDA ordinal like GPU_ID (fastest-first, not nvidia-smi order).")]
+        public string CfgParallelGpuId = "";
+
         [ConfigComment("Path to the compiled kernel directory (the folder CONTAINING 'Ptx' and 'Spirv').\nEmpty = resolve next to the engine assemblies (the extension's own output folder), which is correct for a normal install.")]
         public string KernelDirectory = "";
 
@@ -193,12 +196,44 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             // Optional split placement: text encoders on their own GPU. Validated eagerly like the main device.
             int? textEncoderOrdinal = ParseGpuId(Settings?.TextEncoderGpuId);
             PlacementConfig? placement = null;
+            string teSelector = null;
             if (textEncoderOrdinal.HasValue && textEncoderOrdinal != (deviceOrdinal ?? 0))
             {
-                string teSelector = BackendFactory.WithOrdinal("cuda", textEncoderOrdinal.Value);
+                teSelector = BackendFactory.WithOrdinal("cuda", textEncoderOrdinal.Value);
                 BackendFactory.Validate(teSelector);
-                placement = new PlacementConfig { TextEncoderDevice = teSelector };
                 AddLoadStatus($"Text encoders placed on {teSelector} (denoiser/VAE stay on GPU {deviceOrdinal ?? 0}).");
+            }
+
+            // Optional CFG-branch parallelism: uncond on a second GPU, concurrent with cond on GPU_ID. Validated
+            // eagerly like the main device; a second backend is constructed lazily by the Engine on first use.
+            int? cfgParallelOrdinal = ParseGpuId(Settings?.CfgParallelGpuId);
+            string cfgParallelSelector = null;
+            if (cfgParallelOrdinal.HasValue && cfgParallelOrdinal != (deviceOrdinal ?? 0))
+            {
+                cfgParallelSelector = BackendFactory.WithOrdinal("cuda", cfgParallelOrdinal.Value);
+                BackendFactory.Validate(cfgParallelSelector);
+                AddLoadStatus($"CFG uncond branch placed on {cfgParallelSelector}, concurrent with cond on GPU {deviceOrdinal ?? 0}.");
+            }
+
+            if (teSelector is not null || cfgParallelSelector is not null)
+            {
+                placement = new PlacementConfig { TextEncoderDevice = teSelector, CfgParallelDevice = cfgParallelSelector };
+            }
+
+            // 'auto' silently degrades to CPU when CUDA can't load, and the CPU kernels are F32-only: fp8/bf16
+            // checkpoint weights read past the end of their allocation, corrupting the heap and aborting the
+            // process. Refuse to come up rather than serve a backend that cannot generate safely.
+            if (BackendFactory.Resolve(requested) == "cpu" && BackendFactory.Kind(requested) != "cpu")
+            {
+                string why = BackendFactory.CudaUnavailableReason ?? "no reason reported";
+                Status = BackendStatus.ERRORED;
+                string msg = $"CUDA is unavailable, so compute='{requested}' resolved to CPU — refusing to start. "
+                    + $"Reason: {why} "
+                    + "The CPU backend cannot run fp8/bf16 image models (it is F32-only and will corrupt memory). "
+                    + "Fix the GPU/driver, or set this backend's ComputeBackend to 'cpu' explicitly to override.";
+                AddLoadStatus(msg);
+                Logs.Error($"[HartsyInference] Backend #{BackendData?.ID} refusing CPU fallback: {msg}");
+                return;
             }
 
             AddLoadStatus($"Constructing HartsyInference.Engine (compute='{requested}', device={deviceOrdinal?.ToString() ?? "auto"})...");
