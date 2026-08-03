@@ -78,6 +78,9 @@ public static class ModelSupport
         ["lightricks-ltx-video"] = new("ltx-video", Kind.Video),
         ["lightricks-ltx-video-2"] = new("ltx-video-2", Kind.Video),
         [ModelClassRegistrations.LanceVideoCompatClassId] = new("lance-video", Kind.Video),
+        // Core owns the minimax-h3 compat class (T2IModelClassSorter, "MiniMax H3 support" #1469) and shares it
+        // with the video/audio VAE classes, exactly as LTX-2 does — this maps it, it must not re-register it.
+        ["minimax-h3"] = new("minimax-h3", Kind.Video),
 
         // ── Music (Engine MusicCatalog descriptor ids) ──
         ["ace-step-1_5"] = new("acestep", Kind.Music),

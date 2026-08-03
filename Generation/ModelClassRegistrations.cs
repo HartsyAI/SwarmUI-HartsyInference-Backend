@@ -1,3 +1,4 @@
+using System;
 using System.IO;
 using System.Linq;
 using FreneticUtilities.FreneticExtensions;
@@ -47,8 +48,9 @@ public static class ModelClassRegistrations
     /// <c>["mage-flow"]</c> row in <see cref="ModelSupport"/> and the engine recipe family id.</summary>
     public const string MageFlowCompatClassId = "mage-flow";
 
-    /// <summary>Registers every extension-owned model class. Idempotent per process only in the sense that Swarm's
-    /// sorter overwrites by ID — call once, at pre-init.</summary>
+    /// <summary>Registers every extension-owned model class. Call EXACTLY once, at pre-init, and only for classes
+    /// Swarm core does not already define: <c>T2IModelClassSorter.Register</c>/<c>RegisterCompat</c> are backed by
+    /// <c>Dictionary.Add</c>, so re-registering an existing ID throws rather than overwriting.</summary>
     public static void RegisterAll()
     {
         RegisterAceStepV1();

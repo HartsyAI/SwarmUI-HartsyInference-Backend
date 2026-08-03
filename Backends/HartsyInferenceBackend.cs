@@ -58,6 +58,9 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         [ConfigComment("Second GPU to run CFG's negative-prompt branch on, concurrent with the positive branch on the main GPU_ID — a latency win (not a VRAM win) when the denoiser fits on BOTH cards, since the weights are REPLICATED, not split.\nEmpty (default) = off; CFG runs sequentially on GPU_ID as usual.\nSet to another CUDA ordinal (e.g. '1') to enable it. Currently wired for Wan video (T2V/TI2V, single-expert checkpoints only — Wan2.2 A14B MoE checkpoints fall back to sequential automatically).\nThe number is a CUDA ordinal like GPU_ID (fastest-first, not nvidia-smi order).")]
         public string CfgParallelGpuId = "";
 
+        [ConfigComment("Second GPU to pool VRAM with for large DiTs that don't fit on GPU_ID alone (experimental; currently wired for Krea 2 image generation only) — the denoiser's block loop is SPLIT across both cards (not replicated), so this is a VRAM win, not a latency win (sequential pipeline split, same per-step speed as one card).\nEmpty (default) = off.\nSet to another CUDA ordinal (e.g. '1') to enable it. Cannot be combined with CfgParallelGpuId — they are two different ways to use a second GPU for the same model (VRAM pooling vs weight replication for latency) and were not designed to compose; the backend will fail to start if both are set.\nNote this also feeds the same placement list LLM text generation uses for layer-split placement, so enabling it may also change where text models place their layers.\nThe number is a CUDA ordinal like GPU_ID (fastest-first, not nvidia-smi order).")]
+        public string DitShardGpuId = "";
+
         [ConfigComment("Path to the compiled kernel directory (the folder CONTAINING 'Ptx' and 'Spirv').\nEmpty = resolve next to the engine assemblies (the extension's own output folder), which is correct for a normal install.")]
         public string KernelDirectory = "";
 
@@ -215,9 +218,33 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 AddLoadStatus($"CFG uncond branch placed on {cfgParallelSelector}, concurrent with cond on GPU {deviceOrdinal ?? 0}.");
             }
 
-            if (teSelector is not null || cfgParallelSelector is not null)
+            // Optional Phase 8 DiT sharding: a large DiT's block loop split across two GPUs to pool VRAM (not a
+            // latency win — sequential pipeline split). Mutually exclusive with CfgParallelGpuId; the Engine
+            // rejects a PlacementConfig with both set (InferenceEngine ctor → PlacementPlanner.ValidatePlacement),
+            // which surfaces here as this method's outer catch setting Status = ERRORED with the reason.
+            int? ditShardOrdinal = ParseGpuId(Settings?.DitShardGpuId);
+            string ditShardSelector = null;
+            bool enableDitSharding = false;
+            if (ditShardOrdinal.HasValue && ditShardOrdinal != (deviceOrdinal ?? 0))
             {
-                placement = new PlacementConfig { TextEncoderDevice = teSelector, CfgParallelDevice = cfgParallelSelector };
+                ditShardSelector = BackendFactory.WithOrdinal("cuda", ditShardOrdinal.Value);
+                BackendFactory.Validate(ditShardSelector);
+                enableDitSharding = true;
+                AddLoadStatus($"DiT sharding enabled: denoiser block loop split across GPU {deviceOrdinal ?? 0} and " +
+                    $"{ditShardSelector} (VRAM pooling, not a latency win).");
+            }
+
+            if (teSelector is not null || cfgParallelSelector is not null || enableDitSharding)
+            {
+                placement = new PlacementConfig
+                {
+                    TextEncoderDevice = teSelector,
+                    CfgParallelDevice = cfgParallelSelector,
+                    ShardDevices = enableDitSharding
+                        ? new[] { BackendFactory.WithOrdinal(requested, deviceOrdinal ?? 0), ditShardSelector }
+                        : Array.Empty<string>(),
+                    EnableDitSharding = enableDitSharding,
+                };
             }
 
             // 'auto' silently degrades to CPU when CUDA can't load, and the CPU kernels are F32-only: fp8/bf16
@@ -225,7 +252,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             // process. Refuse to come up rather than serve a backend that cannot generate safely.
             if (BackendFactory.Resolve(requested) == "cpu" && BackendFactory.Kind(requested) != "cpu")
             {
-                string why = BackendFactory.CudaUnavailableReason ?? "no reason reported";
+                string why = CudaUnavailableReason() ?? "no reason reported";
                 Status = BackendStatus.ERRORED;
                 string msg = $"CUDA is unavailable, so compute='{requested}' resolved to CPU — refusing to start. "
                     + $"Reason: {why} "
@@ -339,6 +366,13 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     {
         _cancelCts?.Cancel();
     }
+
+    /// <summary>Why the Engine could not use CUDA, or null when that Engine build does not report it.</summary>
+    // Reflection, not a direct reference: Swarm's own extension rebuild never passes UseLocalHartsy, so a
+    // compile-time dependency on this property silently drops both image backends when the git hash changes.
+    private static string CudaUnavailableReason()
+        => typeof(BackendFactory).GetProperty("CudaUnavailableReason", BindingFlags.Public | BindingFlags.Static)
+            ?.GetValue(null) as string;
 
     /// <summary>Parses the configured GPU_ID into the device ordinal handed to the Engine. Swarm allows a
     /// comma-separated list (one backend instance per device); a single Engine drives one device, so the first

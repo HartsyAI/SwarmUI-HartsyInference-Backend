@@ -94,8 +94,14 @@
              (PlacementConfig, multi-device component/shard placement), the InferenceEngine(selector,
              ordinal, options) 3-arg constructor, InferenceEngine.ComputeBackend, and BackendFactory.Validate
              (selector validation) — all already committed on main but never published past alpha.8, which is
-             what broke this extension's build against the published package. Pin this. -->
-        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.9" />
+             what broke this extension's build against the published package.
+             2.0.0-alpha.10 = AudioModelCache is now category-aware (tts/stt/music/clone/fx/misc) and defaults
+             its cache root to {HARTSYINFERENCE_MODELS}/audio instead of an independent ~/.cache/hartsyinference
+             tree, so audio downloads land in the same Models/ folder as everything else instead of a separate
+             flat cache — part of the Models-folder consolidation (see hartsy-multigpu-overhaul memory / the
+             2026-08-03 migration). Pinned here ahead of publish, same as the alpha.5 precedent above — restore
+             will 404 until the engine repo's commit pushes and publish-nuget.yml lands it on nuget.org. -->
+        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.10" />
     </ItemGroup>
 
     <!-- LOCAL ENGINE: prebuilt DLLs from the HartsyInference Cli bin (its full runtime closure). Referenced
