@@ -44,10 +44,6 @@ public static class ModelClassRegistrations
     /// <summary>F-Lite compat + model class ID.</summary>
     public const string FLiteCompatClassId = "f-lite";
 
-    /// <summary>Compat class id for Microsoft Mage-Flow (shared by the base T2I and Edit-Turbo variants) — matches the
-    /// <c>["mage-flow"]</c> row in <see cref="ModelSupport"/> and the engine recipe family id.</summary>
-    public const string MageFlowCompatClassId = "mage-flow";
-
     /// <summary>Registers every extension-owned model class. Call EXACTLY once, at pre-init, and only for classes
     /// Swarm core does not already define: <c>T2IModelClassSorter.Register</c>/<c>RegisterCompat</c> are backed by
     /// <c>Dictionary.Add</c>, so re-registering an existing ID throws rather than overwriting.</summary>
@@ -58,41 +54,8 @@ public static class ModelClassRegistrations
         RegisterMusicGen();
         RegisterYue();
         RegisterFLite();
-        RegisterMageFlow();
-    }
-
-    /// <summary>Microsoft Mage-Flow (4B NR-MMDiT). Two model classes share one compat class: the base T2I checkpoint
-    /// and the Edit-Turbo variant. Detected by the diffusers MMDiT keys (<c>img_in</c> + a dual-stream text-attn
-    /// projection <c>transformer_blocks.N.attn.add_q_proj</c>) — SwarmUI core doesn't classify Mage-Flow. Sampling
-    /// defaults (30/CFG5, Turbo 4/CFG1) and edit support come from the engine recipe; only detection + resolution
-    /// live here. The Edit variant shares the compat class so the extension's single <c>mage-flow</c> family covers
-    /// both, and the edit reference rides in as the Init Image (engine recipe declares <c>ImageFeatures.Img2Img</c>).</summary>
-    private static void RegisterMageFlow()
-    {
-        T2IModelCompatClass compat = T2IModelClassSorter.RegisterCompat(new() { ID = MageFlowCompatClassId, ShortCode = "MageFlow" });
-        static bool IsMageFlow(JObject header) =>
-            header is not null && header.ContainsKey("img_in.weight")
-            && header.Properties().Any(p => p.Name.Contains(".attn.add_q_proj."));
-        T2IModelClassSorter.Register(new T2IModelClass
-        {
-            ID = "mage-flow-t2i",
-            CompatClass = compat,
-            Name = "Mage-Flow (T2I)",
-            StandardWidth = 1024,
-            StandardHeight = 1024,
-            IsThisModelOfClass = (model, header) => IsMageFlow(header),
-        });
-        T2IModelClassSorter.Register(new T2IModelClass
-        {
-            ID = "mage-flow-edit-turbo",
-            CompatClass = compat,
-            Name = "Mage-Flow-Edit-Turbo",
-            StandardWidth = 1024,
-            StandardHeight = 1024,
-            // Same MMDiT backbone; the filename marks the edit/turbo checkpoint (the engine recipe auto-detects it too).
-            IsThisModelOfClass = (model, header) => IsMageFlow(header)
-                && (model.Name.Contains("edit", StringComparison.OrdinalIgnoreCase) || model.Name.Contains("turbo", StringComparison.OrdinalIgnoreCase)),
-        });
+        // Mage-Flow: core registers the compat class and model class itself, and its class carries this same
+        // compat id, so checkpoints it classifies already land on the ModelSupport row. Nothing to add here.
     }
 
     /// <summary>ACE-Step v1: core only registers the v1.5 class, so v1 checkpoints would otherwise be unclassified.

@@ -123,7 +123,9 @@ Fill / Canny / Depth / Redux (all verified e2e 07-16/17), **GGUF Flux transforme
 Wan/LTX video with FPS/format/boomerang/trim, **Wan VACE control-video** (pose/depth/edge
 clip → guided video), **Wan Animate** (driving video → character animation), **Wan S2V**
 (speech audio → talking video), ACE-Step music, TAESD or latent2rgb
-live previews, mid-gen cancel, FreeMemory, multi-GPU via one backend per GPU,
+live previews, mid-gen cancel, FreeMemory, **multi-GPU** (one backend per GPU for parallel
+generations, PLUS single-model sharding/placement across cards — see
+[Multi-GPU: sharding & placement](#multi-gpu-sharding--placement)),
 **admin WebAPI** (probe-model / list-pipelines / device-info / clear-cache).
 
 Not yet — needs upstream HartsyInference engine work first (Category B): hires-fix
@@ -200,8 +202,29 @@ cross-backend hazard — a process-global tensor-finalizer cleanup queue that le
 backend's thread run another's cleanup — was fixed by partitioning that queue per CUDA
 context; requires engine ≥ the build noted in the extension bump.)
 
-A `GPU_ID` list like `0,1` is accepted but only the first ordinal is used — one
-HartsyInference instance drives one GPU. For multi-GPU, add multiple instances.
+A `GPU_ID` list like `0,1` is accepted but only the first ordinal is used as the PRIMARY —
+one backend instance per GPU is still the way to run parallel independent generations.
+To make **one model span two GPUs** (VRAM pooled) or place its components across cards,
+use the per-backend placement settings below instead of a second instance.
+
+### Multi-GPU: sharding & placement
+
+One backend can drive a second GPU for a single model. All values are CUDA ordinals
+(fastest-first, like `GPU_ID`). Everything is opt-in; empty = single-GPU behavior.
+
+| Setting | What it does | Win |
+|---|---|---|
+| `DitShardGpuId` | Splits the denoiser's block loop across `GPU_ID` + this card — weights **pooled**, for DiTs that don't fit one card (verified: Krea 2, Qwen-Image 20B, Flux.1 plain, MiniMax-H3 fp8; Chroma/HunyuanImage wired). Also feeds the LLM/audio-LM shard list. | VRAM |
+| `LmShardGpuId` | Layer-splits large LANGUAGE models only (LLMAssistant text models; AudioLab's YuE 7B Stage-1, which then runs **un-quantized bf16** pooled instead of Q4_K — override with `HARTSY_AUDIO_LM_QUANT=q4k\|q8\|off`). Redundant if `DitShardGpuId` is set. | VRAM → quality |
+| `TextEncoderGpuId` | CLIP / T5 / umT5 on this card — the biggest win on video models (Wan TI2V-5B measured 43.7 s → 32.7 s). | VRAM + speed |
+| `VaeGpuId` | VAE encode/decode on this card. | VRAM |
+| `CfgParallelGpuId` | Negative CFG branch runs **concurrently** on this card (weights REPLICATED — needs the model to fit both; falls back to sequential observably via the `[CfgParallel]` log line). Mutually exclusive with `DitShardGpuId`. | Speed (~1.8-1.9×/step) |
+
+Honest framing: sharding **pools VRAM, it does not add speed** (sequential pipeline split —
+per-step time is the same or a few % slower from the boundary copies; step-graphs are disabled
+for the sharded model). Works over plain PCIe — no NVLink/P2P needed. Full guide with mechanics
+and limits: the engine repo's
+[`docs/MULTI_GPU.md`](https://github.com/HartsyAI/HartsyInference/blob/main/docs/MULTI_GPU.md).
 
 **Requires engine ≥ `2.0.0-alpha.5`.** Before that version the engine always built its device on ordinal 0
 and `GPU_ID` was logged and ignored, so every instance silently shared one GPU no matter what you set here.
