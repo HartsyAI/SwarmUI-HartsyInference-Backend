@@ -55,11 +55,17 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         [ConfigComment("GPU for the text encoders (CLIP / T5 / umT5), separate from the main GPU_ID.\nEmpty (default) = same GPU as everything else.\nSet to another CUDA ordinal (e.g. '1') to keep the multi-GB text encoders off the main card — the biggest VRAM win on video models (Wan's umT5 is T5-XXL-class) and Flux.\nThe number is a CUDA ordinal like GPU_ID (fastest-first, not nvidia-smi order).")]
         public string TextEncoderGpuId = "";
 
-        [ConfigComment("Second GPU to run CFG's negative-prompt branch on, concurrent with the positive branch on the main GPU_ID — a latency win (not a VRAM win) when the denoiser fits on BOTH cards, since the weights are REPLICATED, not split.\nEmpty (default) = off; CFG runs sequentially on GPU_ID as usual.\nSet to another CUDA ordinal (e.g. '1') to enable it. Currently wired for Wan video (T2V/TI2V, single-expert checkpoints only — Wan2.2 A14B MoE checkpoints fall back to sequential automatically).\nThe number is a CUDA ordinal like GPU_ID (fastest-first, not nvidia-smi order).")]
+        [ConfigComment("GPU for the VAE encode/decode, separate from the main GPU_ID.\nEmpty (default) = same GPU as everything else.\nSet to another CUDA ordinal (e.g. '1') to run the decode's large activation footprint off the main card — useful when a big DiT stays resident and the full-res decode would otherwise force an evict/re-upload cycle every generation.\nThe number is a CUDA ordinal like GPU_ID (fastest-first, not nvidia-smi order).")]
+        public string VaeGpuId = "";
+
+        [ConfigComment("Second GPU to run CFG's negative-prompt branch on, concurrent with the positive branch on the main GPU_ID — a latency win (not a VRAM win) when the denoiser fits on BOTH cards, since the weights are REPLICATED, not split.\nEmpty (default) = off; CFG runs sequentially on GPU_ID as usual.\nSet to another CUDA ordinal (e.g. '1') to enable it. Wired for Wan video (T2V/TI2V single-expert; A14B MoE falls back to sequential) and Flux true-CFG (negative prompt + CFG > 1; guidance-embedded runs without a real negative branch record 'inapplicable').\nWhen the second card cannot hold a full replica of the denoiser, the generation SUCCEEDS but silently falls back to sequential — check the engine log for the '[CfgParallel]' line ('active' vs 'fell-back(...)') to confirm which path actually ran.\nThe number is a CUDA ordinal like GPU_ID (fastest-first, not nvidia-smi order).")]
         public string CfgParallelGpuId = "";
 
-        [ConfigComment("Second GPU to pool VRAM with for large DiTs that don't fit on GPU_ID alone (experimental; currently wired for Krea 2 image generation only) — the denoiser's block loop is SPLIT across both cards (not replicated), so this is a VRAM win, not a latency win (sequential pipeline split, same per-step speed as one card).\nEmpty (default) = off.\nSet to another CUDA ordinal (e.g. '1') to enable it. Cannot be combined with CfgParallelGpuId — they are two different ways to use a second GPU for the same model (VRAM pooling vs weight replication for latency) and were not designed to compose; the backend will fail to start if both are set.\nNote this also feeds the same placement list LLM text generation uses for layer-split placement, so enabling it may also change where text models place their layers.\nThe number is a CUDA ordinal like GPU_ID (fastest-first, not nvidia-smi order).")]
+        [ConfigComment("Second GPU to pool VRAM with for large DiTs that don't fit on GPU_ID alone — the denoiser's block loop is SPLIT across both cards (not replicated), so this is a VRAM win, not a latency win (sequential pipeline split, same per-step speed as one card).\nVerified end-to-end on real weights for: Krea 2, Qwen-Image (20B — the flagship 'does not fit 24GB' case), MiniMax-H3 (fp8 build only; the bf16 build exceeds any two-consumer-card pool and keeps streaming), and Flux.1 (plain generations only — ControlNet/Kontext/inpaint/regional requests automatically fall back to unsharded with a log line). Chroma and HunyuanImage use the same machinery pending their checkpoints' verification runs.\nSharding disables the per-step CUDA graph and step-cache for the sharded model (a captured graph cannot span devices) — expect eager-path step times.\nEmpty (default) = off.\nSet to another CUDA ordinal (e.g. '1') to enable it. Cannot be combined with CfgParallelGpuId — they are two different ways to use a second GPU for the same model (VRAM pooling vs weight replication for latency) and were not designed to compose; the backend will fail to start if both are set.\nNote this also feeds the same placement list LLM text generation uses for layer-split placement, so enabling it may also change where text models place their layers.\nThe number is a CUDA ordinal like GPU_ID (fastest-first, not nvidia-smi order).")]
         public string DitShardGpuId = "";
+
+        [ConfigComment("Second GPU to pool VRAM with for large LANGUAGE models (text LLMs and big audio LMs), WITHOUT enabling DiT sharding — the LM's layer stack is SPLIT across both cards (weights pooled, not replicated).\nText models (LLMAssistant etc.) layer-split exactly as they do when DitShardGpuId is set.\nBig audio LMs (YuE's 7B Stage-1 in AudioLab) additionally switch from the single-card Q4_K quantization default to UN-QUANTIZED checkpoint precision (bf16) pooled across both cards — the quality win the pooling exists for. Override the precision with the HARTSY_AUDIO_LM_QUANT env var (q4k|q8|off) on the service if needed.\nEmpty (default) = off. Redundant when DitShardGpuId is already set (that feeds the same shard list); if both are set they must agree.\nThe number is a CUDA ordinal like GPU_ID (fastest-first, not nvidia-smi order).")]
+        public string LmShardGpuId = "";
 
         [ConfigComment("Path to the compiled kernel directory (the folder CONTAINING 'Ptx' and 'Spirv').\nEmpty = resolve next to the engine assemblies (the extension's own output folder), which is correct for a normal install.")]
         public string KernelDirectory = "";
@@ -204,7 +210,17 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             {
                 teSelector = BackendFactory.WithOrdinal("cuda", textEncoderOrdinal.Value);
                 BackendFactory.Validate(teSelector);
-                AddLoadStatus($"Text encoders placed on {teSelector} (denoiser/VAE stay on GPU {deviceOrdinal ?? 0}).");
+                AddLoadStatus($"Text encoders placed on {teSelector} (denoiser stays on GPU {deviceOrdinal ?? 0}).");
+            }
+
+            // Optional split placement: VAE encode/decode on its own GPU. Same eager validation.
+            int? vaeOrdinal = ParseGpuId(Settings?.VaeGpuId);
+            string vaeSelector = null;
+            if (vaeOrdinal.HasValue && vaeOrdinal != (deviceOrdinal ?? 0))
+            {
+                vaeSelector = BackendFactory.WithOrdinal("cuda", vaeOrdinal.Value);
+                BackendFactory.Validate(vaeSelector);
+                AddLoadStatus($"VAE placed on {vaeSelector} (denoiser stays on GPU {deviceOrdinal ?? 0}).");
             }
 
             // Optional CFG-branch parallelism: uncond on a second GPU, concurrent with cond on GPU_ID. Validated
@@ -234,14 +250,39 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                     $"{ditShardSelector} (VRAM pooling, not a latency win).");
             }
 
-            if (teSelector is not null || cfgParallelSelector is not null || enableDitSharding)
+            // LM-only shard route: same shard device list, no DiT flag. Text LLMs layer-split; big audio LMs
+            // (YuE Stage-1) additionally default to un-quantized weights pooled across the pair.
+            int? lmShardOrdinal = ParseGpuId(Settings?.LmShardGpuId);
+            string lmShardSelector = null;
+            if (lmShardOrdinal.HasValue && lmShardOrdinal != (deviceOrdinal ?? 0))
+            {
+                if (ditShardOrdinal.HasValue && ditShardOrdinal != lmShardOrdinal)
+                {
+                    Status = BackendStatus.ERRORED;
+                    AddLoadStatus($"LmShardGpuId ({lmShardOrdinal}) and DitShardGpuId ({ditShardOrdinal}) point at " +
+                        "different ordinals — they share one shard device list. Set just DitShardGpuId (it implies " +
+                        "the LM split) or make them match.");
+                    return;
+                }
+                lmShardSelector = BackendFactory.WithOrdinal("cuda", lmShardOrdinal.Value);
+                BackendFactory.Validate(lmShardSelector);
+                if (!enableDitSharding)
+                {
+                    AddLoadStatus($"LM sharding enabled: large LMs layer-split across GPU {deviceOrdinal ?? 0} and " +
+                        $"{lmShardSelector} (VRAM pooled; YuE Stage-1 runs un-quantized by default).");
+                }
+            }
+            string shardSelector = ditShardSelector ?? lmShardSelector;
+
+            if (teSelector is not null || vaeSelector is not null || cfgParallelSelector is not null || shardSelector is not null)
             {
                 placement = new PlacementConfig
                 {
                     TextEncoderDevice = teSelector,
+                    VaeDevice = vaeSelector,
                     CfgParallelDevice = cfgParallelSelector,
-                    ShardDevices = enableDitSharding
-                        ? new[] { BackendFactory.WithOrdinal(requested, deviceOrdinal ?? 0), ditShardSelector }
+                    ShardDevices = shardSelector is not null
+                        ? new[] { BackendFactory.WithOrdinal(requested, deviceOrdinal ?? 0), shardSelector }
                         : Array.Empty<string>(),
                     EnableDitSharding = enableDitSharding,
                 };
@@ -1002,7 +1043,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             VideoBoomerang = input.Get(T2IParamTypes.VideoBoomerang, false),
             VideoEndFrame = endFrame is null ? null : ToEngineImage(endFrame),
             VideoAudioInput = ToAudioClip(input.Get(T2IParamTypes.VideoAudioInput)),
-            VideoAudioReference = ToAudioClip(input.Get(T2IParamTypes.VideoAudioReference)),
+            VideoAudioReference = ToAudioClip(input.Get(SwarmUIHartsyInference.VideoAudioReferenceParam)),
             Frames = frames,
             TrimVideoStartFrames = input.Get(T2IParamTypes.TrimVideoStartFrames, 0),
             TrimVideoEndFrames = input.Get(T2IParamTypes.TrimVideoEndFrames, 0),

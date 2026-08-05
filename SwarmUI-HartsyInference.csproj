@@ -101,7 +101,11 @@
              flat cache — part of the Models-folder consolidation (see hartsy-multigpu-overhaul memory / the
              2026-08-03 migration). Pinned here ahead of publish, same as the alpha.5 precedent above — restore
              will 404 until the engine repo's commit pushes and publish-nuget.yml lands it on nuget.org. -->
-        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.10" />
+        <!-- 2.0.0-alpha.11 = multi-GPU production pass: DiT sharding for Qwen-Image/MiniMax-H3/Flux/Chroma/
+             HunyuanImage, TE/VAE placement for the remaining pipelines (PlacementConfig.VaeDevice now settable),
+             CFG-parallel observability ([CfgParallel] decisions) + Flux recipe forwarding fix, catalog-aware
+             `hartsy pull`. Restore 404s until the alpha.11 publish lands — by design (alpha.4/.5/.10 precedent). -->
+        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.11" />
     </ItemGroup>
 
     <!-- LOCAL ENGINE: prebuilt DLLs from the HartsyInference Cli bin (its full runtime closure). Referenced

@@ -50,6 +50,7 @@ public class SwarmUIHartsyInference : Extension
     // HartsyInference-specific params. Registered under feature flag "hartsyinference"
     // so they only show when our backend is the active target.
     public static T2IRegisteredParam<Image> AnimateReferenceImageParam;
+    public static T2IRegisteredParam<SwarmUI.Media.AudioFile> VideoAudioReferenceParam;
     public static T2IRegisteredParam<bool> AnimateAutoPreprocessParam;
     public static T2IRegisteredParam<Image> AnimatePoseVideoParam;
     public static T2IRegisteredParam<Image> AnimateFaceVideoParam;
@@ -172,6 +173,18 @@ public class SwarmUIHartsyInference : Extension
         AnimateFaceVideoParam = T2IParamTypes.Register<Image>(new(
             "Animate Face Video",
             "Wan-Animate: an already-cropped, face-centered driving video (square, ~512px) for the facial-motion branch.\nOverrides auto-preprocessing for the face branch.",
+            null,
+            Toggleable: true,
+            Group: HartsyInferenceParamGroup,
+            FeatureFlag: "hartsyinference",
+            ChangeWeight: 2));
+
+        // Extension-registered (NOT a Swarm core param — verified absent upstream as of 2026-08-05): the
+        // audio-reference input for joint audio+video models (MiniMax-H3 voice/style reference). The backend
+        // maps it to the engine's VideoRequest.VideoAudioReference beside core's Video Audio Input.
+        VideoAudioReferenceParam = T2IParamTypes.Register<SwarmUI.Media.AudioFile>(new(
+            "Video Audio Reference",
+            "For audio+video models that support a reference audio clip (e.g. MiniMax-H3 voice reference): the generated soundtrack imitates this clip's voice/style rather than treating it as literal input audio.",
             null,
             Toggleable: true,
             Group: HartsyInferenceParamGroup,
