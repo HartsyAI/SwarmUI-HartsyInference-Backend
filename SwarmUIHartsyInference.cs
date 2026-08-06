@@ -55,6 +55,9 @@ public class SwarmUIHartsyInference : Extension
     /// <summary>MiniMax-H3 ref2va reference images (up to 9).</summary>
     public static T2IRegisteredParam<List<Image>> ReferenceImagesParam;
 
+    /// <summary>MiniMax-H3 ref2va reference videos (up to 3).</summary>
+    public static T2IRegisteredParam<List<Image>> ReferenceVideosParam;
+
     /// <summary>MiniMax-H3 ref2va reference audio clips (up to 3).</summary>
     public static T2IRegisteredParam<List<AudioFile>> ReferenceAudiosParam;
     public static T2IRegisteredParam<SwarmUI.Media.AudioFile> VideoAudioReferenceParam;
@@ -156,11 +159,14 @@ public class SwarmUIHartsyInference : Extension
             FeatureFlag: "hartsyinference",
             ChangeWeight: 2));
 
+        // NAME PREFIX IS LOAD-BEARING: T2IParamTypes.Register is backed by Dictionary.Add keyed on the cleaned
+        // name, so a bare "Reference Audio" collides with AudioLab's param of that name and throws at extension
+        // init — which takes the whole SwarmUI process down, not just this extension.
         // MiniMax-H3 ref2va. These describe subject matter to carry across, which is a different job from the Init
         // Image slot — that pins an actual first frame (fl2va). The engine rejects the two together, because H3 ships
         // them as separate checkpoints and their packed-layout coordinates would overlap.
         ReferenceImagesParam = T2IParamTypes.Register<List<Image>>(new(
-            "Reference Images",
+            "H3 Reference Images",
             "MiniMax-H3 (ref2va): reference images to carry subject, character or style from (up to 9).\nUnlike Init Image, these are not pinned as frames — they describe what should appear.\nRequires a ref2va checkpoint; cannot be combined with Init Image / End Frame.",
             null,
             Toggleable: true,
@@ -168,8 +174,17 @@ public class SwarmUIHartsyInference : Extension
             FeatureFlag: "hartsyinference",
             ChangeWeight: 2));
 
+        ReferenceVideosParam = T2IParamTypes.Register<List<Image>>(new(
+            "H3 Reference Videos",
+            "MiniMax-H3 (ref2va): reference videos to carry subject, motion or style from (up to 3).\nEach clip is truncated to the generation's length, snapped down to the model's 17k+5 frame grid, and sampled at 2fps for the vision tower.\nPair a soundtrack via H3 Reference Audio ordering only if the clip carries one; requires a ref2va checkpoint.",
+            null,
+            Toggleable: true,
+            Group: HartsyInferenceParamGroup,
+            FeatureFlag: "hartsyinference",
+            ChangeWeight: 2));
+
         ReferenceAudiosParam = T2IParamTypes.Register<List<AudioFile>>(new(
-            "Reference Audio",
+            "H3 Reference Audio",
             "MiniMax-H3 (ref2va): reference audio clips to condition the generated soundtrack on (up to 3).\nRequires a ref2va checkpoint.",
             null,
             Toggleable: true,

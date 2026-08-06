@@ -112,7 +112,22 @@
              both H3 VAE encoder halves, LoRA wiring for the H3 recipe (first video model with LoRA end to end),
              and a CLI-drivable minimax-h3 catalog entry with assets + sha256.
              Restore 404s until the alpha.12 publish lands — by design (alpha.4/.5/.10/.11 precedent). -->
-        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.12" />
+        <!-- 2.0.0-alpha.13 was committed and its CI publish did NOT land (nupkg 404 on nuget.org), so the number is
+             burned rather than reused — same treatment as alpha.37/alpha.45 above. Everything it described ships in
+             alpha.14 below.
+             2.0.0-alpha.14 = video LoRA actually works, plus the multi-GPU fix.
+             (a) GetOrConstructVideoRecipe now takes the VideoRequest. It previously took only the ModelSpec, so
+                 RecipeContext.Loras AND .Components were always null for EVERY video family — a selected LoRA
+                 silently produced bit-identical output and per-request component overrides were dropped. The video
+                 pipeline cache key now includes the LoRA stack, so a LoRA request cannot reuse the un-merged pipeline.
+             (b) MiniMaxH3Recipe declares VideoFeatures.Lora, which this extension's honesty guard reads to decide
+                 whether a LoRA selection is allowed on a video model. Without it the guard refuses every video LoRA.
+             (c) GpuTransferHelper: a host tensor >1 MB uploaded by a SECOND backend was allocated in the FIRST
+                 backend's CUDA context (the demote hook switches context and never restores), so any DiT-sharded run
+                 touching one died with CUDA_ERROR_INVALID_VALUE — which H3's fl2va rope tables hit. Sharded step time
+                 also drops ~2.9x now that those tensors can be promoted on the second card.
+             Restore 404s until the alpha.14 publish lands — by design (alpha.4/.5/.10/.11 precedent). -->
+        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.14" />
     </ItemGroup>
 
     <!-- LOCAL ENGINE: prebuilt DLLs from the HartsyInference Cli bin (its full runtime closure). Referenced

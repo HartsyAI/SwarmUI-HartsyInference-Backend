@@ -1048,6 +1048,10 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 && refImages is { Count: > 0 }
                 ? [.. refImages.Select(ToEngineImage)]
                 : null,
+            ReferenceVideos = input.TryGet(SwarmUIHartsyInference.ReferenceVideosParam, out List<Image> refVideos)
+                && refVideos is { Count: > 0 }
+                ? [.. refVideos.Where(v => v is not null).Select(v => new ReferenceVideo { Video = ToVideoClip(v) })]
+                : null,
             ReferenceAudios = input.TryGet(SwarmUIHartsyInference.ReferenceAudiosParam, out List<AudioFile> refAudios)
                 && refAudios is { Count: > 0 }
                 ? [.. refAudios.Select(ToAudioClip).Where(c => c is not null).Cast<AudioClip>()]
@@ -1157,6 +1161,10 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         (byte[] rgb, int width, int height) = RgbToImage.ToHwcRgb(image);
         return new EngineImage { Rgb = rgb, Width = width, Height = height };
     }
+
+    /// <summary>Wraps a SwarmUI video upload as the Engine's encoded-video payload; the Engine decodes it via ffmpeg.</summary>
+    private static VideoClip ToVideoClip(Image video) =>
+        video is null ? null : new VideoClip { Data = video.RawData, Format = video.Type?.Extension };
 
     /// <summary>Wraps a SwarmUI audio param as the Engine's encoded-audio payload.</summary>
     private static AudioClip ToAudioClip(AudioFile audio) =>
@@ -1281,11 +1289,14 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             }
         }
 
-        if (input.TryGet(T2IParamTypes.Loras, out List<string> loras) && loras is not null && loras.Count > 0)
+        // Feature-driven, not blanket: MiniMax-H3 merges LoRAs, the other video families still do not read
+        // context.Loras at all, and silently dropping a selected LoRA is worse than refusing it.
+        if (input.TryGet(T2IParamTypes.Loras, out List<string> loras) && loras is not null && loras.Count > 0
+            && (videoSupported & VideoFeatures.Lora) == 0)
         {
             input.RefusalReasons.Add(
-                "HartsyInference: LoRAs aren't supported for video models yet — the engine's video composition phase "
-                + "isn't wired. Remove the LoRA selection.");
+                $"HartsyInference: LoRAs aren't supported on architecture '{compat}' (engine family '{family.Id}') — "
+                + "that family's recipe never merges them. Remove the LoRA selection.");
             return false;
         }
         if (input.Get(T2IParamTypes.RefinerModel) is not null)
