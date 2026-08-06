@@ -129,6 +129,19 @@ public static class ModelSupport
         return RecipeRegistry.Resolve(family.Id)?.Supports ?? ImageFeatures.None;
     }
 
+    /// <summary>The conditioning the Engine's video recipe for <paramref name="compatClass"/> declares it can apply.
+    /// <see cref="VideoFeatures.None"/> for image/music/unmapped families. Asked of the Engine's registry at call time,
+    /// exactly like <see cref="SupportedFeatures"/>, so it cannot drift from what the pipeline will really do.</summary>
+    public static VideoFeatures SupportedVideoFeatures(string compatClass)
+    {
+        Family family = Resolve(compatClass);
+        if (family is null || family.Kind != Kind.Video)
+        {
+            return VideoFeatures.None;
+        }
+        return VideoRecipeRegistry.Resolve(family.Id)?.Supports ?? VideoFeatures.None;
+    }
+
     /// <summary>Human-readable explanation of why a compat class isn't drivable. Distinguishes "the Engine knows this
     /// family but hasn't lifted its recipe yet" from "the Engine has nothing for this architecture".</summary>
     public static string WhyNotSupported(string compatClass)

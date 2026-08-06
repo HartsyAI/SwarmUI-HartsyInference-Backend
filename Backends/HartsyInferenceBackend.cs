@@ -1044,6 +1044,14 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             VideoEndFrame = endFrame is null ? null : ToEngineImage(endFrame),
             VideoAudioInput = ToAudioClip(input.Get(T2IParamTypes.VideoAudioInput)),
             VideoAudioReference = ToAudioClip(input.Get(SwarmUIHartsyInference.VideoAudioReferenceParam)),
+            ReferenceImages = input.TryGet(SwarmUIHartsyInference.ReferenceImagesParam, out List<Image> refImages)
+                && refImages is { Count: > 0 }
+                ? [.. refImages.Select(ToEngineImage)]
+                : null,
+            ReferenceAudios = input.TryGet(SwarmUIHartsyInference.ReferenceAudiosParam, out List<AudioFile> refAudios)
+                && refAudios is { Count: > 0 }
+                ? [.. refAudios.Select(ToAudioClip).Where(c => c is not null).Cast<AudioClip>()]
+                : null,
             Frames = frames,
             TrimVideoStartFrames = input.Get(T2IParamTypes.TrimVideoStartFrames, 0),
             TrimVideoEndFrames = input.Get(T2IParamTypes.TrimVideoEndFrames, 0),
@@ -1217,7 +1225,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         {
             return false;
         }
-        if (family.Kind == ModelSupport.Kind.Video && !ValidateVideo(input))
+        if (family.Kind == ModelSupport.Kind.Video && !ValidateVideo(input, compat, family))
         {
             return false;
         }
@@ -1251,8 +1259,28 @@ public class HartsyInferenceBackend : AbstractT2IBackend
 
     /// <summary>Video models: the Engine's <see cref="VideoRequest"/> has no composition phase yet (its
     /// VideoService rejects a LoRA stack outright), and a refiner over an encoded clip is meaningless.</summary>
-    private static bool ValidateVideo(T2IParamInput input)
+    private static bool ValidateVideo(T2IParamInput input, string compat, ModelSupport.Family family)
     {
+        // Init/end-frame conditioning is per-family. Without this check the Engine used to accept the image and
+        // silently generate text-to-video, which looks like a working generation and is not.
+        VideoFeatures videoSupported = ModelSupport.SupportedVideoFeatures(compat);
+        (VideoFeatures Feature, string Name, bool Requested)[] videoChecks =
+        [
+            (VideoFeatures.InitImage, "image-to-video (Init Image)", input.Get(T2IParamTypes.InitImage) is not null),
+            (VideoFeatures.EndFrame, "end-frame conditioning (Video End Frame)", input.Get(T2IParamTypes.VideoEndFrame) is not null),
+        ];
+        foreach ((VideoFeatures feature, string name, bool requested) in videoChecks)
+        {
+            if (requested && (videoSupported & feature) == 0)
+            {
+                input.RefusalReasons.Add(
+                    $"HartsyInference: {name} isn't supported on architecture '{compat}' (engine family '{family.Id}'). "
+                    + $"That family applies: {(videoSupported == VideoFeatures.None ? "text-to-video only" : videoSupported.ToString())}. "
+                    + "Remove it or pick a video model from a supported architecture.");
+                return false;
+            }
+        }
+
         if (input.TryGet(T2IParamTypes.Loras, out List<string> loras) && loras is not null && loras.Count > 0)
         {
             input.RefusalReasons.Add(
@@ -1280,7 +1308,10 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             (ImageFeatures.ControlNet, "ControlNet", AnyControlNetSelected(input)),
             (ImageFeatures.IpAdapter, "IP-Adapter / image prompting", input.TryGet(T2IParamTypes.PromptImages, out List<Image> imgs) && imgs is not null && imgs.Count > 0),
             (ImageFeatures.Refiner, "Refiners", input.Get(T2IParamTypes.RefinerModel) is not null),
-            (ImageFeatures.Img2Img, "img2img (Init Image)", input.Get(T2IParamTypes.InitImage) is not null),
+            // An Init Image is satisfied by EITHER mode: strength-based img2img, or reference-image editing on an edit
+            // model (Mage-Flow, OmniGen2, Boogu, Qwen-Image-Edit) where Creativity has nothing to select. Checking only
+            // Img2Img here would refuse the edit families outright.
+            (ImageFeatures.Img2Img | ImageFeatures.RefEdit, "img2img (Init Image)", input.Get(T2IParamTypes.InitImage) is not null),
             (ImageFeatures.Inpaint, "inpainting (Mask Image)", input.Get(T2IParamTypes.MaskImage) is not null),
             (ImageFeatures.Regional, "regional / segment prompting",
                 HasRegionalSyntax(input.Get(T2IParamTypes.Prompt)) || HasRegionalSyntax(input.Get(T2IParamTypes.NegativePrompt))),

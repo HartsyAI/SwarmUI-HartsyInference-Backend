@@ -104,8 +104,15 @@
         <!-- 2.0.0-alpha.11 = multi-GPU production pass: DiT sharding for Qwen-Image/MiniMax-H3/Flux/Chroma/
              HunyuanImage, TE/VAE placement for the remaining pipelines (PlacementConfig.VaeDevice now settable),
              CFG-parallel observability ([CfgParallel] decisions) + Flux recipe forwarding fix, catalog-aware
-             `hartsy pull`. Restore 404s until the alpha.11 publish lands — by design (alpha.4/.5/.10 precedent). -->
-        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.11" />
+             `hartsy pull`. -->
+        <!-- 2.0.0-alpha.12 = MiniMax-H3 conditioning + LoRA. REQUIRED by this extension's Reference Images /
+             Reference Audio params: VideoRequest gains ReferenceImages/ReferenceVideos/ReferenceAudios (and the
+             ReferenceVideo record), which do not exist in alpha.11, so those params will not compile against it.
+             Also carries fl2va keyframe conditioning (InitImage/VideoEndFrame now drive first/last-frame video),
+             both H3 VAE encoder halves, LoRA wiring for the H3 recipe (first video model with LoRA end to end),
+             and a CLI-drivable minimax-h3 catalog entry with assets + sha256.
+             Restore 404s until the alpha.12 publish lands — by design (alpha.4/.5/.10/.11 precedent). -->
+        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.12" />
     </ItemGroup>
 
     <!-- LOCAL ENGINE: prebuilt DLLs from the HartsyInference Cli bin (its full runtime closure). Referenced

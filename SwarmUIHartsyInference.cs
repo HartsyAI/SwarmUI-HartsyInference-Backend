@@ -1,5 +1,6 @@
 using SwarmUI.Accounts;
 using SwarmUI.Core;
+using SwarmUI.Media;
 using SwarmUI.Text2Image;
 using SwarmUI.Utils;
 using Hartsy.Extensions.HartsyInferenceBackend.Backends;
@@ -50,6 +51,12 @@ public class SwarmUIHartsyInference : Extension
     // HartsyInference-specific params. Registered under feature flag "hartsyinference"
     // so they only show when our backend is the active target.
     public static T2IRegisteredParam<Image> AnimateReferenceImageParam;
+
+    /// <summary>MiniMax-H3 ref2va reference images (up to 9).</summary>
+    public static T2IRegisteredParam<List<Image>> ReferenceImagesParam;
+
+    /// <summary>MiniMax-H3 ref2va reference audio clips (up to 3).</summary>
+    public static T2IRegisteredParam<List<AudioFile>> ReferenceAudiosParam;
     public static T2IRegisteredParam<SwarmUI.Media.AudioFile> VideoAudioReferenceParam;
     public static T2IRegisteredParam<bool> AnimateAutoPreprocessParam;
     public static T2IRegisteredParam<Image> AnimatePoseVideoParam;
@@ -143,6 +150,27 @@ public class SwarmUIHartsyInference : Extension
         AnimateReferenceImageParam = T2IParamTypes.Register<Image>(new(
             "Animate Reference Image",
             "Wan-Animate: the character/identity image to animate.\nThe Init Image slot carries the driving (pose/motion) video; this image is who performs that motion.\nRequired for Wan-Animate generations on the HartsyInference backend.",
+            null,
+            Toggleable: true,
+            Group: HartsyInferenceParamGroup,
+            FeatureFlag: "hartsyinference",
+            ChangeWeight: 2));
+
+        // MiniMax-H3 ref2va. These describe subject matter to carry across, which is a different job from the Init
+        // Image slot — that pins an actual first frame (fl2va). The engine rejects the two together, because H3 ships
+        // them as separate checkpoints and their packed-layout coordinates would overlap.
+        ReferenceImagesParam = T2IParamTypes.Register<List<Image>>(new(
+            "Reference Images",
+            "MiniMax-H3 (ref2va): reference images to carry subject, character or style from (up to 9).\nUnlike Init Image, these are not pinned as frames — they describe what should appear.\nRequires a ref2va checkpoint; cannot be combined with Init Image / End Frame.",
+            null,
+            Toggleable: true,
+            Group: HartsyInferenceParamGroup,
+            FeatureFlag: "hartsyinference",
+            ChangeWeight: 2));
+
+        ReferenceAudiosParam = T2IParamTypes.Register<List<AudioFile>>(new(
+            "Reference Audio",
+            "MiniMax-H3 (ref2va): reference audio clips to condition the generated soundtrack on (up to 3).\nRequires a ref2va checkpoint.",
             null,
             Toggleable: true,
             Group: HartsyInferenceParamGroup,
