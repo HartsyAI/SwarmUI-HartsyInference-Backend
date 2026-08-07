@@ -86,8 +86,7 @@ quantization mode, FP8 scaling, scheduler-specific options.
 We register these under our own group with `FeatureFlag: "hartsyinference"`:
 
 ```csharp
-public static T2IRegisteredParam<string> HartsyInferenceDtype;
-public static T2IRegisteredParam<int> HartsyInferenceTilesize;
+public static T2IRegisteredParam<string> SamplerParam;
 
 public static T2IParamGroup HartsyInferenceParamGroup;
 
@@ -95,16 +94,20 @@ public override void OnInit()
 {
     HartsyInferenceParamGroup = new("HartsyInference", Toggles: false, Open: false, IsAdvanced: true);
 
-    HartsyInferenceDtype = T2IParamTypes.Register<string>(new(
-        "HartsyInference Dtype",
-        "Per-generation dtype override. fp16 (default), bf16, fp32.",
-        "fp16",
+    SamplerParam = T2IParamTypes.Register<string>(new(
+        "HartsyInference Sampler",
+        "Sampler for SD 1.5 / SDXL generations on the HartsyInference backend.",
+        "euler",
         Toggleable: true,
         Group: HartsyInferenceParamGroup,
         FeatureFlag: "hartsyinference",
-        GetValues: _ => new[] { "fp16", "bf16", "fp32" }));
+        GetValues: _ => new List<string> { "euler", "ddim", "dpm++2m", "lcm" }));
 }
 ```
+
+(The old `HartsyInference Dtype` / `Tile VAE Threshold` params were removed 2026-08-07: the engine
+never read them — dtype is engine-policy per model (bf16 unsupported by the shared kernels) and VAE
+tiling is decided from measured VRAM, not a pixel threshold.)
 
 ## Feature flags advertised by `SupportedFeatures`
 
@@ -218,19 +221,11 @@ We **read** the parameter that the Comfy extension **registered**. We don't
 re-register it. This is the same pattern the API-Backends extension uses (it reads
 core params like `T2IParamTypes.Width` via the `=>` alias trick).
 
-### Sharpinference-only: Dtype override
+### HartsyInference-only params
 
-```csharp
-HartsyInferenceDtype = T2IParamTypes.Register<string>(new(
-    "HartsyInference Dtype",
-    "Override the model's loaded dtype. fp16 = saves VRAM, fp32 = max accuracy on CPU.",
-    "fp16", Toggleable: true,
-    Group: HartsyInferenceParamGroup,
-    FeatureFlag: "hartsyinference",
-    GetValues: _ => new[] { "fp16", "bf16", "fp32" }));
-```
-
-Because the flag is `"hartsyinference"`, this control only appears when our backend is selected.
+Because the flag is `"hartsyinference"`, these controls only appear when our backend is selected
+(e.g. `HartsyInference Sampler`; a dtype-override param existed here historically but was removed —
+the engine decides dtype per model).
 
 ## What we explicitly don't surface
 

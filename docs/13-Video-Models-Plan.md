@@ -184,7 +184,8 @@ The only new subsystem — C# twin of `SwarmSaveAnimationWS.py`:
       (`base::moe::low::b<boundary>`) so pair/split changes reload. LoRAs merge into BOTH experts.
 - [ ] Lance T2V: register a custom `T2IModelClass` (Swarm has none for Lance) + loader.
 - [ ] Video2Video / VideoExtend / audio-input params: explicitly out of scope until the
-      base paths are proven.
+      base paths are proven. (2026-08-07: `VideoRequest.VideoExtendModel` and its mapping were
+      removed outright — never built on either side; audio-input params have since shipped.)
 
 ## Risks / open questions
 

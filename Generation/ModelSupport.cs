@@ -132,14 +132,25 @@ public static class ModelSupport
     /// <summary>The conditioning the Engine's video recipe for <paramref name="compatClass"/> declares it can apply.
     /// <see cref="VideoFeatures.None"/> for image/music/unmapped families. Asked of the Engine's registry at call time,
     /// exactly like <see cref="SupportedFeatures"/>, so it cannot drift from what the pipeline will really do.</summary>
-    public static VideoFeatures SupportedVideoFeatures(string compatClass)
+    public static VideoFeatures SupportedVideoFeatures(string compatClass) => SupportedVideoFeatures(compatClass, null);
+
+    /// <summary>Checkpoint-aware overload: Wan's VACE/Animate/S2V variants share the family compat classes and are
+    /// only detectable from the checkpoint header, so pass <paramref name="checkpointPath"/> when the model is known
+    /// (a driving video on an Animate checkpoint under <c>wan-21-14b</c> would otherwise be refused).</summary>
+    public static VideoFeatures SupportedVideoFeatures(string compatClass, string checkpointPath)
     {
         Family family = Resolve(compatClass);
         if (family is null || family.Kind != Kind.Video)
         {
             return VideoFeatures.None;
         }
-        return VideoRecipeRegistry.Resolve(family.Id)?.Supports ?? VideoFeatures.None;
+        IVideoRecipe recipe = VideoRecipeRegistry.Resolve(family.Id);
+        return recipe switch
+        {
+            null => VideoFeatures.None,
+            HartsyInference.Engine.Recipes.Video.WanVideoRecipe wan => wan.SupportsFor(checkpointPath),
+            _ => recipe.Supports,
+        };
     }
 
     /// <summary>Human-readable explanation of why a compat class isn't drivable. Distinguishes "the Engine knows this

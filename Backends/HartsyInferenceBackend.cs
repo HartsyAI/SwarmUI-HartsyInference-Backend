@@ -1,6 +1,8 @@
+using System.Globalization;
 using System.IO;
 using System.Net.Http;
 using System.Reflection;
+using SwarmUI.Builtin_ComfyUIBackend;
 using FreneticUtilities.FreneticDataSyntax;
 using Newtonsoft.Json.Linq;
 using SwarmUI.Backends;
@@ -579,8 +581,44 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     {
         ImageRequest request = BuildImageRequest(input, family);
         ImageResult result = await _engine.Images.GenerateAsync(spec, request, progress, cancel);
-        return RgbToImage.FromHwcRgb(result.Rgb, result.Width, result.Height);
+        byte[] rgb = result.Rgb;
+        int width = result.Width, height = result.Height;
+        // Optional SeedVR2 restore/upscale pass over the still (same param group as the video path). No
+        // FreeMemory here: RestoreService frees on pipeline load, and evicting a cached image model every
+        // generation would defeat the pipeline cache.
+        if (input.TryGet(SwarmUIHartsyInference.VideoRestoreModelParam, out string restoreModel)
+            && !string.IsNullOrWhiteSpace(restoreModel))
+        {
+            ModelSpec restoreSpec = ModelResolver.Resolve(restoreModel, null, Modality.Restore);
+            RestoreRequest restoreRequest = BuildRestoreKnobs(input) with
+            {
+                Image = new ImageData { Rgb = rgb, Width = width, Height = height },
+            };
+            await foreach (VideoFrame restored in _engine.Restore.RestoreAsync(restoreSpec, restoreRequest, progress, cancel))
+            {
+                rgb = restored.Rgb;
+                width = restored.Width;
+                height = restored.Height;
+            }
+        }
+        // Engine-side metadata (resolved arch/seed/steps) folds into Swarm's saved-image metadata; "arch" in
+        // particular is checkpoint-sniffed by the engine and not derivable Swarm-side.
+        foreach (KeyValuePair<string, string> meta in result.Meta)
+        {
+            input.ExtraMeta[$"hartsy_{meta.Key}"] = meta.Value;
+        }
+        input.ExtraMeta["hartsy_engine_seed"] = result.Seed;
+        return RgbToImage.FromHwcRgb(rgb, width, height);
     }
+
+    /// <summary>The restore knobs shared by the still and video paths (target size, strength, seed).</summary>
+    private static RestoreRequest BuildRestoreKnobs(T2IParamInput input) => new()
+    {
+        TargetWidth = input.TryGet(SwarmUIHartsyInference.VideoRestoreWidthParam, out int rw) ? rw : null,
+        TargetHeight = input.TryGet(SwarmUIHartsyInference.VideoRestoreHeightParam, out int rh) ? rh : null,
+        Strength = input.TryGet(SwarmUIHartsyInference.VideoRestoreStrengthParam, out double rst) ? (float)rst : null,
+        Seed = input.Get(T2IParamTypes.Seed, -1L) is long seed and >= 0 ? (int)(seed & 0x7FFFFFFF) : null,
+    };
 
     /// <summary>Runs a video generation, collecting the streamed frames and muxing them into a container.</summary>
     private async Task<Image> GenerateVideo(ModelSpec spec, T2IParamInput input, IProgress<StepPreview> progress, CancellationToken cancel)
@@ -615,14 +653,11 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             // The resident T2V DiT and SeedVR2's VAE peak cannot share 24 GB.
             _engine.FreeMemory();
             ModelSpec restoreSpec = ModelResolver.Resolve(restoreModel, null, Modality.Restore);
-            RestoreRequest restoreRequest = new()
+            RestoreRequest restoreRequest = BuildRestoreKnobs(input) with
             {
                 Frames = [.. frames.Select(f => new ImageData { Rgb = f, Width = width, Height = height })],
-                TargetWidth = input.TryGet(SwarmUIHartsyInference.VideoRestoreWidthParam, out int rw) ? rw : null,
-                TargetHeight = input.TryGet(SwarmUIHartsyInference.VideoRestoreHeightParam, out int rh) ? rh : null,
                 ClipFrames = input.TryGet(SwarmUIHartsyInference.VideoRestoreClipFramesParam, out int rcf) ? rcf : 5,
                 Overlap = input.TryGet(SwarmUIHartsyInference.VideoRestoreOverlapParam, out int rov) ? rov : 1,
-                Strength = input.TryGet(SwarmUIHartsyInference.VideoRestoreStrengthParam, out double rst) ? (float)rst : null,
             };
             List<byte[]> restoredFrames = [];
             await foreach (VideoFrame restoredFrame in _engine.Restore.RestoreAsync(restoreSpec, restoreRequest, progress, cancel))
@@ -660,6 +695,10 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         MusicRequest request = BuildMusicRequest(input);
         AudioResult result = await _engine.Music.GenerateAsync(spec, request, progress, cancel);
         Logs.Verbose($"[HartsyInference] Music: {result.DurationSeconds:0.0}s @ {result.SampleRate} Hz ({result.Format}).");
+        foreach (KeyValuePair<string, string> meta in result.Meta)
+        {
+            input.ExtraMeta[$"hartsy_{meta.Key}"] = meta.Value;
+        }
         return new Image(result.Data, MediaType.AudioWav);
     }
 
@@ -738,6 +777,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         }
         Image initImage = input.Get(T2IParamTypes.InitImage);
         Image maskImage = input.Get(T2IParamTypes.MaskImage);
+        IReadOnlyList<ControlNetConditioning> controlNets = BuildControlNets(input, out List<(int Index, string UnionType)> unionTypes);
         return new ImageRequest
         {
             Prompt = prompt,
@@ -756,13 +796,19 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             Batch = 1, // Swarm drives batching itself: one Generate call per image
             Components = BuildComponents(input),
             Loras = BuildLoras(input),
-            ControlNets = BuildControlNets(input),
+            ControlNets = controlNets,
             IpAdapter = BuildIpAdapter(input),
             Refiner = BuildRefiner(input),
             Img2Img = initImage is null ? null : new Img2Img
             {
                 InitImage = ToEngineImage(initImage),
                 Creativity = input.Get(T2IParamTypes.InitImageCreativity, 0.6),
+                Mode = input.Get(SwarmUIHartsyInference.InitImageModeParam, "auto") switch
+                {
+                    "denoise" => Img2ImgMode.Denoise,
+                    "reference" => Img2ImgMode.Reference,
+                    _ => Img2ImgMode.Auto,
+                },
             },
             Inpaint = maskImage is null ? null : new Inpaint
             {
@@ -773,7 +819,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             },
             Regional = BuildRegional(input, prompt),
             VariationSeed = BuildVariationSeed(input),
-            Extra = BuildImageExtra(input),
+            Extra = BuildImageExtra(input, unionTypes),
         };
     }
 
@@ -840,8 +886,9 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     /// annotator (Canny/Depth/OpenPose/…) over each hint image first. The Engine's contract expects an
     /// already-preprocessed hint — annotation is deliberately host-side, since the annotators consume SwarmUI
     /// images and fetch their own weights through Swarm.</summary>
-    private IReadOnlyList<ControlNetConditioning> BuildControlNets(T2IParamInput input)
+    private IReadOnlyList<ControlNetConditioning> BuildControlNets(T2IParamInput input, out List<(int Index, string UnionType)> unionTypes)
     {
+        unionTypes = [];
         T2IParamTypes.ControlNetParamHolder[] holders = T2IParamTypes.Controlnets;
         if (holders is null)
         {
@@ -871,6 +918,9 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 mode, hint,
                 input.Get(T2IParamTypes.Width, 1024), input.Get(T2IParamTypes.Height, 1024),
                 PreprocessBackend, msg => AddLoadStatus(msg));
+            // Keyed by the EMITTED slot index (the engine indexes request.ControlNets positionally); a skipped
+            // holder must not shift the pairing. Only union checkpoints consult it engine-side.
+            unionTypes.Add((layers.Count, UnionTypeString(mode)));
             layers.Add(new ControlNetConditioning
             {
                 Model = cnModel.RawFilePath,
@@ -882,6 +932,22 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         }
         return layers.Count == 0 ? null : layers;
     }
+
+    /// <summary>The engine's union-control-type token for a detected preprocessing mode. Every output must be a
+    /// string <c>ControlNetResolver.ResolveUnionType</c> recognizes — an unknown token throws engine-side.</summary>
+    private static string UnionTypeString(HartsyInference.Diffusion.Adapters.ControlNetMode mode) => mode switch
+    {
+        HartsyInference.Diffusion.Adapters.ControlNetMode.Depth => "depth",
+        HartsyInference.Diffusion.Adapters.ControlNetMode.OpenPose => "openpose",
+        HartsyInference.Diffusion.Adapters.ControlNetMode.Scribble => "softedge",
+        HartsyInference.Diffusion.Adapters.ControlNetMode.SoftEdge => "softedge",
+        HartsyInference.Diffusion.Adapters.ControlNetMode.Normal => "normal",
+        HartsyInference.Diffusion.Adapters.ControlNetMode.Segmentation => "segment",
+        HartsyInference.Diffusion.Adapters.ControlNetMode.Tile => "tile",
+        HartsyInference.Diffusion.Adapters.ControlNetMode.Inpaint => "repaint",
+        // Canny + LineArt both drive the thin-line head.
+        _ => "canny",
+    };
 
     /// <summary>Maps the image-prompt inputs onto the Engine's IP-Adapter conditioning. The adapter model itself
     /// rides the Extra bag under the Engine's documented <c>ipadapter.model</c> key.</summary>
@@ -961,7 +1027,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
 
     /// <summary>Everything the Engine's flat image contract doesn't name: its own documented Extra keys plus this
     /// extension's registered custom params.</summary>
-    private static IReadOnlyDictionary<string, object> BuildImageExtra(T2IParamInput input)
+    private static IReadOnlyDictionary<string, object> BuildImageExtra(T2IParamInput input, List<(int Index, string UnionType)> controlNetUnionTypes)
     {
         Dictionary<string, object> extra = new(StringComparer.Ordinal);
         // Engine-documented keys (Features/HartsyInference.Engine.Features.RequestExtras.cs).
@@ -975,15 +1041,51 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         {
             extra[HartsyInference.Engine.Features.RequestExtras.IpAdapterClipVision] = clipVision.RawFilePath;
         }
+        // IP-Adapter scheduling/weighting: forward Comfy's own params (we don't re-register them).
+        if (input.TryGet(ComfyUIBackendExtension.IPAdapterWeight, out double ipaWeight))
+        {
+            extra[HartsyInference.Engine.Features.RequestExtras.IpAdapterWeight] = ipaWeight;
+        }
+        if (input.TryGet(ComfyUIBackendExtension.IPAdapterStart, out double ipaStart))
+        {
+            extra[HartsyInference.Engine.Features.RequestExtras.IpAdapterStart] = ipaStart;
+        }
+        if (input.TryGet(ComfyUIBackendExtension.IPAdapterEnd, out double ipaEnd))
+        {
+            extra[HartsyInference.Engine.Features.RequestExtras.IpAdapterEnd] = ipaEnd;
+        }
+        if (input.TryGet(ComfyUIBackendExtension.IPAdapterWeightType, out string ipaWeightType)
+            && !string.IsNullOrWhiteSpace(ipaWeightType))
+        {
+            // Comfy live-appends "name///name (New)" variants; the engine wants the bare name and safely
+            // falls back to "standard" for anything it doesn't recognize.
+            int marker = ipaWeightType.IndexOf("///", StringComparison.Ordinal);
+            extra[HartsyInference.Engine.Features.RequestExtras.IpAdapterWeightType] = marker < 0 ? ipaWeightType : ipaWeightType[..marker];
+        }
+        foreach ((int index, string unionType) in controlNetUnionTypes)
+        {
+            extra[HartsyInference.Engine.Features.RequestExtras.ControlNetUnionTypePrefix + index.ToString(CultureInfo.InvariantCulture)] = unionType;
+        }
+        // FLUX.1 Redux: Comfy's style-model params map onto the engine's redux.* keys. The model rides by name —
+        // the engine's ModelFileLocator resolves it against the style_models folders, same as ipadapter.model.
+        if (input.TryGet(ComfyUIBackendExtension.UseStyleModel, out string styleModel)
+            && !string.IsNullOrWhiteSpace(styleModel) && styleModel != "None")
+        {
+            extra[HartsyInference.Engine.Features.RequestExtras.ReduxStyleModel] = styleModel;
+            if (input.TryGet(ComfyUIBackendExtension.StyleModelMultiplyStrength, out double reduxMultiply))
+            {
+                extra[HartsyInference.Engine.Features.RequestExtras.ReduxMultiply] = reduxMultiply;
+            }
+            if (input.TryGet(ComfyUIBackendExtension.StyleModelMergeStrength, out double reduxMerge))
+            {
+                extra[HartsyInference.Engine.Features.RequestExtras.ReduxMerge] = reduxMerge;
+            }
+            if (input.TryGet(ComfyUIBackendExtension.StyleModelApplyStart, out double reduxApplyStart))
+            {
+                extra[HartsyInference.Engine.Features.RequestExtras.ReduxApplyStart] = reduxApplyStart;
+            }
+        }
         // Extension-registered custom params.
-        if (input.TryGet(SwarmUIHartsyInference.DtypeOverrideParam, out string dtype) && !string.IsNullOrWhiteSpace(dtype))
-        {
-            extra["hartsy.dtype_override"] = dtype;
-        }
-        if (input.TryGet(SwarmUIHartsyInference.TileVaeThresholdParam, out int tileThreshold))
-        {
-            extra["hartsy.tile_vae_threshold"] = tileThreshold;
-        }
         if (input.TryGet(SwarmUIHartsyInference.Ideogram4MagicPromptParam, out bool magic))
         {
             extra["hartsy.ideogram4_magic_prompt"] = magic;
@@ -1004,22 +1106,19 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             ? t2vFrames
             : input.Get(T2IParamTypes.VideoFrames, 25);
         Dictionary<string, object> extra = new(StringComparer.Ordinal);
-        if (input.Get(SwarmUIHartsyInference.AnimateReferenceImageParam) is Image reference)
+        Image reference = input.Get(SwarmUIHartsyInference.AnimateReferenceImageParam);
+        if (reference is not null)
         {
             extra[HartsyInference.Engine.Recipes.Video.WanAnimateRecipePipeline.ReferenceImageKey] = ToEngineImage(reference);
         }
-        if (input.TryGet(SwarmUIHartsyInference.AnimateAutoPreprocessParam, out bool autoPreprocess))
-        {
-            extra["hartsy.animate_auto_preprocess"] = autoPreprocess;
-        }
-        if (input.Get(SwarmUIHartsyInference.AnimatePoseVideoParam) is Image poseVideo)
-        {
-            extra["hartsy.animate_pose_video"] = ToEngineImage(poseVideo);
-        }
-        if (input.Get(SwarmUIHartsyInference.AnimateFaceVideoParam) is Image faceVideo)
-        {
-            extra["hartsy.animate_face_video"] = ToEngineImage(faceVideo);
-        }
+        Image poseVideo = input.Get(SwarmUIHartsyInference.AnimatePoseVideoParam);
+        Image faceVideo = input.Get(SwarmUIHartsyInference.AnimateFaceVideoParam);
+        // Animate intent + a video-typed Init media ⇒ the whole clip drives motion (VideoClip, all frames);
+        // a still keeps the engine's tile-across-frames fallback. Without animate intent the init media stays a
+        // plain start frame — DrivingVideo on a non-animate family would (correctly) trip the feature gate.
+        bool animateIntent = reference is not null || poseVideo is not null || faceVideo is not null;
+        bool initIsVideo = initImage?.Type?.MetaType == MediaMetaType.Video;
+        bool initDrives = animateIntent && initIsVideo;
         return new VideoRequest
         {
             Prompt = input.Get(T2IParamTypes.Prompt) ?? "",
@@ -1030,11 +1129,17 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             CfgScale = input.TryGet(T2IParamTypes.VideoCFG, out double videoCfg) ? (float)videoCfg
                 : input.TryGet(T2IParamTypes.CFGScale, out double baseCfg) ? (float)baseCfg : null,
             Seed = input.Get(T2IParamTypes.Seed, -1L),
-            InitImage = initImage is null ? null : ToEngineImage(initImage),
+            InitImage = initImage is null || initDrives ? null : ToEngineImage(initImage),
+            DrivingVideo = initDrives ? ToVideoClip(initImage) : null,
+            DrivingPoseVideo = poseVideo is null ? null : ToVideoClip(poseVideo),
+            DrivingFaceVideo = faceVideo is null ? null : ToVideoClip(faceVideo),
+            DrivingAutoPreprocess = input.Get(SwarmUIHartsyInference.AnimateAutoPreprocessParam, true),
             VideoModel = ModelPath(input.Get(T2IParamTypes.VideoModel)),
             VideoSwapModel = ModelPath(input.Get(T2IParamTypes.VideoSwapModel)),
-            VideoSwapPercent = input.TryGet(T2IParamTypes.VideoSwapPercent, out double swapPercent) ? swapPercent : null,
-            VideoExtendModel = ModelPath(input.Get(T2IParamTypes.VideoExtendModel)),
+            // Untouched slider = auto: Swarm sends group params whenever the group is open, so the 0.5 default must
+            // not override Wan 2.2's official boundary. The engine warps an explicit fraction via the flow shift.
+            VideoSwapPercent = input.TryGet(T2IParamTypes.VideoSwapPercent, out double swapPercent) && swapPercent != 0.5
+                ? swapPercent : null,
             VideoResolution = input.Get(T2IParamTypes.VideoResolution, null),
             Fps = input.Get(T2IParamTypes.VideoFPS, 25),
             VideoFormat = input.Get(T2IParamTypes.VideoFormat, null),
@@ -1048,10 +1153,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 && refImages is { Count: > 0 }
                 ? [.. refImages.Select(ToEngineImage)]
                 : null,
-            ReferenceVideos = input.TryGet(SwarmUIHartsyInference.ReferenceVideosParam, out List<Image> refVideos)
-                && refVideos is { Count: > 0 }
-                ? [.. refVideos.Where(v => v is not null).Select(v => new ReferenceVideo { Video = ToVideoClip(v) })]
-                : null,
+            ReferenceVideos = BuildReferenceVideos(input),
             ReferenceAudios = input.TryGet(SwarmUIHartsyInference.ReferenceAudiosParam, out List<AudioFile> refAudios)
                 && refAudios is { Count: > 0 }
                 ? [.. refAudios.Select(ToAudioClip).Where(c => c is not null).Cast<AudioClip>()]
@@ -1065,11 +1167,41 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         };
     }
 
-    /// <summary>Maps Swarm's Text2Audio group onto the Engine's <see cref="MusicRequest"/>.</summary>
+    /// <summary>Builds the reference clips, pairing each H3 soundtrack to the same-position clip. Null videos are
+    /// filtered BEFORE zipping so the pairing follows the user's visible ordering; missing trailing soundtracks
+    /// leave those clips silent (the engine's <see cref="ReferenceVideo.Audio"/> is nullable by design).</summary>
+    private static IReadOnlyList<ReferenceVideo> BuildReferenceVideos(T2IParamInput input)
+    {
+        if (!input.TryGet(SwarmUIHartsyInference.ReferenceVideosParam, out List<Image> refVideos)
+            || refVideos is not { Count: > 0 })
+        {
+            return null;
+        }
+        List<Image> videos = [.. refVideos.Where(v => v is not null)];
+        List<AudioFile> soundtracks = input.TryGet(SwarmUIHartsyInference.ReferenceVideoSoundtracksParam, out List<AudioFile> tracks)
+            && tracks is not null ? tracks : [];
+        List<ReferenceVideo> result = [];
+        for (int i = 0; i < videos.Count; i++)
+        {
+            result.Add(new ReferenceVideo
+            {
+                Video = ToVideoClip(videos[i]),
+                Audio = i < soundtracks.Count ? ToAudioClip(soundtracks[i]) : null,
+            });
+        }
+        return result.Count == 0 ? null : result;
+    }
+
+    /// <summary>Maps Swarm's Text2Audio group plus this extension's music params onto the Engine's
+    /// <see cref="MusicRequest"/>. One source-audio param + one edit-mode dropdown populate exactly one of
+    /// Continuation/Repaint/Cover, so the engine's "more than one edit mode" throw is structurally unreachable.</summary>
     private static MusicRequest BuildMusicRequest(T2IParamInput input)
     {
         long seed = input.Get(T2IParamTypes.Seed, -1L);
-        return new MusicRequest
+        AudioClip sourceAudio = ToAudioClip(input.Get(SwarmUIHartsyInference.MusicSourceAudioParam));
+        string editMode = input.Get(SwarmUIHartsyInference.MusicEditModeParam, "continuation");
+        string lmModel = input.Get(SwarmUIHartsyInference.MusicLmModelParam, "none");
+        MusicRequest request = new MusicRequest
         {
             // ACE-Step convention (which the Engine follows): the prompt carries the lyrics, the style/genre tags
             // come from Text2AudioStyle. An empty prompt means instrumental.
@@ -1084,7 +1216,68 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             KeyScale = input.Get(T2IParamTypes.Text2AudioKeyScale, "") ?? "",
             TimeSignature = input.Get(T2IParamTypes.Text2AudioTimeSignature, "") ?? "",
             VocalLanguage = input.Get(T2IParamTypes.Text2AudioLanguage, "") ?? "",
+            Continuation = editMode == "continuation" ? sourceAudio : null,
+            Repaint = editMode == "repaint" ? sourceAudio : null,
+            Cover = editMode == "cover" ? sourceAudio : null,
         };
+        if (input.TryGet(SwarmUIHartsyInference.MusicRepaintStartParam, out double repaintStart))
+        {
+            request = request with { RepaintStart = repaintStart };
+        }
+        if (input.TryGet(SwarmUIHartsyInference.MusicRepaintEndParam, out double repaintEnd))
+        {
+            request = request with { RepaintEnd = repaintEnd };
+        }
+        if (input.TryGet(SwarmUIHartsyInference.MusicCoverStrengthParam, out double coverStrength))
+        {
+            request = request with { CoverStrength = coverStrength };
+        }
+        if (lmModel != "none")
+        {
+            request = request with
+            {
+                LmModel = lmModel,
+                Thinking = input.Get(SwarmUIHartsyInference.MusicLmThinkingParam, true),
+                LmTemperature = input.Get(SwarmUIHartsyInference.MusicLmTemperatureParam, 0.85),
+                LmCfgScale = input.Get(SwarmUIHartsyInference.MusicLmCfgParam, 2.0),
+                LmTopK = input.Get(SwarmUIHartsyInference.MusicLmTopKParam, 0),
+                LmTopP = input.Get(SwarmUIHartsyInference.MusicLmTopPParam, 0.9),
+                LmNegativePrompt = input.Get(SwarmUIHartsyInference.MusicLmNegativePromptParam, "") ?? "",
+            };
+        }
+        if (input.TryGet(SwarmUIHartsyInference.MusicInferMethodParam, out string inferMethod))
+        {
+            request = request with { InferMethod = inferMethod };
+        }
+        if (input.TryGet(SwarmUIHartsyInference.MusicUseAdgParam, out bool useAdg))
+        {
+            request = request with { UseAdg = useAdg };
+        }
+        if (input.TryGet(SwarmUIHartsyInference.MusicCfgIntervalStartParam, out double cfgStart))
+        {
+            request = request with { CfgIntervalStart = cfgStart };
+        }
+        if (input.TryGet(SwarmUIHartsyInference.MusicCfgIntervalEndParam, out double cfgEnd))
+        {
+            request = request with { CfgIntervalEnd = cfgEnd };
+        }
+        if (input.TryGet(SwarmUIHartsyInference.MusicTemperatureParam, out double temperature))
+        {
+            request = request with { Temperature = temperature };
+        }
+        if (input.TryGet(SwarmUIHartsyInference.MusicTopKParam, out int topK))
+        {
+            request = request with { TopK = topK };
+        }
+        if (input.TryGet(SwarmUIHartsyInference.MusicTopPParam, out double topP))
+        {
+            request = request with { TopP = topP };
+        }
+        if (input.TryGet(SwarmUIHartsyInference.MusicRepetitionPenaltyParam, out double repetitionPenalty))
+        {
+            request = request with { RepetitionPenalty = repetitionPenalty };
+        }
+        return request;
     }
 
     // ─── mapping helpers ───
@@ -1175,7 +1368,11 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     /// <summary>Cleaned IDs of "comfyui"-tagged params we genuinely service, so the comfy-only guard in
     /// <see cref="IsValidForThisBackend"/> doesn't falsely refuse them.</summary>
     private static readonly HashSet<string> HonoredComfyParams =
-        ["sampler", "scheduler", "refinersampler", "refinerscheduler", "refinerupscalemethod"];
+        ["sampler", "scheduler", "refinersampler", "refinerscheduler", "refinerupscalemethod",
+         // Style-model (FLUX.1 Redux) strengths — mapped onto the engine's redux.* Extra keys.
+         "stylemodelmergestrength", "stylemodelmultiplystrength", "stylemodelapplystart",
+         // IP-Adapter scheduling knobs — mapped onto the engine's ipadapter.* Extra keys.
+         "ipadapterweight", "ipadapterstart", "ipadapterend", "ipadapterweighttype"];
 
     /// <summary>Swarm prompt-syntax tags that need conditioning machinery the Engine's recipes do not expose on the
     /// request contract at all. Feeding these raw into a text encoder would silently corrupt the generation.
@@ -1229,7 +1426,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             return false;
         }
 
-        if (family.Kind == ModelSupport.Kind.Music && !ValidateMusic(input))
+        if (family.Kind == ModelSupport.Kind.Music && !ValidateMusic(input, family))
         {
             return false;
         }
@@ -1244,8 +1441,10 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         return ValidateComfyOnlyParams(input);
     }
 
-    /// <summary>Music models: refuse the image-only knobs that make no sense for an audio output.</summary>
-    private static bool ValidateMusic(T2IParamInput input)
+    /// <summary>Music models: refuse the image-only knobs that make no sense for an audio output, plus any music
+    /// param the selected family would silently ignore. Music has no per-family feature model (no MusicFeatures
+    /// enum), so these are hard-coded per family id — reachable families today: acestep, musicgen, yue.</summary>
+    private static bool ValidateMusic(T2IParamInput input, ModelSupport.Family family)
     {
         if (input.Get(T2IParamTypes.InitImage) is not null)
         {
@@ -1262,6 +1461,70 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             input.RefusalReasons.Add("HartsyInference: LoRAs aren't supported for music models. Remove the LoRA selection.");
             return false;
         }
+        bool hasSourceAudio = input.Get(SwarmUIHartsyInference.MusicSourceAudioParam) is not null;
+        bool isAceStep = family.Id == "acestep";
+        if (hasSourceAudio && !isAceStep)
+        {
+            input.RefusalReasons.Add(
+                $"HartsyInference: music editing (continuation/repaint/cover) is ACE-Step only; '{family.Id}' has no "
+                + "audio-conditioned edit path. Remove Hartsy Music Source Audio or pick an ACE-Step model.");
+            return false;
+        }
+        // Pre-empt the engine's src_latents-conflict throw with a routable refusal.
+        if (hasSourceAudio && input.TryGet(SwarmUIHartsyInference.MusicLmModelParam, out string lmModel) && lmModel != "none")
+        {
+            input.RefusalReasons.Add(
+                "HartsyInference: the ACE-Step edit modes and the 5 Hz LM planner both occupy the src_latents slot — "
+                + "set Hartsy Music LM Planner to none, or remove the Source Audio.");
+            return false;
+        }
+        if (hasSourceAudio && input.Get(SwarmUIHartsyInference.MusicEditModeParam, "continuation") == "repaint"
+            && input.Get(SwarmUIHartsyInference.MusicRepaintEndParam, 0.0) <= input.Get(SwarmUIHartsyInference.MusicRepaintStartParam, 0.0))
+        {
+            input.RefusalReasons.Add(
+                $"HartsyInference: repaint needs Repaint End > Repaint Start (got {input.Get(SwarmUIHartsyInference.MusicRepaintStartParam, 0.0)}"
+                + $"..{input.Get(SwarmUIHartsyInference.MusicRepaintEndParam, 0.0)} s).");
+            return false;
+        }
+        if (!isAceStep)
+        {
+            (bool Set, string Name)[] aceOnly =
+            [
+                (input.TryGet(SwarmUIHartsyInference.MusicLmModelParam, out string lm) && lm != "none", "Hartsy Music LM Planner"),
+                (input.TryGet(SwarmUIHartsyInference.MusicInferMethodParam, out string im) && im != "ode", "Hartsy Music Infer Method"),
+                (input.TryGet(SwarmUIHartsyInference.MusicUseAdgParam, out bool adg) && adg, "Hartsy Music Use ADG"),
+                (input.TryGet(SwarmUIHartsyInference.MusicCfgIntervalStartParam, out double cis) && cis > 0, "Hartsy Music CFG Interval Start"),
+                (input.TryGet(SwarmUIHartsyInference.MusicCfgIntervalEndParam, out double cie) && cie < 1, "Hartsy Music CFG Interval End"),
+            ];
+            foreach ((bool set, string name) in aceOnly)
+            {
+                if (set)
+                {
+                    input.RefusalReasons.Add(
+                        $"HartsyInference: {name} is ACE-Step only; '{family.Id}' would silently ignore it. Unset it or pick an ACE-Step model.");
+                    return false;
+                }
+            }
+        }
+        if (family.Id != "yue")
+        {
+            (bool Set, string Name)[] yueOnly =
+            [
+                (input.TryGet(SwarmUIHartsyInference.MusicTemperatureParam, out double _), "Hartsy Music Temperature"),
+                (input.TryGet(SwarmUIHartsyInference.MusicTopKParam, out int _), "Hartsy Music Top K"),
+                (input.TryGet(SwarmUIHartsyInference.MusicTopPParam, out double _), "Hartsy Music Top P"),
+                (input.TryGet(SwarmUIHartsyInference.MusicRepetitionPenaltyParam, out double _), "Hartsy Music Repetition Penalty"),
+            ];
+            foreach ((bool set, string name) in yueOnly)
+            {
+                if (set)
+                {
+                    input.RefusalReasons.Add(
+                        $"HartsyInference: {name} is a YuE sampling knob; '{family.Id}' would silently ignore it. Unset it or pick a YuE model.");
+                    return false;
+                }
+            }
+        }
         return true;
     }
 
@@ -1270,12 +1533,27 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     private static bool ValidateVideo(T2IParamInput input, string compat, ModelSupport.Family family)
     {
         // Init/end-frame conditioning is per-family. Without this check the Engine used to accept the image and
-        // silently generate text-to-video, which looks like a working generation and is not.
-        VideoFeatures videoSupported = ModelSupport.SupportedVideoFeatures(compat);
+        // silently generate text-to-video, which looks like a working generation and is not. Checkpoint-aware:
+        // Wan's Animate/VACE/S2V variants share the family compat classes (header-sniffed engine-side).
+        VideoFeatures videoSupported = ModelSupport.SupportedVideoFeatures(compat, input.Get(T2IParamTypes.Model)?.RawFilePath);
+        bool hasRefVideos = input.TryGet(SwarmUIHartsyInference.ReferenceVideosParam, out List<Image> refVids)
+            && refVids is not null && refVids.Any(v => v is not null);
+        bool hasSoundtracks = input.TryGet(SwarmUIHartsyInference.ReferenceVideoSoundtracksParam, out List<AudioFile> refTracks)
+            && refTracks is { Count: > 0 };
         (VideoFeatures Feature, string Name, bool Requested)[] videoChecks =
         [
             (VideoFeatures.InitImage, "image-to-video (Init Image)", input.Get(T2IParamTypes.InitImage) is not null),
             (VideoFeatures.EndFrame, "end-frame conditioning (Video End Frame)", input.Get(T2IParamTypes.VideoEndFrame) is not null),
+            (VideoFeatures.ReferenceImages, "reference images (H3 Reference Images)",
+                input.TryGet(SwarmUIHartsyInference.ReferenceImagesParam, out List<Image> refImgs) && refImgs is { Count: > 0 }),
+            (VideoFeatures.ReferenceVideos, "reference videos (H3 Reference Videos / Soundtracks)", hasRefVideos || hasSoundtracks),
+            (VideoFeatures.ReferenceAudios, "reference audio (H3 Reference Audio / Video Audio Reference)",
+                (input.TryGet(SwarmUIHartsyInference.ReferenceAudiosParam, out List<AudioFile> refAuds) && refAuds is { Count: > 0 })
+                || input.Get(SwarmUIHartsyInference.VideoAudioReferenceParam) is not null),
+            (VideoFeatures.DrivingVideo, "Wan-Animate driving (Animate Reference Image / Pose Video / Face Video)",
+                input.Get(SwarmUIHartsyInference.AnimateReferenceImageParam) is not null
+                || input.Get(SwarmUIHartsyInference.AnimatePoseVideoParam) is not null
+                || input.Get(SwarmUIHartsyInference.AnimateFaceVideoParam) is not null),
         ];
         foreach ((VideoFeatures feature, string name, bool requested) in videoChecks)
         {
@@ -1285,6 +1563,18 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                     $"HartsyInference: {name} isn't supported on architecture '{compat}' (engine family '{family.Id}'). "
                     + $"That family applies: {(videoSupported == VideoFeatures.None ? "text-to-video only" : videoSupported.ToString())}. "
                     + "Remove it or pick a video model from a supported architecture.");
+                return false;
+            }
+        }
+        // Soundtracks pair positionally with reference videos — a dangling soundtrack has no clip to pair with.
+        if (hasSoundtracks)
+        {
+            int videoCount = hasRefVideos ? refVids.Count(v => v is not null) : 0;
+            if (refTracks.Count > videoCount)
+            {
+                input.RefusalReasons.Add(
+                    $"HartsyInference: {refTracks.Count} H3 Reference Video Soundtrack(s) for {videoCount} reference video(s) — "
+                    + "each soundtrack pairs by position with a reference video. Remove the extra soundtrack(s).");
                 return false;
             }
         }
@@ -1338,6 +1628,26 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                     $"HartsyInference: {name} isn't supported on architecture '{compat}' (engine family '{family.Id}'). "
                     + $"That family's recipe applies: {(supported == ImageFeatures.None ? "text-to-image only" : supported.ToString())}. "
                     + "Remove it or pick a model from a supported architecture.");
+                return false;
+            }
+        }
+        // An EXPLICIT init-image mode must match the family: reference needs RefEdit, denoise needs Img2Img.
+        // RefEdit-only families never branch on Mode, so an explicit "denoise" there would silently run as an edit.
+        if (input.Get(T2IParamTypes.InitImage) is not null
+            && input.TryGet(SwarmUIHartsyInference.InitImageModeParam, out string initMode))
+        {
+            if (initMode == "reference" && (supported & ImageFeatures.RefEdit) == 0)
+            {
+                input.RefusalReasons.Add(
+                    $"HartsyInference: reference-edit Init Image Mode isn't supported on '{compat}' (engine family '{family.Id}') — "
+                    + "that family only does strength-based img2img. Set Init Image Mode to denoise or auto.");
+                return false;
+            }
+            if (initMode == "denoise" && (supported & ImageFeatures.Img2Img) == 0)
+            {
+                input.RefusalReasons.Add(
+                    $"HartsyInference: denoise Init Image Mode isn't supported on '{compat}' (engine family '{family.Id}') — "
+                    + "that family is a reference-edit model with no denoise-strength path. Set Init Image Mode to reference or auto.");
                 return false;
             }
         }

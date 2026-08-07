@@ -60,13 +60,17 @@ public class SwarmUIHartsyInference : Extension
 
     /// <summary>MiniMax-H3 ref2va reference audio clips (up to 3).</summary>
     public static T2IRegisteredParam<List<AudioFile>> ReferenceAudiosParam;
+
+    /// <summary>MiniMax-H3 per-reference-video soundtracks, paired by position.</summary>
+    public static T2IRegisteredParam<List<AudioFile>> ReferenceVideoSoundtracksParam;
     public static T2IRegisteredParam<SwarmUI.Media.AudioFile> VideoAudioReferenceParam;
     public static T2IRegisteredParam<bool> AnimateAutoPreprocessParam;
     public static T2IRegisteredParam<Image> AnimatePoseVideoParam;
     public static T2IRegisteredParam<Image> AnimateFaceVideoParam;
-    public static T2IRegisteredParam<string> DtypeOverrideParam;
-    public static T2IRegisteredParam<int> TileVaeThresholdParam;
     public static T2IRegisteredParam<string> SamplerParam;
+
+    /// <summary>How the Init Image is consumed: denoise (classic img2img) vs reference (in-context edit).</summary>
+    public static T2IRegisteredParam<string> InitImageModeParam;
 
     // IP-Adapter FaceID-PlusV2 shortcut strength (read by Generation.IpAdapterResolver).
     public static T2IRegisteredParam<double> FaceIdV2WeightParam;
@@ -83,6 +87,31 @@ public class SwarmUIHartsyInference : Extension
     public static T2IRegisteredParam<int> VideoRestoreClipFramesParam;
     public static T2IRegisteredParam<int> VideoRestoreOverlapParam;
     public static T2IRegisteredParam<double> VideoRestoreStrengthParam;
+
+    // Music params (ACE-Step edit modes + 5 Hz LM planner + advanced CFG; YuE sampling). Every name carries
+    // the "Hartsy Music" prefix: AudioLab already registers "Source Audio", "Cover Strength", "Temperature",
+    // "LM Top K" etc., and a cleaned-name collision in T2IParamTypes.Register crashes SwarmUI at init.
+    public static T2IParamGroup MusicParamGroup;
+    public static T2IRegisteredParam<AudioFile> MusicSourceAudioParam;
+    public static T2IRegisteredParam<string> MusicEditModeParam;
+    public static T2IRegisteredParam<double> MusicRepaintStartParam;
+    public static T2IRegisteredParam<double> MusicRepaintEndParam;
+    public static T2IRegisteredParam<double> MusicCoverStrengthParam;
+    public static T2IRegisteredParam<string> MusicLmModelParam;
+    public static T2IRegisteredParam<bool> MusicLmThinkingParam;
+    public static T2IRegisteredParam<double> MusicLmTemperatureParam;
+    public static T2IRegisteredParam<double> MusicLmCfgParam;
+    public static T2IRegisteredParam<int> MusicLmTopKParam;
+    public static T2IRegisteredParam<double> MusicLmTopPParam;
+    public static T2IRegisteredParam<string> MusicLmNegativePromptParam;
+    public static T2IRegisteredParam<string> MusicInferMethodParam;
+    public static T2IRegisteredParam<bool> MusicUseAdgParam;
+    public static T2IRegisteredParam<double> MusicCfgIntervalStartParam;
+    public static T2IRegisteredParam<double> MusicCfgIntervalEndParam;
+    public static T2IRegisteredParam<double> MusicTemperatureParam;
+    public static T2IRegisteredParam<int> MusicTopKParam;
+    public static T2IRegisteredParam<double> MusicTopPParam;
+    public static T2IRegisteredParam<double> MusicRepetitionPenaltyParam;
 
     public override void OnPreInit()
     {
@@ -176,7 +205,16 @@ public class SwarmUIHartsyInference : Extension
 
         ReferenceVideosParam = T2IParamTypes.Register<List<Image>>(new(
             "H3 Reference Videos",
-            "MiniMax-H3 (ref2va): reference videos to carry subject, motion or style from (up to 3).\nEach clip is truncated to the generation's length, snapped down to the model's 17k+5 frame grid, and sampled at 2fps for the vision tower.\nPair a soundtrack via H3 Reference Audio ordering only if the clip carries one; requires a ref2va checkpoint.",
+            "MiniMax-H3 (ref2va): reference videos to carry subject, motion or style from (up to 3).\nEach clip is truncated to the generation's length, snapped down to the model's 17k+5 frame grid, and sampled at 2fps for the vision tower.\nPair a soundtrack per clip via H3 Reference Video Soundtracks; requires a ref2va checkpoint.",
+            null,
+            Toggleable: true,
+            Group: HartsyInferenceParamGroup,
+            FeatureFlag: "hartsyinference",
+            ChangeWeight: 2));
+
+        ReferenceVideoSoundtracksParam = T2IParamTypes.Register<List<AudioFile>>(new(
+            "H3 Reference Video Soundtracks",
+            "MiniMax-H3 (ref2va): soundtrack for each H3 Reference Video, paired BY POSITION — soundtrack 1 belongs to reference video 1, and so on.\nSupply fewer soundtracks than videos to leave the trailing clips silent.\nThis is separate from H3 Reference Audio, which conditions the output soundtrack standalone.",
             null,
             Toggleable: true,
             Group: HartsyInferenceParamGroup,
@@ -234,25 +272,6 @@ public class SwarmUIHartsyInference : Extension
             FeatureFlag: "hartsyinference",
             ChangeWeight: 2));
 
-        DtypeOverrideParam = T2IParamTypes.Register<string>(new(
-            "HartsyInference Dtype",
-            "Override the loaded model dtype. fp16 saves VRAM, fp32 is most accurate (especially on CPU).",
-            "fp16",
-            Toggleable: true,
-            Group: HartsyInferenceParamGroup,
-            FeatureFlag: "hartsyinference",
-            GetValues: _ => new List<string> { "fp16", "bf16", "fp32" }));
-
-        TileVaeThresholdParam = T2IParamTypes.Register<int>(new(
-            "HartsyInference Tile VAE Threshold",
-            "Tile VAE decode for outputs above this dimension (px). 0 = always tile.",
-            "1024",
-            Toggleable: true,
-            Min: 0,
-            Max: 4096,
-            Group: HartsyInferenceParamGroup,
-            FeatureFlag: "hartsyinference"));
-
         // Named "HartsyInference Sampler" because Comfy already owns the "sampler" param ID.
         // When this is unset but Comfy's Sampler param is, SamplingParamResolver maps the
         // Comfy value over as a courtesy (euler/ddim/dpmpp_2m/lcm map; others → Euler).
@@ -264,6 +283,16 @@ public class SwarmUIHartsyInference : Extension
             Group: HartsyInferenceParamGroup,
             FeatureFlag: "hartsyinference",
             GetValues: _ => new List<string> { "euler", "ddim", "dpm++2m", "lcm" }));
+
+        InitImageModeParam = T2IParamTypes.Register<string>(new(
+            "HartsyInference Init Image Mode",
+            "How the Init Image is consumed.\n'denoise' = classic img2img: Creativity picks how much is regenerated.\n'reference' = in-context reference editing: the image conditions every step and Creativity is ignored.\n'auto' lets the model family decide (families offering both, like Qwen-Image, prefer denoise).",
+            "auto",
+            Toggleable: true,
+            IgnoreIf: "auto",
+            Group: HartsyInferenceParamGroup,
+            FeatureFlag: "hartsyinference",
+            GetValues: _ => new List<string> { "auto", "denoise", "reference" }));
 
         // FaceID-PlusV2 shortcut strength: sits with the Comfy extension's IP-Adapter params in the
         // Image Prompting group (same "ipadapter" feature flag + dropdown dependency) so it appears
@@ -314,7 +343,7 @@ public class SwarmUIHartsyInference : Extension
 
         VideoRestoreModelParam = T2IParamTypes.Register<string>(new(
             "Video Restore Model",
-            "Restore/upscale generated video frames with SeedVR2 before muxing (one extra DiT step).\nToggle ON to enable; seedvr2-3b is the catalog default.",
+            "Restore/upscale the generated output with SeedVR2 — video frames before muxing, or a still image after generation.\nToggle ON to enable; seedvr2-3b is the catalog default.",
             "seedvr2-3b",
             Toggleable: true,
             Group: VideoRestoreParamGroup,
@@ -322,7 +351,7 @@ public class SwarmUIHartsyInference : Extension
 
         VideoRestoreWidthParam = T2IParamTypes.Register<int>(new(
             "Video Restore Target Width",
-            "Width component of the restore target AREA (aspect is preserved; this is not an output width).",
+            "Width component of the restore target AREA (aspect is preserved; this is not an output width). Applies to video frames and stills alike.",
             "1280",
             Min: 256, Max: 4096, Step: 16,
             Toggleable: true,
@@ -340,7 +369,7 @@ public class SwarmUIHartsyInference : Extension
 
         VideoRestoreClipFramesParam = T2IParamTypes.Register<int>(new(
             "Video Restore Clip Frames",
-            "Frames per restore chunk (rounded to the model's (n-1)%4==0 contract). Lower on tight VRAM — fp32 720p-area needs ~5.",
+            "Frames per restore chunk (rounded to the model's (n-1)%4==0 contract). Lower on tight VRAM — fp32 720p-area needs ~5. Ignored for stills.",
             "5",
             Min: 1, Max: 121, Step: 4,
             Toggleable: true,
@@ -364,6 +393,212 @@ public class SwarmUIHartsyInference : Extension
             Toggleable: true,
             Group: VideoRestoreParamGroup,
             FeatureFlag: "hartsyinference"));
+
+        // Music group: ACE-Step editing + planner + advanced knobs, YuE sampling. Subgroups are faked with
+        // OrderPriority bands (edit 1-5, LM 10-16, CFG 20-23, sampling 30-33); Swarm has no nested groups.
+        MusicParamGroup = new("HartsyInference Music", Toggles: false, Open: false, IsAdvanced: false);
+
+        MusicSourceAudioParam = T2IParamTypes.Register<AudioFile>(new(
+            "Hartsy Music Source Audio",
+            "Source audio clip for ACE-Step music editing. What happens to it is picked by Hartsy Music Edit Mode:\ncontinuation extends it, repaint regenerates a time span inside it, cover re-renders it in the prompt's style.\nACE-Step models only. Cannot be combined with the Hartsy Music LM Planner.",
+            null,
+            Toggleable: true,
+            Group: MusicParamGroup,
+            FeatureFlag: "hartsyinference",
+            OrderPriority: 1,
+            ChangeWeight: 2));
+
+        MusicEditModeParam = T2IParamTypes.Register<string>(new(
+            "Hartsy Music Edit Mode",
+            "What the Source Audio is used for.\n'continuation' = generate Duration seconds continuing past the clip.\n'repaint' = regenerate only Repaint Start..Repaint End seconds inside the clip.\n'cover' = re-render the whole clip in the prompt's style at Cover Strength.",
+            "continuation",
+            Toggleable: true,
+            Group: MusicParamGroup,
+            FeatureFlag: "hartsyinference",
+            OrderPriority: 2,
+            GetValues: _ => new List<string> { "continuation", "repaint", "cover" }));
+
+        MusicRepaintStartParam = T2IParamTypes.Register<double>(new(
+            "Hartsy Music Repaint Start",
+            "Repaint mode: start of the regenerated span, in seconds from the start of the Source Audio.",
+            "0", Min: 0, Max: 600, Step: 0.5,
+            Toggleable: true,
+            Group: MusicParamGroup,
+            FeatureFlag: "hartsyinference",
+            OrderPriority: 3));
+
+        MusicRepaintEndParam = T2IParamTypes.Register<double>(new(
+            "Hartsy Music Repaint End",
+            "Repaint mode: end of the regenerated span, in seconds. Must be greater than Repaint Start.",
+            "0", Min: 0, Max: 600, Step: 0.5,
+            Toggleable: true,
+            Group: MusicParamGroup,
+            FeatureFlag: "hartsyinference",
+            OrderPriority: 4));
+
+        MusicCoverStrengthParam = T2IParamTypes.Register<double>(new(
+            "Hartsy Music Cover Strength",
+            "Cover mode: how much of the source is re-rendered (0 keeps it, 1 fully regenerates). Clamped to 0.05 minimum engine-side.",
+            "0.5", Min: 0, Max: 1, Step: 0.05,
+            Toggleable: true,
+            Group: MusicParamGroup,
+            FeatureFlag: "hartsyinference",
+            OrderPriority: 5,
+            ViewType: ParamViewType.SLIDER));
+
+        MusicLmModelParam = T2IParamTypes.Register<string>(new(
+            "Hartsy Music LM Planner",
+            "ACE-Step 5 Hz LM planner: a language model that plans the song's structure before diffusion.\n'0.6b' or '4b' selects the planner size (auto-downloaded). Cannot be combined with Source Audio editing.",
+            "none",
+            Toggleable: true,
+            IgnoreIf: "none",
+            Group: MusicParamGroup,
+            FeatureFlag: "hartsyinference",
+            OrderPriority: 10,
+            GetValues: _ => new List<string> { "none", "0.6b", "4b" }));
+
+        MusicLmThinkingParam = T2IParamTypes.Register<bool>(new(
+            "Hartsy Music LM Thinking",
+            "Planner thinking mode (also selects the matching guidance scalers).",
+            "true",
+            Toggleable: true,
+            Group: MusicParamGroup,
+            FeatureFlag: "hartsyinference",
+            OrderPriority: 11,
+            IsAdvanced: true));
+
+        MusicLmTemperatureParam = T2IParamTypes.Register<double>(new(
+            "Hartsy Music LM Temperature",
+            "Planner sampling temperature.",
+            "0.85", Min: 0, Max: 2, Step: 0.05,
+            Toggleable: true,
+            Group: MusicParamGroup,
+            FeatureFlag: "hartsyinference",
+            OrderPriority: 12,
+            IsAdvanced: true));
+
+        MusicLmCfgParam = T2IParamTypes.Register<double>(new(
+            "Hartsy Music LM CFG Scale",
+            "Planner guidance scale.",
+            "2", Min: 1, Max: 10, Step: 0.5,
+            Toggleable: true,
+            Group: MusicParamGroup,
+            FeatureFlag: "hartsyinference",
+            OrderPriority: 13,
+            IsAdvanced: true));
+
+        MusicLmTopKParam = T2IParamTypes.Register<int>(new(
+            "Hartsy Music LM Top K",
+            "Planner top-k sampling cutoff (0 = disabled).",
+            "0", Min: 0, Max: 500, Step: 10,
+            Toggleable: true,
+            Group: MusicParamGroup,
+            FeatureFlag: "hartsyinference",
+            OrderPriority: 14,
+            IsAdvanced: true));
+
+        MusicLmTopPParam = T2IParamTypes.Register<double>(new(
+            "Hartsy Music LM Top P",
+            "Planner nucleus sampling cutoff.",
+            "0.9", Min: 0, Max: 1, Step: 0.05,
+            Toggleable: true,
+            Group: MusicParamGroup,
+            FeatureFlag: "hartsyinference",
+            OrderPriority: 15,
+            IsAdvanced: true));
+
+        MusicLmNegativePromptParam = T2IParamTypes.Register<string>(new(
+            "Hartsy Music LM Negative Prompt",
+            "Planner negative prompt.",
+            "",
+            Toggleable: true,
+            Group: MusicParamGroup,
+            FeatureFlag: "hartsyinference",
+            OrderPriority: 16,
+            IsAdvanced: true,
+            ViewType: ParamViewType.PROMPT));
+
+        MusicInferMethodParam = T2IParamTypes.Register<string>(new(
+            "Hartsy Music Infer Method",
+            "ACE-Step diffusion solver: 'ode' (Euler, default) or 'sde' (predict-clean + renoise).",
+            "ode",
+            Toggleable: true,
+            IgnoreIf: "ode",
+            Group: MusicParamGroup,
+            FeatureFlag: "hartsyinference",
+            OrderPriority: 20,
+            IsAdvanced: true,
+            GetValues: _ => new List<string> { "ode", "sde" }));
+
+        MusicUseAdgParam = T2IParamTypes.Register<bool>(new(
+            "Hartsy Music Use ADG",
+            "ACE-Step: use ADG guidance instead of the default APG blend (only matters when CFG > 1 on non-turbo checkpoints).",
+            "false",
+            Toggleable: true,
+            Group: MusicParamGroup,
+            FeatureFlag: "hartsyinference",
+            OrderPriority: 21,
+            IsAdvanced: true));
+
+        MusicCfgIntervalStartParam = T2IParamTypes.Register<double>(new(
+            "Hartsy Music CFG Interval Start",
+            "ACE-Step: CFG applies only while sigma is inside this 0..1 interval.",
+            "0", Min: 0, Max: 1, Step: 0.05,
+            Toggleable: true,
+            Group: MusicParamGroup,
+            FeatureFlag: "hartsyinference",
+            OrderPriority: 22,
+            IsAdvanced: true));
+
+        MusicCfgIntervalEndParam = T2IParamTypes.Register<double>(new(
+            "Hartsy Music CFG Interval End",
+            "ACE-Step: upper edge of the CFG sigma interval.",
+            "1", Min: 0, Max: 1, Step: 0.05,
+            Toggleable: true,
+            Group: MusicParamGroup,
+            FeatureFlag: "hartsyinference",
+            OrderPriority: 23,
+            IsAdvanced: true));
+
+        MusicTemperatureParam = T2IParamTypes.Register<double>(new(
+            "Hartsy Music Temperature",
+            "YuE sampling temperature (ACE-Step and MusicGen ignore this).",
+            "1", Min: 0, Max: 2, Step: 0.05,
+            Toggleable: true,
+            Group: MusicParamGroup,
+            FeatureFlag: "hartsyinference",
+            OrderPriority: 30,
+            IsAdvanced: true));
+
+        MusicTopKParam = T2IParamTypes.Register<int>(new(
+            "Hartsy Music Top K",
+            "YuE top-k sampling cutoff.",
+            "50", Min: 0, Max: 500, Step: 10,
+            Toggleable: true,
+            Group: MusicParamGroup,
+            FeatureFlag: "hartsyinference",
+            OrderPriority: 31,
+            IsAdvanced: true));
+
+        MusicTopPParam = T2IParamTypes.Register<double>(new(
+            "Hartsy Music Top P",
+            "YuE nucleus sampling cutoff.",
+            "0.93", Min: 0, Max: 1, Step: 0.01,
+            Toggleable: true,
+            Group: MusicParamGroup,
+            FeatureFlag: "hartsyinference",
+            OrderPriority: 32,
+            IsAdvanced: true));
+
+        MusicRepetitionPenaltyParam = T2IParamTypes.Register<double>(new(
+            "Hartsy Music Repetition Penalty",
+            "YuE repetition penalty (floored at 1 engine-side).",
+            "1.1", Min: 1, Max: 2, Step: 0.05,
+            Toggleable: true,
+            Group: MusicParamGroup,
+            FeatureFlag: "hartsyinference",
+            OrderPriority: 33,
+            IsAdvanced: true));
 
         // 2. Register the backend type (single type — no _selfstart vs _api split,
         //    we always run in-process).

@@ -126,8 +126,12 @@
                  backend's CUDA context (the demote hook switches context and never restores), so any DiT-sharded run
                  touching one died with CUDA_ERROR_INVALID_VALUE — which H3's fl2va rope tables hit. Sharded step time
                  also drops ~2.9x now that those tensors can be promoted on the second card.
-             Restore 404s until the alpha.14 publish lands — by design (alpha.4/.5/.10/.11 precedent). -->
-        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.14" />
+             alpha.15 adds MiniMax-H3 reference VIDEOS (a 2-frame vision block is gridT=1, so it costs a still
+             image's tokens) and LoRA on the fp8 build (dequant -> merge in F32 -> requantize with a recomputed
+             absmax/448 scale, ComfyUI's approach, so the native fp8 GEMM survives). Reference videos need the
+             "H3 Reference Videos" param registered below.
+             Restore 404s until the alpha.15 publish lands — by design (alpha.4/.5/.10/.11 precedent). -->
+        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.15" />
     </ItemGroup>
 
     <!-- LOCAL ENGINE: prebuilt DLLs from the HartsyInference Cli bin (its full runtime closure). Referenced
