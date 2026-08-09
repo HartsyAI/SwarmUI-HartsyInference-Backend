@@ -12,6 +12,7 @@ using SwarmUI.Text2Image;
 using SwarmUI.Utils;
 using Hartsy.Extensions.HartsyInferenceBackend.Generation;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.MemoryManagement;
 using SiLogs = HartsyInference.Core.Logging.Logs;
 using HartsyInference.Engine;
@@ -110,36 +111,40 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     /// <summary>The device key this instance registered in <see cref="_liveDeviceCounts"/>, for Shutdown to release.</summary>
     private string _registeredDeviceKey;
 
-    public override IEnumerable<string> SupportedFeatures
-    {
-        get
-        {
-            // We advertise "comfyui" so that, when a Comfy backend is ALSO configured, requests
-            // carrying Comfy-tagged params reach our validator instead of being pre-filtered out
-            // by T2IEngine's flag check. SwarmUI can't split one request across two backends, so
-            // a request that picked up both "comfyui" (from Comfy's shared params, eg Sampler) and
-            // "hartsyinference" would otherwise match NEITHER backend and refuse the generation
-            // entirely (Comfy lacks "hartsyinference", we lack "comfyui").
-            //
-            // Honesty is enforced one layer down: IsValidForThisBackend refuses any comfyui-only
-            // param we can't actually service, and every composition feature is checked against the
-            // Engine recipe's own declared ImageFeatures — so advertising a flag here never means
-            // "we silently serve everything tagged with it".
-            yield return "hartsyinference";
-            yield return "comfyui";
-            yield return "text2image";
-            yield return "flux-dev";       // in DisregardedFeatureFlags — informational
-            yield return "lora";           // per-family; gated by the recipe's ImageFeatures.Lora
-            yield return "endstepsearly";  // ImageRequest.EndStepsEarly
-            yield return "refiners";       // per-family; gated by ImageFeatures.Refiner
-            yield return "img2img";        // per-family; gated by ImageFeatures.Img2Img
-            yield return "inpaint";        // per-family; gated by ImageFeatures.Inpaint
-            yield return "controlnet";     // per-family; gated by ImageFeatures.ControlNet
-            yield return "ipadapter";      // per-family; gated by ImageFeatures.IpAdapter
-            yield return "variation_seed"; // per-family; gated by ImageFeatures.VariationSeed
-            yield return "video";          // Wan (T2V/I2V + VACE / Animate / S2V) + LTX-Video + LTX-2 + Lance Video
-        }
-    }
+    /// <summary>Every feature flag this backend advertises. Static so the startup self-check in
+    /// <c>SwarmUIHartsyInference</c> can compare it against the flags our registered params actually carry —
+    /// <see cref="T2IEngine"/> refuses any job whose required flags this set does not cover (unless the flag is in
+    /// <c>T2IEngine.DisregardedFeatureFlags</c>), and that refusal names no param, so a flag added to a param and
+    /// forgotten here is invisible until someone's generation stops working.</summary>
+    public static readonly IReadOnlyList<string> DeclaredFeatures =
+    [
+        // We advertise "comfyui" so that, when a Comfy backend is ALSO configured, requests
+        // carrying Comfy-tagged params reach our validator instead of being pre-filtered out
+        // by T2IEngine's flag check. SwarmUI can't split one request across two backends, so
+        // a request that picked up both "comfyui" (from Comfy's shared params, eg Sampler) and
+        // "hartsyinference" would otherwise match NEITHER backend and refuse the generation
+        // entirely (Comfy lacks "hartsyinference", we lack "comfyui").
+        //
+        // Honesty is enforced one layer down: IsValidForThisBackend refuses any comfyui-only
+        // param we can't actually service, and every composition feature is checked against the
+        // Engine recipe's own declared ImageFeatures — so advertising a flag here never means
+        // "we silently serve everything tagged with it".
+        "hartsyinference",
+        "comfyui",
+        "text2image",
+        "flux-dev",       // in DisregardedFeatureFlags — informational
+        "lora",           // per-family; gated by the recipe's ImageFeatures.Lora
+        "endstepsearly",  // ImageRequest.EndStepsEarly
+        "refiners",       // per-family; gated by ImageFeatures.Refiner
+        "img2img",        // per-family; gated by ImageFeatures.Img2Img
+        "inpaint",        // per-family; gated by ImageFeatures.Inpaint
+        "controlnet",     // per-family; gated by ImageFeatures.ControlNet
+        "ipadapter",      // per-family; gated by ImageFeatures.IpAdapter
+        "variation_seed", // per-family; gated by ImageFeatures.VariationSeed
+        "video",          // Wan (T2V/I2V + VACE / Animate / S2V) + LTX-Video + LTX-2 + Lance Video + MiniMax-H3
+    ];
+
+    public override IEnumerable<string> SupportedFeatures => DeclaredFeatures;
 
     /// <summary>Bridges HartsyInference's internal logger into Swarm's logging system so
     /// diagnostics like the OOM probe in CudaMemory.Allocate appear in the main log file
@@ -538,12 +543,38 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             ModelSpec spec = ModelSupport.BuildSpec(model, family);
             IProgress<StepPreview> progress = BuildProgressBridge(batchId, takeOutput);
 
-            Image[] outputs = family.Kind switch
+            async Task<Image[]> Dispatch() => family.Kind switch
             {
                 ModelSupport.Kind.Video => [await GenerateVideo(spec, input, progress, cancel)],
                 ModelSupport.Kind.Music => [await GenerateMusic(spec, input, progress, cancel)],
                 _ => [await GenerateImage(spec, input, family, progress, cancel)],
             };
+
+            Image[] outputs;
+            try
+            {
+                outputs = await Dispatch();
+            }
+            catch (OutOfVramException first) when (!cancel.IsCancellationRequested)
+            {
+                // Worth exactly one retry: the usual cause is a pipeline cached from an earlier, larger model still
+                // holding VRAM this request needs, which FreeMemory releases. A second failure is the real thing —
+                // this request does not fit — so it becomes a readable refusal rather than another retry.
+                Logs.Warning($"[HartsyInference] {first.Message} Freeing cached models and retrying once.");
+                await FreeMemory(false);
+                try
+                {
+                    outputs = await Dispatch();
+                }
+                catch (OutOfVramException second)
+                {
+                    throw new SwarmReadableErrorException(DescribeVramFailure(second, family));
+                }
+            }
+            catch (OutOfVramException only)
+            {
+                throw new SwarmReadableErrorException(DescribeVramFailure(only, family));
+            }
 
             long totalMs = Environment.TickCount64 - startMs;
             int idx = 0;
@@ -1102,9 +1133,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     {
         Image initImage = input.Get(T2IParamTypes.InitImage);
         Image endFrame = input.Get(T2IParamTypes.VideoEndFrame);
-        int frames = input.TryGet(T2IParamTypes.Text2VideoFrames, out int t2vFrames) && t2vFrames > 0
-            ? t2vFrames
-            : input.Get(T2IParamTypes.VideoFrames, 25);
+        int? frames = ResolveFrames(input);
+        RefuseIncompatibleH3Conditioning(input, initImage, endFrame);
         Dictionary<string, object> extra = new(StringComparer.Ordinal);
         Image reference = input.Get(SwarmUIHartsyInference.AnimateReferenceImageParam);
         if (reference is not null)
@@ -1149,15 +1179,9 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             VideoEndFrame = endFrame is null ? null : ToEngineImage(endFrame),
             VideoAudioInput = ToAudioClip(input.Get(T2IParamTypes.VideoAudioInput)),
             VideoAudioReference = ToAudioClip(input.Get(SwarmUIHartsyInference.VideoAudioReferenceParam)),
-            ReferenceImages = input.TryGet(SwarmUIHartsyInference.ReferenceImagesParam, out List<Image> refImages)
-                && refImages is { Count: > 0 }
-                ? [.. refImages.Select(ToEngineImage)]
-                : null,
+            ReferenceImages = BuildReferenceImages(input),
             ReferenceVideos = BuildReferenceVideos(input),
-            ReferenceAudios = input.TryGet(SwarmUIHartsyInference.ReferenceAudiosParam, out List<AudioFile> refAudios)
-                && refAudios is { Count: > 0 }
-                ? [.. refAudios.Select(ToAudioClip).Where(c => c is not null).Cast<AudioClip>()]
-                : null,
+            ReferenceAudios = BuildReferenceAudios(input),
             Frames = frames,
             TrimVideoStartFrames = input.Get(T2IParamTypes.TrimVideoStartFrames, 0),
             TrimVideoEndFrames = input.Get(T2IParamTypes.TrimVideoEndFrames, 0),
@@ -1167,29 +1191,117 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         };
     }
 
-    /// <summary>Builds the reference clips, pairing each H3 soundtrack to the same-position clip. Null videos are
-    /// filtered BEFORE zipping so the pairing follows the user's visible ordering; missing trailing soundtracks
-    /// leave those clips silent (the engine's <see cref="ReferenceVideo.Audio"/> is nullable by design).</summary>
-    private static IReadOnlyList<ReferenceVideo> BuildReferenceVideos(T2IParamInput input)
+    /// <summary>Refuses start/end-frame conditioning combined with references on MiniMax-H3, whichever checkpoint is
+    /// loaded. fl2va and ref2va are separate tasks: the packed layout restarts its position cursor for reference
+    /// blocks, so keyframe and reference rows would occupy overlapping coordinates. The engine throws on this too —
+    /// this catches it at request construction, where the message can name the params the user actually set.</summary>
+    private static void RefuseIncompatibleH3Conditioning(T2IParamInput input, Image initImage, Image endFrame)
     {
-        if (!input.TryGet(SwarmUIHartsyInference.ReferenceVideosParam, out List<Image> refVideos)
-            || refVideos is not { Count: > 0 })
+        if (!IsMiniMaxH3(input))
+        {
+            return;
+        }
+        bool hasFrames = initImage is not null || endFrame is not null;
+        bool hasRefs = (input.TryGet(T2IParamTypes.PromptImages, out List<Image> pi) && pi is { Count: > 0 })
+            || (input.TryGet(T2IParamTypes.PromptAudios, out List<AudioFile> pa) && pa is { Count: > 0 })
+            || (input.TryGet(T2IParamTypes.PromptVideos, out List<VideoFile> pv) && pv is { Count: > 0 });
+        if (hasFrames && hasRefs)
+        {
+            throw new SwarmUserErrorException(
+                "MiniMax-H3 cannot combine start/end-frame conditioning with reference media — fl2va and ref2va are "
+                + "separate tasks shipped as separate checkpoints, and their packed-layout coordinates overlap. "
+                + $"Remove either the {(initImage is not null ? "Init Image" : "Video End Frame")} or the media "
+                + "attached to the prompt.");
+        }
+    }
+
+    /// <summary>The requested frame count, or null to let the family's own default stand.</summary>
+    /// <remarks>SwarmUI's core frame params default to 25 for every video family. For MiniMax-H3 that is not a
+    /// neutral value — 25 snaps up onto the 17k+5 grid to 39 frames (1.6 s), so a user who never touched the slider
+    /// silently got a sixth of the model's native 124-frame clip and no indication why. Returning null when neither
+    /// param was actually set hands the decision to the recipe, which uses 124 — the same "unset falls back to 124"
+    /// the reference workflow does. Scoped to H3 deliberately: the other families' defaults are wrong in their own
+    /// ways, but fixing those is not this change.</remarks>
+    private static int? ResolveFrames(T2IParamInput input)
+    {
+        if (input.TryGet(T2IParamTypes.Text2VideoFrames, out int t2vFrames) && t2vFrames > 0)
+        {
+            return t2vFrames;
+        }
+        if (input.TryGet(T2IParamTypes.VideoFrames, out int videoFrames) && videoFrames > 0)
+        {
+            return videoFrames;
+        }
+        if (IsMiniMaxH3(input))
+        {
+            Logs.Verbose("[HartsyInference] No frame count set — leaving it to MiniMax-H3's own 124-frame default "
+                + "rather than Swarm's cross-family 25 (which would snap to 39 on H3's 17k+5 grid).");
+            return null;
+        }
+        return 25;
+    }
+
+    /// <summary>Whether the selected model is MiniMax-H3, by core's own compat class rather than a name guess.</summary>
+    private static bool IsMiniMaxH3(T2IParamInput input) =>
+        input.Get(T2IParamTypes.Model)?.ModelClass?.CompatClass?.ID == T2IModelClassSorter.CompatMiniMaxH3.ID;
+
+    /// <summary>Reference media caps the model was trained under, mirroring what the reference node accepts.</summary>
+    private const int MaxRefImages = 9, MaxRefAudios = 3, MaxRefVideos = 3;
+
+    /// <summary>Reference images come from the prompt box, not a param control: core's
+    /// <see cref="T2IParamTypes.PromptImages"/> is the internal carrier the textbox fills when media is dragged or
+    /// pasted onto it, and the model's own text encoder resolves the <c>&lt;Picture N&gt;</c> tags the user types
+    /// inline. Swarm never parses those tags — it just supplies the ordered list, which is exactly what the
+    /// MiniMax-H3 reference node consumes, index for index.</summary>
+    private static IReadOnlyList<EngineImage> BuildReferenceImages(T2IParamInput input)
+    {
+        if (!input.TryGet(T2IParamTypes.PromptImages, out List<Image> images) || images is not { Count: > 0 })
         {
             return null;
         }
-        List<Image> videos = [.. refVideos.Where(v => v is not null)];
-        List<AudioFile> soundtracks = input.TryGet(SwarmUIHartsyInference.ReferenceVideoSoundtracksParam, out List<AudioFile> tracks)
-            && tracks is not null ? tracks : [];
-        List<ReferenceVideo> result = [];
-        for (int i = 0; i < videos.Count; i++)
+        List<EngineImage> kept = [.. images.Where(i => i is not null).Take(MaxRefImages).Select(ToEngineImage)];
+        WarnIfTruncated(images.Count, kept.Count, "images");
+        return kept.Count == 0 ? null : kept;
+    }
+
+    /// <summary>Standalone reference audio, from the prompt box — <c>&lt;Audio N&gt;</c> in the prompt.</summary>
+    private static IReadOnlyList<AudioClip> BuildReferenceAudios(T2IParamInput input)
+    {
+        if (!input.TryGet(T2IParamTypes.PromptAudios, out List<AudioFile> audios) || audios is not { Count: > 0 })
         {
-            result.Add(new ReferenceVideo
-            {
-                Video = ToVideoClip(videos[i]),
-                Audio = i < soundtracks.Count ? ToAudioClip(soundtracks[i]) : null,
-            });
+            return null;
         }
-        return result.Count == 0 ? null : result;
+        List<AudioClip> kept = [.. audios.Where(a => a is not null).Take(MaxRefAudios)
+            .Select(ToAudioClip).Where(c => c is not null).Cast<AudioClip>()];
+        WarnIfTruncated(audios.Count, kept.Count, "audio clips");
+        return kept.Count == 0 ? null : kept;
+    }
+
+    /// <summary>Reference videos from the prompt box. Deliberately UNPAIRED with the reference audio: the reference
+    /// node sends two independent positional lists and lets the model correlate them through the inline
+    /// <c>&lt;Video N&gt;</c>/<c>&lt;Audio N&gt;</c> tags. The engine's <see cref="ReferenceVideo.Audio"/> can carry
+    /// an explicit per-clip soundtrack and still does — it is simply not something this UI expresses.</summary>
+    private static IReadOnlyList<ReferenceVideo> BuildReferenceVideos(T2IParamInput input)
+    {
+        if (!input.TryGet(T2IParamTypes.PromptVideos, out List<VideoFile> videos) || videos is not { Count: > 0 })
+        {
+            return null;
+        }
+        List<ReferenceVideo> kept = [.. videos.Where(v => v is not null).Take(MaxRefVideos)
+            .Select(v => new ReferenceVideo { Video = ToVideoClip(v), Audio = null })];
+        WarnIfTruncated(videos.Count, kept.Count, "videos");
+        return kept.Count == 0 ? null : kept;
+    }
+
+    /// <summary>Says so when media past the model's cap is dropped — silently ignoring the 10th image would look
+    /// like the model ignored it.</summary>
+    private static void WarnIfTruncated(int supplied, int used, string what)
+    {
+        if (supplied > used)
+        {
+            Logs.Warning($"[HartsyInference] {supplied} reference {what} attached but this model takes at most "
+                + $"{used} — the extras were dropped.");
+        }
     }
 
     /// <summary>Maps Swarm's Text2Audio group plus this extension's music params onto the Engine's
@@ -1358,6 +1470,29 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     /// <summary>Wraps a SwarmUI video upload as the Engine's encoded-video payload; the Engine decodes it via ffmpeg.</summary>
     private static VideoClip ToVideoClip(Image video) =>
         video is null ? null : new VideoClip { Data = video.RawData, Format = video.Type?.Extension };
+
+    /// <summary>Same, for the core prompt-box video carrier (<see cref="T2IParamTypes.PromptVideos"/>).</summary>
+    private static VideoClip ToVideoClip(VideoFile video) =>
+        video is null ? null : new VideoClip { Data = video.RawData, Format = video.Type?.Extension };
+
+    /// <summary>Turns an out-of-VRAM failure into something a user can act on. The Engine's own message is already
+    /// specific — the pre-flight names the geometry, the byte requirement and the longest clip that would fit; a
+    /// mid-forward failure names the allocation that could not be served — so it is quoted verbatim rather than
+    /// re-derived, and only the advice is added here. Without this the whole thing surfaced as T2IEngine's generic
+    /// "Something went wrong".</summary>
+    private static string DescribeVramFailure(OutOfVramException ex, ModelSupport.Family family)
+    {
+        string sizes = ex.RequestedBytes > 0
+            ? $" (needed {ex.RequestedBytes / (1024 * 1024)} MB, {ex.AvailableBytes / (1024 * 1024)} MB free)"
+            : "";
+        string lever = family?.Kind == ModelSupport.Kind.Video
+            ? "Lower the frame count or the resolution"
+            : "Lower the resolution or batch size";
+        return $"Out of VRAM on the HartsyInference backend{sizes}. {ex.Message}\n\n"
+            + $"{lever}, or set this backend's DitShardGpuId to a second CUDA ordinal to pool both cards' VRAM, "
+            + "or set LowVram to stream weights instead of keeping them resident. Freeing cached models and "
+            + "retrying once already failed, so this is not a stale-cache problem.";
+    }
 
     /// <summary>Wraps a SwarmUI audio param as the Engine's encoded-audio payload.</summary>
     private static AudioClip ToAudioClip(AudioFile audio) =>
@@ -1536,20 +1671,19 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         // silently generate text-to-video, which looks like a working generation and is not. Checkpoint-aware:
         // Wan's Animate/VACE/S2V variants share the family compat classes (header-sniffed engine-side).
         VideoFeatures videoSupported = ModelSupport.SupportedVideoFeatures(compat, input.Get(T2IParamTypes.Model)?.RawFilePath);
-        bool hasRefVideos = input.TryGet(SwarmUIHartsyInference.ReferenceVideosParam, out List<Image> refVids)
-            && refVids is not null && refVids.Any(v => v is not null);
-        bool hasSoundtracks = input.TryGet(SwarmUIHartsyInference.ReferenceVideoSoundtracksParam, out List<AudioFile> refTracks)
-            && refTracks is { Count: > 0 };
+        // Reference media rides the prompt box (core's internal PromptImages/Audios/Videos carriers), so these read
+        // what the user attached there rather than a param control of ours.
+        bool hasRefImages = input.TryGet(T2IParamTypes.PromptImages, out List<Image> refImgs) && refImgs is { Count: > 0 };
+        bool hasRefAudios = input.TryGet(T2IParamTypes.PromptAudios, out List<AudioFile> refAuds) && refAuds is { Count: > 0 };
+        bool hasRefVideos = input.TryGet(T2IParamTypes.PromptVideos, out List<VideoFile> refVids) && refVids is { Count: > 0 };
         (VideoFeatures Feature, string Name, bool Requested)[] videoChecks =
         [
             (VideoFeatures.InitImage, "image-to-video (Init Image)", input.Get(T2IParamTypes.InitImage) is not null),
             (VideoFeatures.EndFrame, "end-frame conditioning (Video End Frame)", input.Get(T2IParamTypes.VideoEndFrame) is not null),
-            (VideoFeatures.ReferenceImages, "reference images (H3 Reference Images)",
-                input.TryGet(SwarmUIHartsyInference.ReferenceImagesParam, out List<Image> refImgs) && refImgs is { Count: > 0 }),
-            (VideoFeatures.ReferenceVideos, "reference videos (H3 Reference Videos / Soundtracks)", hasRefVideos || hasSoundtracks),
-            (VideoFeatures.ReferenceAudios, "reference audio (H3 Reference Audio / Video Audio Reference)",
-                (input.TryGet(SwarmUIHartsyInference.ReferenceAudiosParam, out List<AudioFile> refAuds) && refAuds is { Count: > 0 })
-                || input.Get(SwarmUIHartsyInference.VideoAudioReferenceParam) is not null),
+            (VideoFeatures.ReferenceImages, "reference images (attached to the prompt)", hasRefImages),
+            (VideoFeatures.ReferenceVideos, "reference videos (attached to the prompt)", hasRefVideos),
+            (VideoFeatures.ReferenceAudios, "reference audio (attached to the prompt, or Video Audio Reference)",
+                hasRefAudios || input.Get(SwarmUIHartsyInference.VideoAudioReferenceParam) is not null),
             (VideoFeatures.DrivingVideo, "Wan-Animate driving (Animate Reference Image / Pose Video / Face Video)",
                 input.Get(SwarmUIHartsyInference.AnimateReferenceImageParam) is not null
                 || input.Get(SwarmUIHartsyInference.AnimatePoseVideoParam) is not null
@@ -1559,26 +1693,21 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         {
             if (requested && (videoSupported & feature) == 0)
             {
+                // For H3 the limit is the CHECKPOINT, not the architecture — saying "architecture doesn't support
+                // references" about a model whose sibling checkpoint is built for references sends people looking
+                // in the wrong place.
+                string h3Hint = family.Id == "minimax-h3"
+                    ? " MiniMax-H3 ships this as two checkpoints: fl2va does start/end frames, ref2va does reference"
+                        + " media. Load the other one for this."
+                    : " Remove it or pick a video model from a supported architecture.";
                 input.RefusalReasons.Add(
-                    $"HartsyInference: {name} isn't supported on architecture '{compat}' (engine family '{family.Id}'). "
-                    + $"That family applies: {(videoSupported == VideoFeatures.None ? "text-to-video only" : videoSupported.ToString())}. "
-                    + "Remove it or pick a video model from a supported architecture.");
+                    $"HartsyInference: {name} isn't supported by this checkpoint (architecture '{compat}', engine "
+                    + $"family '{family.Id}'). It applies: "
+                    + $"{(videoSupported == VideoFeatures.None ? "text-to-video only" : videoSupported.ToString())}."
+                    + h3Hint);
                 return false;
             }
         }
-        // Soundtracks pair positionally with reference videos — a dangling soundtrack has no clip to pair with.
-        if (hasSoundtracks)
-        {
-            int videoCount = hasRefVideos ? refVids.Count(v => v is not null) : 0;
-            if (refTracks.Count > videoCount)
-            {
-                input.RefusalReasons.Add(
-                    $"HartsyInference: {refTracks.Count} H3 Reference Video Soundtrack(s) for {videoCount} reference video(s) — "
-                    + "each soundtrack pairs by position with a reference video. Remove the extra soundtrack(s).");
-                return false;
-            }
-        }
-
         // Feature-driven, not blanket: MiniMax-H3 merges LoRAs, the other video families still do not read
         // context.Loras at all, and silently dropping a selected LoRA is worse than refusing it.
         if (input.TryGet(T2IParamTypes.Loras, out List<string> loras) && loras is not null && loras.Count > 0

@@ -1,3 +1,5 @@
+using System.IO;
+using SwarmUI.Text2Image;
 using HartsyInference.Engine;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Recipes;
@@ -80,7 +82,9 @@ public static class ModelSupport
         [ModelClassRegistrations.LanceVideoCompatClassId] = new("lance-video", Kind.Video),
         // Core owns the minimax-h3 compat class (T2IModelClassSorter, "MiniMax H3 support" #1469) and shares it
         // with the video/audio VAE classes, exactly as LTX-2 does — this maps it, it must not re-register it.
-        ["minimax-h3"] = new("minimax-h3", Kind.Video),
+        // Keyed off core's own registration rather than a repeated literal, so a rename there cannot leave this
+        // table silently matching nothing (which reads as "architecture not supported", not as a typo).
+        [T2IModelClassSorter.CompatMiniMaxH3.ID] = new("minimax-h3", Kind.Video),
 
         // ── Music (Engine MusicCatalog descriptor ids) ──
         ["ace-step-1_5"] = new("acestep", Kind.Music),
@@ -149,8 +153,33 @@ public static class ModelSupport
         {
             null => VideoFeatures.None,
             HartsyInference.Engine.Recipes.Video.WanVideoRecipe wan => wan.SupportsFor(checkpointPath),
+            _ when family.Id == "minimax-h3" => MiniMaxH3TaskFeatures(recipe.Supports, checkpointPath),
             _ => recipe.Supports,
         };
+    }
+
+    /// <summary>MiniMax-H3 ships fl2va (first/last-frame) and ref2va (references) as SEPARATE checkpoints, and the
+    /// recipe declares the union because it serves both. Narrow that to the task this checkpoint actually does, or a
+    /// reference attached to an fl2va model is accepted and quietly ignored — which reads as the model disregarding
+    /// the reference rather than as the wrong checkpoint being loaded.
+    /// <para>By FILENAME, unavoidably: the two builds have byte-identical key sets and tensor shapes (verified
+    /// 2026-08-08 across all 1082 tensors of both pruned fp8 builds), so no header sniff can tell them apart the way
+    /// <c>WanVideoRecipe.SupportsFor</c> can for Wan's variants. A name matching neither keeps the full union rather
+    /// than guessing — refusing on an unrecognized name would break renamed-but-valid checkpoints.</para></summary>
+    private static VideoFeatures MiniMaxH3TaskFeatures(VideoFeatures declared, string checkpointPath)
+    {
+        string name = Path.GetFileNameWithoutExtension(checkpointPath ?? "");
+        const VideoFeatures refs = VideoFeatures.ReferenceImages | VideoFeatures.ReferenceVideos | VideoFeatures.ReferenceAudios;
+        const VideoFeatures frames = VideoFeatures.InitImage | VideoFeatures.EndFrame;
+        if (name.Contains("fl2va", StringComparison.OrdinalIgnoreCase))
+        {
+            return declared & ~refs;
+        }
+        if (name.Contains("ref2va", StringComparison.OrdinalIgnoreCase))
+        {
+            return declared & ~frames;
+        }
+        return declared;
     }
 
     /// <summary>Human-readable explanation of why a compat class isn't drivable. Distinguishes "the Engine knows this

@@ -52,17 +52,6 @@ public class SwarmUIHartsyInference : Extension
     // so they only show when our backend is the active target.
     public static T2IRegisteredParam<Image> AnimateReferenceImageParam;
 
-    /// <summary>MiniMax-H3 ref2va reference images (up to 9).</summary>
-    public static T2IRegisteredParam<List<Image>> ReferenceImagesParam;
-
-    /// <summary>MiniMax-H3 ref2va reference videos (up to 3).</summary>
-    public static T2IRegisteredParam<List<Image>> ReferenceVideosParam;
-
-    /// <summary>MiniMax-H3 ref2va reference audio clips (up to 3).</summary>
-    public static T2IRegisteredParam<List<AudioFile>> ReferenceAudiosParam;
-
-    /// <summary>MiniMax-H3 per-reference-video soundtracks, paired by position.</summary>
-    public static T2IRegisteredParam<List<AudioFile>> ReferenceVideoSoundtracksParam;
     public static T2IRegisteredParam<SwarmUI.Media.AudioFile> VideoAudioReferenceParam;
     public static T2IRegisteredParam<bool> AnimateAutoPreprocessParam;
     public static T2IRegisteredParam<Image> AnimatePoseVideoParam;
@@ -188,48 +177,12 @@ public class SwarmUIHartsyInference : Extension
             FeatureFlag: "hartsyinference",
             ChangeWeight: 2));
 
-        // NAME PREFIX IS LOAD-BEARING: T2IParamTypes.Register is backed by Dictionary.Add keyed on the cleaned
-        // name, so a bare "Reference Audio" collides with AudioLab's param of that name and throws at extension
-        // init — which takes the whole SwarmUI process down, not just this extension.
-        // MiniMax-H3 ref2va. These describe subject matter to carry across, which is a different job from the Init
-        // Image slot — that pins an actual first frame (fl2va). The engine rejects the two together, because H3 ships
-        // them as separate checkpoints and their packed-layout coordinates would overlap.
-        ReferenceImagesParam = T2IParamTypes.Register<List<Image>>(new(
-            "H3 Reference Images",
-            "MiniMax-H3 (ref2va): reference images to carry subject, character or style from (up to 9).\nUnlike Init Image, these are not pinned as frames — they describe what should appear.\nRequires a ref2va checkpoint; cannot be combined with Init Image / End Frame.",
-            null,
-            Toggleable: true,
-            Group: HartsyInferenceParamGroup,
-            FeatureFlag: "hartsyinference",
-            ChangeWeight: 2));
-
-        ReferenceVideosParam = T2IParamTypes.Register<List<Image>>(new(
-            "H3 Reference Videos",
-            "MiniMax-H3 (ref2va): reference videos to carry subject, motion or style from (up to 3).\nEach clip is truncated to the generation's length, snapped down to the model's 17k+5 frame grid, and sampled at 2fps for the vision tower.\nPair a soundtrack per clip via H3 Reference Video Soundtracks; requires a ref2va checkpoint.",
-            null,
-            Toggleable: true,
-            Group: HartsyInferenceParamGroup,
-            FeatureFlag: "hartsyinference",
-            ChangeWeight: 2));
-
-        ReferenceVideoSoundtracksParam = T2IParamTypes.Register<List<AudioFile>>(new(
-            "H3 Reference Video Soundtracks",
-            "MiniMax-H3 (ref2va): soundtrack for each H3 Reference Video, paired BY POSITION — soundtrack 1 belongs to reference video 1, and so on.\nSupply fewer soundtracks than videos to leave the trailing clips silent.\nThis is separate from H3 Reference Audio, which conditions the output soundtrack standalone.",
-            null,
-            Toggleable: true,
-            Group: HartsyInferenceParamGroup,
-            FeatureFlag: "hartsyinference",
-            ChangeWeight: 2));
-
-        ReferenceAudiosParam = T2IParamTypes.Register<List<AudioFile>>(new(
-            "H3 Reference Audio",
-            "MiniMax-H3 (ref2va): reference audio clips to condition the generated soundtrack on (up to 3).\nRequires a ref2va checkpoint.",
-            null,
-            Toggleable: true,
-            Group: HartsyInferenceParamGroup,
-            FeatureFlag: "hartsyinference",
-            ChangeWeight: 2));
-
+        // MiniMax-H3 ref2va reference media is NOT registered as params here. Core already carries
+        // drag/paste-attached prompt-box media in T2IParamTypes.PromptImages/PromptAudios/PromptVideos, and the
+        // model's own text encoder resolves the <Picture N>/<Audio N>/<Video N> tags the user types inline — Swarm
+        // just supplies the ordered lists. HartsyInferenceBackend.BuildReference* reads those, index for index with
+        // the reference node, so the media shows up where the rest of SwarmUI puts media instead of in four
+        // bespoke controls that only appear for one model.
         // Wan-Animate driving preprocessing. When on (default), the backend auto-derives the pose skeleton +
         // cropped face from the Init-Image driving clip (the way the checkpoint was trained), instead of feeding
         // the raw clip. Toggle off (or supply the overrides below) to hand the backend pre-rendered inputs.
@@ -616,6 +569,35 @@ public class SwarmUIHartsyInference : Extension
 
         // 4. Pre-register all built-in architecture handlers.
         Generation.ModelSupport.RegisterBuiltins();
+
+        // 5. Self-check the flags above against what the backend advertises.
+        WarnOnUndeclaredFeatureFlags();
+    }
+
+    /// <summary>Fails loudly at startup if any param registered above carries a FeatureFlag the backend does not
+    /// advertise. <c>T2IEngine</c> drops a backend whose SupportedFeatures don't cover a job's required flags, so
+    /// such a param makes every generation that touches it refuse — with a message that names no param and no flag.
+    /// Flags in <c>T2IEngine.DisregardedFeatureFlags</c> are UI-visibility-only and never gate a backend, so they
+    /// are exempt (that is how core's own "text2video"/"text2audio" tags work without any backend declaring them).</summary>
+    private static void WarnOnUndeclaredFeatureFlags()
+    {
+        HashSet<string> covered = [.. Backends.HartsyInferenceBackend.DeclaredFeatures, .. T2IEngine.DisregardedFeatureFlags];
+        foreach (T2IParamType type in T2IParamTypes.Types.Values)
+        {
+            if (type.Group != HartsyInferenceParamGroup || string.IsNullOrEmpty(type.FeatureFlag))
+            {
+                continue;
+            }
+            foreach (string flag in type.FeatureFlag.Split(','))
+            {
+                if (!covered.Contains(flag))
+                {
+                    Logs.Error($"[HartsyInference] Param '{type.Name}' requires feature flag '{flag}', which this "
+                        + "backend does not advertise — every generation using that param will be refused with no "
+                        + "explanation. Add it to HartsyInferenceBackend.DeclaredFeatures, or drop the flag.");
+                }
+            }
+        }
     }
 
     public override void OnPreLaunch()
