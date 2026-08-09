@@ -131,7 +131,28 @@
              absmax/448 scale, ComfyUI's approach, so the native fp8 GEMM survives). Reference videos need the
              "H3 Reference Videos" param registered below.
              Restore 404s until the alpha.15 publish lands — by design (alpha.4/.5/.10/.11 precedent). -->
-        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.15" />
+        <!-- 2.0.0-alpha.17 = REQUIRED; this extension does not COMPILE against alpha.15/.16, which predate several
+             engine APIs it already programs against: VideoFeatures.ReferenceImages/ReferenceVideos/ReferenceAudios
+             and .DrivingVideo, VideoRequest.DrivingVideo/DrivingPoseVideo/DrivingFaceVideo/DrivingAutoPreprocess,
+             MusicRequest.TopP/RepetitionPenalty, RequestExtras.ReduxStyleModel, and WanVideoRecipe.SupportsFor.
+             On top of those it carries the MiniMax-H3 VRAM/OOM pass this extension's UX depends on:
+             (a) A per-request pre-flight that refuses an impossible geometry BEFORE allocating, naming the byte
+                 requirement, which card fell short, and the longest clip that would fit at that resolution — the
+                 text GenerateLive quotes into its readable SwarmReadableErrorException. Without it an oversized
+                 request OOMs mid-forward and surfaces as "Something went wrong".
+             (b) Chunked attention now scatters k/v into their full buffers instead of concatenating chunk lists,
+                 cutting the pass-1 peak from 5x to 3x seq*inner*F32 — a 141-frame sharded run that OOMed now
+                 completes, bit-identical.
+             (c) Geometry guard: requests above the trained area are scaled down preserving aspect, and clips past
+                 the ~15 s trained envelope warn instead of silently degrading.
+             (d) TE/VAE placement honoured for MiniMax-H3, so TextEncoderGpuId/VaeGpuId finally do something on it;
+                 off-primary components keep their weights resident between generations.
+             (e) LoRA: the published H3 Turbo LoRA (bare checkpoint keys, no transformer. prefix) was rejected at
+                 load as an unknown format; it now loads, and a delta whose shape does not match the checkpoint is
+                 skipped with a named warning instead of being handed to backend.Add.
+             Restore 404s until the engine's alpha.17 publish lands — by design (alpha.4/.5/.10/.11 precedent):
+             merge the engine bump FIRST, then this pin. -->
+        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.17" />
     </ItemGroup>
 
     <!-- LOCAL ENGINE: prebuilt DLLs from the HartsyInference Cli bin (its full runtime closure). Referenced
