@@ -16,16 +16,16 @@ There are three buckets of parameters:
 
 ### A. Core Swarm parameters (we don't own these)
 
-Prompt, negative prompt, width, height, steps, CFG, seed, model, sampler. These are
+Prompt, negative prompt, width, height, steps, CFG, seed, model, LoRAs. These are
 registered in Swarm core with no `FeatureFlag` (or with the universal `"text2image"`
 flag). They surface for any backend.
 
 ### B. ComfyUI-extension parameters that we want to support
 
 The ComfyUI backend extension registers ~60 params with `FeatureFlag: "comfyui"`:
-LoRAs, ControlNet inputs, IP-Adapter weights, refiner toggles, the alternate-guidance
-node family, custom-workflow IR, etc. These were tagged `"comfyui"` because Swarm's
-authors didn't foresee non-Comfy backends needing them.
+Sampler/Scheduler, ControlNet inputs, IP-Adapter weights, refiner toggles, the
+alternate-guidance node family, custom-workflow IR, etc. These were tagged `"comfyui"`
+because Swarm's authors didn't foresee non-Comfy backends needing them.
 
 **We DO advertise `"comfyui"`. An earlier version of this doc argued against it — that
 was wrong, and it actively broke generation when a Comfy backend was also configured.**
@@ -44,15 +44,18 @@ The honest pattern is therefore a **two-layer** one:
 
 1. **Advertise `"comfyui"` so requests reach us.** We declare `"comfyui"` so comfyui-tagged
    requests are not pre-filtered away before our validator runs. This mirrors the built-in
-   peer [`SwarmSwarmBackend`](../../../Backends/SwarmSwarmBackend.cs), which also advertises
-   `"comfyui"`. It is execution-safe: core never routes us through Comfy's workflow
-   builder on the basis of this flag — each backend runs its own `Generate`.
-2. **Enforce honesty in `IsValidForThisBackend`.** A flag-driven guard there refuses —
-   and cleanly routes to a Comfy backend — any comfyui-tagged param actually set that we
+   peer [`SwarmSwarmBackend`](../../../Backends/SwarmSwarmBackend.cs), whose `SupportedFeatures`
+   forwards its remote's flag set — `"comfyui"` included whenever the remote has a Comfy backend.
+   It is execution-safe: core never routes us through Comfy's workflow builder on the basis of
+   this flag — each backend runs its own `Generate`.
+2. **Enforce honesty in `IsValidForThisBackend`.** A flag-driven guard there (`ValidateComfyOnlyParams`)
+   refuses — and cleanly routes to a Comfy backend — any comfyui-tagged param actually set that we
    can't service. The guard iterates the params present on the request, and refuses any
    `"comfyui"`-flagged one that isn't in a small allow-list of params we genuinely honor
-   (Sampler, Scheduler, Refiner Sampler/Scheduler, Refiner Upscale Method — see
-   `HonoredComfyParams`). Custom-workflow IR (`comfyworkflowraw` /
+   (`HonoredComfyParams`): Sampler, Scheduler, Refiner Sampler/Scheduler, Refiner Upscale
+   Method, the FLUX.1 Redux style-model strengths (merge/multiply/apply-start), and the
+   IP-Adapter scheduling knobs (weight/start/end/weight-type) — mapped onto the engine's
+   `redux.*` / `ipadapter.*` Extra keys respectively. Custom-workflow IR (`comfyworkflowraw` /
    `comfyuicustomworkflow`) is refused explicitly. So advertising `"comfyui"` does **not**
    mean "we silently serve everything Comfy-tagged."
 
@@ -80,15 +83,14 @@ to drop the lie.
 
 ### C. Parameters specific to HartsyInference
 
-Cases where HartsyInference exposes a setting that has no Comfy equivalent — e.g.,
-quantization mode, FP8 scaling, scheduler-specific options.
-
-We register these under our own group with `FeatureFlag: "hartsyinference"`:
+Cases where HartsyInference exposes a setting that has no Comfy equivalent. The pattern is
+always the same: declare a `T2IParamGroup`, then `T2IParamTypes.Register<T>` each param into
+it with `Toggleable: true` and `FeatureFlag: "hartsyinference"` (see the invariant below on
+why `Toggleable` is not optional). A minimal example:
 
 ```csharp
-public static T2IRegisteredParam<string> SamplerParam;
-
 public static T2IParamGroup HartsyInferenceParamGroup;
+public static T2IRegisteredParam<string> SamplerParam;
 
 public override void OnInit()
 {
@@ -105,42 +107,63 @@ public override void OnInit()
 }
 ```
 
-(The old `HartsyInference Dtype` / `Tile VAE Threshold` params were removed 2026-08-07: the engine
+In practice `SwarmUIHartsyInference.OnInit` registers several dozen params across a handful
+of groups, one per feature area rather than one flat list:
+
+- **`HartsyInferenceParamGroup`** — the catch-all: `HartsyInference Sampler`, `HartsyInference
+  Init Image Mode`, and the Wan-Animate conditioning inputs (reference image, auto-preprocess
+  toggle, pose/face driving-video overrides, video audio reference).
+- **`Ideogram4ParamGroup`** — the Ideogram 4 magic-prompt toggle and its optional LLM-model
+  override (`Generation.Ideogram4MagicPrompt`).
+- **`VideoRestoreParamGroup`** — SeedVR2 restore/upscale knobs (model, target width/height,
+  clip frames, overlap, strength), applied to generated video frames or a still image.
+- **`MusicParamGroup`** — ACE-Step edit modes (source audio, edit mode, repaint span, cover
+  strength) plus the 5 Hz LM planner and advanced CFG/sampling knobs, and the YuE sampling
+  knobs (temperature/top-k/top-p/repetition penalty). Every name carries a `Hartsy Music`
+  prefix because AudioLab already registers plain names like "Source Audio" or "Top K", and a
+  cleaned-name collision in `T2IParamTypes.Register` crashes SwarmUI at init.
+
+One param breaks the "own group" pattern deliberately: `FaceIdV2WeightParam` (FaceID-PlusV2
+shortcut strength) is registered into *Comfy's* `GroupImagePrompting`, flagged `"ipadapter"`
+instead of `"hartsyinference"`, so it surfaces next to the rest of the IP-Adapter controls
+exactly when an IP-Adapter is selected — not only when our backend happens to be picked.
+
+(The old `HartsyInference Dtype` / `Tile VAE Threshold` params were removed: the engine
 never read them — dtype is engine-policy per model (bf16 unsupported by the shared kernels) and VAE
 tiling is decided from measured VRAM, not a pixel threshold.)
 
 ## Feature flags advertised by `SupportedFeatures`
 
-The full list (subject to phase progress — see
-[`02-Comfy-Feature-Parity-Matrix.md`](./02-Comfy-Feature-Parity-Matrix.md)):
+`HartsyInferenceBackend.DeclaredFeatures` is the full, current list — `SupportedFeatures`
+just returns it, so every flag below is advertised unconditionally. The "Enforcement" column
+is where each one is actually checked, if it's checked at all beyond just being declared:
 
-| Flag | What it gates | Phase we'll claim it |
-|------|---------------|----------------------|
-| `hartsyinference` | Our own settings group | 1 (active) |
-| `text2image` | Universal text-to-image params | 1 (active) |
-| `flux-dev` | FluxGuidanceScale param. In `DisregardedFeatureFlags` so advertising is informational — backend selection doesn't enforce it | 1 (active) |
-| `lora` | LoRA list | 2 |
-| `refiners` | Refiner workflow params | 3 |
-| `endstepsearly` | End-step early-out | 3 |
-| `img2img` / `init_image` | Init image / denoise strength | 4 (after VaeEncoder) |
-| `inpaint` | Mask + inpaint | 4 |
-| `controlnet` | ControlNet inputs | 5 (after upstream wiring) |
-| `ipadapter` | IP-Adapter inputs | 5 |
-| `variation_seed` | Second seed for blended noise | 5+ (needs upstream) |
-| `freeu` | FreeU multipliers | 5+ |
-| `seamless` | Seamless tiling | 5+ |
-| `video` | Video models | — (out of scope for this extension) |
-| `yolov8` | YOLO post-processing | — (separate extension) |
-| `comfyui` | Advertised so comfyui-tagged requests reach our validator instead of being pre-filtered out (the coexistence fix). We do **not** silently serve everything Comfy-tagged — the `IsValidForThisBackend` guard refuses comfyui-only params we can't run (custom workflow IR, alternate-guidance nodes, GLIGEN, SAM2, etc.) and routes them to Comfy. | 1 (active) |
+| Flag | What it gates | Enforcement |
+|------|---------------|-------------|
+| `hartsyinference` | Our own params (section C above) | none needed — the flag only reaches us via our own params |
+| `comfyui` | Lets comfyui-tagged requests reach our validator; honesty enforced by `ValidateComfyOnlyParams` — see the two-layer design above | `ValidateComfyOnlyParams` |
+| `text2image` | Universal text-to-image params | none — always serviceable |
+| `flux-dev` | FluxGuidanceScale param | none — in `T2IEngine.DisregardedFeatureFlags` so it's informational only, doesn't gate backend selection |
+| `lora` | LoRA list | per-family, `ValidateImageFeatures` against the recipe's `ImageFeatures.Lora` |
+| `endstepsearly` | End-step early-out | none — `ImageRequest.EndStepsEarly` is unconditional |
+| `refiners` | Refiner workflow params | per-family, `ImageFeatures.Refiner` |
+| `img2img` | Init image / denoise strength | per-family, `ImageFeatures.Img2Img` |
+| `inpaint` | Mask + inpaint | per-family, `ImageFeatures.Inpaint` |
+| `controlnet` | ControlNet inputs | per-family, `ImageFeatures.ControlNet` |
+| `ipadapter` | IP-Adapter inputs, plus `FaceIdV2WeightParam` | per-family, `ImageFeatures.IpAdapter` |
+| `variation_seed` | Second seed for blended noise | per-family, `ImageFeatures.VariationSeed` |
+| `video` | Video models: Wan (T2V/I2V/VACE/Animate/S2V), LTX-Video, LTX-2, Lance Video, MiniMax-H3 | per-family, `ValidateVideo` against `VideoFeatures` (a separate enum from `ImageFeatures`) |
+
+A family that doesn't support a per-family flag reports `ImageFeatures.None` for it
+(`ModelSupport.SupportedFeatures`), and `IsValidForThisBackend`'s `ValidateImageFeatures`
+step refuses the request early rather than letting it fail mid-generation. `freeu`,
+`seamless`, and `yolov8` are not advertised — the engine has no equivalent for the first
+two, and YOLO post-processing belongs to a separate extension.
 
 With the exception of the broad `comfyui` routing flag (kept honest by the validator
 guard), a capability flag is **only** advertised when we can actually service requests
 gated by it. Lying ("we support controlnet!" then erroring at generation time) is worse
 than being honest ("we don't yet, please use ComfyUI for this").
-
-The `IsValidForThisBackend` method is the second line of defense — even if a flag
-is advertised, a specific input might still be unservable (wrong architecture,
-missing component) and we should reject early.
 
 ## Coexistence model (Comfy + HartsyInference both installed)
 
@@ -151,7 +174,7 @@ How a request routes when both backends exist:
 | Plain gen, model only HartsyInference has (e.g. nvfp4 Ideogram) | HartsyInference (model-availability filter) |
 | Plain gen, model both backends have | Either — load-balanced. Pin one with the **Backend Type** or **Exact Backend ID** advanced params |
 | Custom ComfyUI workflow, or any comfyui-only param we can't run | Comfy (our `IsValidForThisBackend` guard refuses and routes there) |
-| Sampler / Scheduler / Refiner sampler set | Either — we honor these (`HonoredComfyParams` allow-list) |
+| Sampler / Scheduler / Refiner sampler set, Redux style-model strengths, IP-Adapter scheduling knobs | Either — we honor these (`HonoredComfyParams` allow-list) |
 
 Two invariants make this work:
 
@@ -195,37 +218,30 @@ all for a user. The second gates the admin-only HTTP routes (see
 
 ## Parameter-flag examples
 
-### LoRAs (already registered by Comfy extension)
+### LoRAs (a core Swarm param, not a Comfy one)
 
-The `Loras` parameter is registered by the Comfy extension with `FeatureFlag: "comfyui"`.
-By advertising `"comfyui"` in our `SupportedFeatures`, the LoRA selector surfaces for
-us automatically. We pick it up in `Generation/PipelineSteps.cs`:
+`T2IParamTypes.Loras` (plus the parallel `LoraWeights` / `LoraTencWeights` /
+`LoraSectionConfinement` lists) is registered by **Swarm core**, not the Comfy extension,
+and carries no `FeatureFlag` at all — so it's bucket A, not bucket B, and it's sent to
+whichever backend is selected regardless of advertised flags. `HartsyInferenceBackend.BuildLoras`
+reads the four lists directly and resolves each name to an on-disk path through Swarm's LoRA
+model set, throwing a clear error if a named LoRA isn't found:
 
 ```csharp
-PipelineSteps.AddStep(ctx =>
+private static LoraStack BuildLoras(T2IParamInput input)
 {
-    if (!ctx.UserInput.TryGet(ComfyUIBackendExtension.LoraParam, out var loras))
-        return;
-
-    var stack = new LoraStack();
-    foreach (var loraName in loras)
-    {
-        stack.AddFromPath(ResolveLoraPath(loraName), GetWeight(loraName));
-    }
-
-    ApplyLorasToContext(ctx, stack);
-}, 1);
+    if (!input.TryGet(T2IParamTypes.Loras, out List<string> names) || names is null || names.Count == 0)
+        return null;
+    // ... resolve each name through Program.T2IModelSets["LoRA"], pair with LoraWeights/
+    // LoraTencWeights/LoraSectionConfinement by index, build a LoraStack.
+}
 ```
 
-We **read** the parameter that the Comfy extension **registered**. We don't
-re-register it. This is the same pattern the API-Backends extension uses (it reads
-core params like `T2IParamTypes.Width` via the `=>` alias trick).
-
-### HartsyInference-only params
-
-Because the flag is `"hartsyinference"`, these controls only appear when our backend is selected
-(e.g. `HartsyInference Sampler`; a dtype-override param existed here historically but was removed —
-the engine decides dtype per model).
+Because the param itself is unflagged, the `"lora"` entry in `DeclaredFeatures` doesn't
+gate anything at backend-selection time — it's enforced one layer down, in
+`ValidateImageFeatures`: if LoRAs are set and the loaded model's recipe reports
+`ImageFeatures.None` for `Lora`, the request is refused with a clear reason instead of
+silently ignoring the selection.
 
 ## What we explicitly don't surface
 
@@ -236,9 +252,11 @@ the engine decides dtype per model).
 
 ## Parameter validation
 
-Validation that requires backend awareness (e.g., "FP8 requires Ada Lovelace+ GPU")
-lives in our `Generation/PipelineSteps.cs` early-priority steps. They throw with
-descriptive errors that Swarm surfaces to the user.
+Validation that requires backend awareness (e.g., architecture support, comfyui-only
+params, per-family `ImageFeatures` checks) lives in `HartsyInferenceBackend.IsValidForThisBackend`
+and its private `Validate*` helpers (`ValidateMusic`, `ValidateVideo`, `ValidateImageFeatures`,
+`ValidateComfyOnlyParams` — see the "honesty guard" region of `Backends/HartsyInferenceBackend.cs`).
+They add a `RefusalReason` and return false, which routes to Comfy rather than throwing.
 
 Parameter validation that's input-shape (e.g., "width must be multiple of 8") lives
 where Swarm core puts it — at the `T2IParamType` level, with a `Validator`. We don't
@@ -246,20 +264,7 @@ override.
 
 ## Engine performance profile
 
-The engine ships a **standard performance profile** — cuDNN fused flash attention, fp8 tensor-core GEMM
-(SM 8.9+), F16 DiT activations for audited architectures, resident DiT weights, and a warm activation
-pool — that is **default-on inside the engine** (since `1.0.0-alpha.45`). The extension sets nothing:
-every install reproduces the published benchmark times with zero configuration, and the same defaults
-apply to any other engine host.
-
-Operators can disable an individual feature by exporting `HARTSY_<FEATURE>=0` in the SwarmUI launcher
-environment (e.g. `HARTSY_SDPA_CUDNN=0`); the engine logs the resolved set at backend init:
-
-```
-[Cuda] perf flags: SdpaCudnn=True NativeFp8Gemm=True MempoolKeep=True ...
-```
-
-Feature table, hardware/library requirements (cuDNN ≥ 9.21, resolution order for the CUDA userspace
-libraries), verification log lines, and benchmark methodology are specified in the engine's
-[`docs/PERFORMANCE.md`](https://github.com/HartsyAI/HartsyInference/blob/main/docs/PERFORMANCE.md) —
-that document is the single source of truth; this section is intentionally only a pointer.
+The engine's performance profile (fused attention, fp8 GEMM, resident weights, etc.) is
+default-on inside the engine itself — the extension configures none of it. See the engine's
+[`docs/PERFORMANCE.md`](https://github.com/HartsyAI/HartsyInference/blob/main/docs/PERFORMANCE.md),
+which is the single source of truth for this.

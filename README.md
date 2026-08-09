@@ -12,7 +12,7 @@
 > segmentation), IP-Adapter (standard/Plus/Plus-Face/FaceID/FaceID-PlusV2),
 > FLUX.1 Kontext/Fill/Canny/Depth/Redux, GGUF checkpoints, live previews, and
 > cancellation all work. Remaining gaps are tracked in [Known limitations](#known-limitations), the
-> [parity matrix](./docs/02-Comfy-Feature-Parity-Matrix.md), and the engine's
+> [parity punchlist](./docs/11-Comfy-Parity-Punchlist.md), and the engine's
 > [benchmark log](https://github.com/HartsyAI/HartsyInference/blob/main/benchmarks/results/).
 
 ## What this is
@@ -22,7 +22,7 @@ A SwarmUI backend extension that runs Stable Diffusion / FLUX / SDXL / etc. infe
 no ComfyUI, no external process required.
 
 The long-term goal is to **replace ComfyUI as the default SwarmUI backend** while
-preserving full feature parity (see [`docs/02-Comfy-Feature-Parity-Matrix.md`](./docs/02-Comfy-Feature-Parity-Matrix.md)).
+preserving full feature parity (see [`docs/11-Comfy-Parity-Punchlist.md`](./docs/11-Comfy-Parity-Punchlist.md)).
 
 ## Why
 
@@ -82,7 +82,7 @@ ComfyUI baseline recorded yet.
 Per-architecture features (LoRA, img2img, inpaint, IP-Adapter, ControlNet, Kontext
 reference images, FPS/format/boomerang/trim for video) are listed in
 [Cross-cutting features](#cross-cutting-features) and the
-[parity matrix](./docs/02-Comfy-Feature-Parity-Matrix.md).
+[parity punchlist](./docs/11-Comfy-Parity-Punchlist.md).
 
 Every published number is reproducible: methodology, request parameters, and the
 living scoreboard are in the engine's
@@ -371,16 +371,15 @@ The [`docs/`](./docs/) folder is the source of truth for the build plan:
 | # | Document | Purpose |
 |---|----------|---------|
 | 00 | [Overview](./docs/00-Overview.md) | Vision, scope, non-goals |
-| 01 | [Architecture](./docs/01-Architecture.md) | Layers, components, data flow |
-| 02 | [Comfy Feature Parity Matrix](./docs/02-Comfy-Feature-Parity-Matrix.md) | Every Comfy feature, mapped to a HartsyInference plan |
-| 03 | [Implementation Roadmap](./docs/03-Implementation-Roadmap.md) | Phased delivery plan with milestones |
-| 04 | [HartsyInference Integration](./docs/04-HartsyInference-Integration.md) | The API surface HartsyInference must expose |
-| 05 | [Pipeline Translation](./docs/05-Pipeline-Translation.md) | The `WorkflowGenerator` equivalent — params → HartsyInference calls |
+| 01 | [Architecture](./docs/01-Architecture.md) | Component diagram, layers, data flow |
+| 04 | [HartsyInference Integration](./docs/04-HartsyInference-Integration.md) | The contract between this extension and the upstream HartsyInference library |
 | 06 | [Backend Lifecycle](./docs/06-Backend-Lifecycle.md) | Init / Generate / Shutdown contract |
 | 07 | [Parameters & Feature Flags](./docs/07-Parameters-And-Feature-Flags.md) | What params we own, what flags we advertise |
 | 08 | [Web API Routes](./docs/08-Web-API-Routes.md) | Extra HTTP routes the extension adds |
-| 09 | [Testing Strategy](./docs/09-Testing-Strategy.md) | How we validate correctness + perf |
-| 10 | [Risks & Open Questions](./docs/10-Risks-And-Open-Questions.md) | What's unknown, what's risky |
+| 11 | [Comfy Parity Punchlist](./docs/11-Comfy-Parity-Punchlist.md) | Canonical "what's left to ship" list |
+| 13 | [Video Models Plan](./docs/13-Video-Models-Plan.md) | Wan / LTX-Video support plan and behavior |
+| 14 | [Known Issues & TODO](./docs/14-Known-Issues-And-TODO.md) | What's currently broken or unverified, and what's queued to fix it |
+| 15 | [Two-GPU Setups](./docs/15-Two-GPU-Setups.md) | Which multi-GPU knob to use for which problem |
 
 ## Logging conventions
 

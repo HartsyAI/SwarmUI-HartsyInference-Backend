@@ -6,74 +6,117 @@ Extra HTTP routes the extension adds to Swarm's WebAPI. Registered in
 ## Why we need so few
 
 The Comfy extension has many extra routes because it's *bridging two processes*:
-saving workflows, listing nodes, proxying to Comfy, installing custom nodes,
-running TensorRT compiles. We're in-process and have no workflow IR — most of
-those concerns vanish.
+saving/reading/listing/deleting workflows, redirecting to the Comfy process
+(`ComfyBackendDirect/{*Path}`), returning generated workflow JSON, installing
+custom node packs, extracting LoRAs, compiling TensorRT engines. We're
+in-process and have no workflow IR — most of those concerns vanish.
 
-Our routes are about diagnostics, cache management, and device discovery.
+Our routes are about diagnostics, cache management, and architecture coverage.
+All of them are read-only except `HartsyInferenceClearCache`.
 
 ## Registration
 
 ```csharp
-public static class HartsyInferenceWebAPI
+public static void Register()
 {
-    public static void Register()
-    {
-        API.RegisterAPICall<JObject>(HartsyInferenceProbeModel,            true,  HartsyInferencePermissions.PermAdminHartsyInference);
-        API.RegisterAPICall<JObject>(HartsyInferenceListLoadedPipelines,   false, HartsyInferencePermissions.PermAdminHartsyInference);
-        API.RegisterAPICall<JObject>(HartsyInferenceClearCache,            true,  HartsyInferencePermissions.PermAdminHartsyInference);
-        API.RegisterAPICall<JObject>(HartsyInferenceGetDeviceInfo,         false, HartsyInferencePermissions.PermAdminHartsyInference);
-        API.RegisterAPICall<JObject>(HartsyInferenceGetSupportedArchs,     false, HartsyInferencePermissions.PermUseHartsyInference);
-    }
+    API.RegisterAPICall(HartsyInferenceGetSupportedArchs, false, HartsyInferencePermissions.PermUseHartsyInference);
+    API.RegisterAPICall(HartsyInferenceProbeModel, false, HartsyInferencePermissions.PermUseHartsyInference);
+    API.RegisterAPICall(HartsyInferenceListLoadedPipelines, false, HartsyInferencePermissions.PermAdminHartsyInference);
+    API.RegisterAPICall(HartsyInferenceGetDeviceInfo, false, HartsyInferencePermissions.PermAdminHartsyInference);
+    API.RegisterAPICall(HartsyInferenceClearCache, true, HartsyInferencePermissions.PermAdminHartsyInference);
 }
 ```
 
-The boolean is `isModifying` (true = mutation; affects cache invalidation). The
-`PermInfo` is the permission required to call.
+The boolean is `isModifying` (true marks the call as a mutation).
+`GetSupportedArchs` and `ProbeModel` need only `use_hartsyinference`
+(default: power users); the other three need `admin_hartsyinference` (default:
+admins).
 
 ## Routes
 
-### `HartsyInferenceProbeModel`
+### `HartsyInferenceGetSupportedArchs`
 
-Diagnose a checkpoint without loading it.
+`Task<JObject> HartsyInferenceGetSupportedArchs(Session session)`
+
+Lists every compat class `ModelSupport` knows about, split into what the
+engine can drive today and what's mapped but not yet registered.
 
 | | |
 |---|---|
 | Method | POST |
-| Path | `/API/HartsyInferenceProbeModel` |
-| Permission | `admin_hartsyinference` |
-| Mutating | true (touches disk) |
-
-**Inputs:**
-```json
-{
-  "session_id": "...",
-  "model_path": "Models/Stable-Diffusion/myCheckpoint.safetensors"
-}
-```
+| Path | `/API/HartsyInferenceGetSupportedArchs` |
+| Permission | `use_hartsyinference` |
+| Mutating | false |
 
 **Returns:**
 ```json
 {
   "success": true,
-  "detected_arch": "stable-diffusion-xl-v1-base",
-  "tensor_count": 2738,
-  "fp_dtype": "fp16",
-  "approx_size_mb": 6938,
-  "components_found": ["text_encoder_l", "text_encoder_g", "unet", "vae"],
-  "components_missing": [],
-  "warnings": []
+  "supported": ["flux-1", "stable-diffusion-xl-v1", "z-image"],
+  "pending": {
+    "hunyuan-video": "Architecture 'hunyuan-video' maps to HartsyInference family 'hunyuan-video', but no video recipe is registered for it in this engine build. Currently drivable: wan-22-5b, wan-21-1_3b, ... Use the ComfyUI backend for this architecture in the meantime."
+  }
 }
 ```
 
-Used by the Server → Backends UI to validate a model before the user picks it.
-Implementation: open with `SafeTensorsLoader`, inspect tensor key prefixes,
-match against the architecture detection table from
-[`05-Pipeline-Translation.md`](./05-Pipeline-Translation.md).
+`supported` holds compat-class IDs (`ModelSupport.SupportedArchitectures`),
+not the engine's internal family IDs — a mapped family only counts as
+supported once `RecipeRegistry`/`VideoRecipeRegistry` actually has a recipe
+for it, checked live at call time. `pending` is an object, compat class ID to
+the `WhyNotSupported` reason string, for classes that are mapped to a family
+but have no registered recipe yet. The exact contents of both depend on which
+recipes are registered in the running build; see `Generation/ModelSupport.cs`.
+
+### `HartsyInferenceProbeModel`
+
+`Task<JObject> HartsyInferenceProbeModel(Session session, string model_name)`
+
+Answers "will HartsyInference run this model, and how?" for a model already
+known to Swarm's `Stable-Diffusion` model set, without loading it.
+
+| | |
+|---|---|
+| Method | POST |
+| Path | `/API/HartsyInferenceProbeModel` |
+| Permission | `use_hartsyinference` |
+| Mutating | false |
+
+**Inputs:**
+```json
+{
+  "session_id": "...",
+  "model_name": "sd_xl_base_1.0.safetensors"
+}
+```
+
+**Returns (success):**
+```json
+{
+  "success": true,
+  "model_name": "sd_xl_base_1.0.safetensors",
+  "arch_id": "stable-diffusion-xl-v1-base",
+  "compat_class": "stable-diffusion-xl-v1",
+  "state": "supported",
+  "reason": "HartsyInference can generate with this model."
+}
+```
+
+`state` is one of `supported`, `pending`, `unsupported`. When not supported,
+`reason` is `ModelSupport.WhyNotSupported(compat_class)` — the same string
+that ends up in `GetSupportedArchs`'s `pending` map.
+
+**Returns (failure)** — `model_name` missing, the `Stable-Diffusion` model
+set isn't registered, or the named model doesn't exist:
+```json
+{ "success": false, "error": "Model 'nonexistent.safetensors' not found." }
+```
 
 ### `HartsyInferenceListLoadedPipelines`
 
-Show what's currently in the pipeline cache (per backend instance).
+`Task<JObject> HartsyInferenceListLoadedPipelines(Session session)`
+
+Snapshots every live `HartsyInferenceBackend` instance: its status and
+configured device settings, plus current model and Swarm's own usage counter.
 
 | | |
 |---|---|
@@ -85,20 +128,59 @@ Show what's currently in the pipeline cache (per backend instance).
 **Returns:**
 ```json
 {
+  "success": true,
   "backends": [
     {
       "backend_id": 0,
-      "compute": "cuda",
-      "device_ordinal": 0,
-      "loaded_pipelines": [
-        {
-          "model_name": "sd_xl_base_1.0.safetensors",
-          "arch": "stable-diffusion-xl-v1-base",
-          "vram_estimate_mb": 7300,
-          "last_used_unix": 1714328400,
-          "lora_fingerprint": "sha256:..."
-        }
-      ]
+      "status": "RUNNING",
+      "current_model": "sd_xl_base_1.0.safetensors",
+      "compute_backend": "auto",
+      "gpu_id": "0",
+      "text_encoder_gpu_id": "",
+      "vae_gpu_id": "",
+      "cfg_parallel_gpu_id": "",
+      "dit_shard_gpu_id": "",
+      "usages": 3
+    }
+  ]
+}
+```
+
+`status` is the backend's `.Status.ToString()`, one of Swarm's `BackendStatus`
+enum values: `DISABLED`, `ERRORED`, `WAITING`, `LOADING`, `IDLE`, `RUNNING`.
+`usages` is Swarm's own `T2IBackendData.Usages` counter, passed through
+verbatim.
+
+### `HartsyInferenceGetDeviceInfo`
+
+`Task<JObject> HartsyInferenceGetDeviceInfo(Session session)`
+
+Reports each live backend's *configured* compute target. This is not a
+hardware scan — the engine doesn't expose device enumeration ahead of backend
+construction — so it's the same settings surface as
+`HartsyInferenceListLoadedPipelines` minus `current_model`/`usages`.
+
+| | |
+|---|---|
+| Method | POST |
+| Path | `/API/HartsyInferenceGetDeviceInfo` |
+| Permission | `admin_hartsyinference` |
+| Mutating | false |
+
+**Returns:**
+```json
+{
+  "success": true,
+  "devices": [
+    {
+      "backend_id": 0,
+      "compute_backend": "auto",
+      "gpu_id": "0",
+      "text_encoder_gpu_id": "",
+      "vae_gpu_id": "",
+      "cfg_parallel_gpu_id": "",
+      "dit_shard_gpu_id": "",
+      "status": "RUNNING"
     }
   ]
 }
@@ -106,7 +188,10 @@ Show what's currently in the pipeline cache (per backend instance).
 
 ### `HartsyInferenceClearCache`
 
-Drop the pipeline cache, free VRAM. Useful when debugging or before a model swap.
+`Task<JObject> HartsyInferenceClearCache(Session session, int backend_id = -1, bool free_system_ram = false)`
+
+Frees each matching backend's resident pipeline via `backend.FreeMemory(...)`.
+The only mutating route.
 
 | | |
 |---|---|
@@ -119,89 +204,44 @@ Drop the pipeline cache, free VRAM. Useful when debugging or before a model swap
 ```json
 {
   "session_id": "...",
-  "backend_id": 0,
-  "model_name": null
+  "backend_id": -1,
+  "free_system_ram": false
 }
 ```
 
-If `model_name` is null, clears the entire cache for the given backend; otherwise
-evicts just that entry.
+`backend_id = -1` (the default) clears every HartsyInference backend;
+otherwise only the backend with that ID. `free_system_ram` is passed through
+to `FreeMemory` to also drop CPU-side copies. There's no per-model eviction —
+`FreeMemory` clears a backend's whole resident pipeline, not one entry. A
+`backend_id` that matches nothing still returns success with
+`backends_cleared: 0`.
 
 **Returns:**
 ```json
-{ "success": true, "evicted_count": 2 }
-```
-
-### `HartsyInferenceGetDeviceInfo`
-
-Enumerate available compute devices. Used to populate the "Compute Backend" dropdown
-in the Backend settings UI.
-
-| | |
-|---|---|
-| Method | POST |
-| Path | `/API/HartsyInferenceGetDeviceInfo` |
-| Permission | `admin_hartsyinference` |
-| Mutating | false |
-
-**Returns:**
-```json
-{
-  "cuda_available": true,
-  "cuda_devices": [
-    { "ordinal": 0, "name": "NVIDIA GeForce RTX 4090", "vram_mb": 24576, "compute_cap": "8.9" }
-  ],
-  "vulkan_available": true,
-  "vulkan_devices": [
-    { "ordinal": 0, "name": "NVIDIA GeForce RTX 4090", "vram_mb": 24576, "fp16_support": true }
-  ],
-  "cpu_available": true
-}
-```
-
-### `HartsyInferenceGetSupportedArchs`
-
-Used by the model dropdown to grey out architectures we don't yet handle. Lower
-permission level so any user with `use_hartsyinference` can call it.
-
-| | |
-|---|---|
-| Method | POST |
-| Path | `/API/HartsyInferenceGetSupportedArchs` |
-| Permission | `use_hartsyinference` |
-| Mutating | false |
-
-**Returns:**
-```json
-{
-  "supported": [
-    "stable-diffusion-v1",
-    "stable-diffusion-xl-v1-base",
-    "Flux.1-dev",
-    "Flux.1-schnell"
-  ],
-  "planned": [
-    "stable-diffusion-v3-medium",
-    "Flux.2-dev"
-  ]
-}
+{ "success": true, "backends_cleared": 1 }
 ```
 
 ## Routes we explicitly do NOT add
 
-- `SaveWorkflow`, `LoadWorkflow`, `ListWorkflows`, `DeleteWorkflow` — we have no
-  workflow IR
-- `ComfyBackendDirect/{*Path}` passthrough — no Comfy to passthrough to
-- `GetGeneratedWorkflow` — no JSON IR to return
-- `InstallFeatures` — no node packs
-- `DoLoraExtractionWS` — out of scope (training)
-- `DoTensorRTCreateWS` — out of scope
+Comparing against `ComfyUIBackend/ComfyUIWebAPI.cs`'s registrations:
 
-## How tabs / UI consume these
+- `ComfySaveWorkflow`, `ComfyReadWorkflow`, `ComfyListWorkflows`,
+  `ComfyDeleteWorkflow` — we have no workflow IR to save/read/list/delete
+- `ComfyBackendDirect/{*Path}` passthrough — no separate Comfy process to
+  redirect to
+- `ComfyGetGeneratedWorkflow` — no JSON IR to return
+- `ComfyInstallFeatures` — no custom node packs
+- `ComfyListTorchInstalls`, `ComfyUpdateTorch`, `ComfyGetNodeTypesForBackend`
+  — no Python/torch install and no node types to enumerate
+- `DoLoraExtractionWS` (diff two checkpoints, write a LoRA) — not yet; open
+  item in [`11-Comfy-Parity-Punchlist.md`](./11-Comfy-Parity-Punchlist.md)
+  (Tier 3)
+- `DoTensorRTCreateWS` — not yet; same punchlist tier
 
-If we ever add a Server → Tab for "HartsyInference Diagnostics", it lives at
-`Tabs/Server/HartsyInference Diagnostics.html` and calls these routes via Swarm's
-`genericRequest('HartsyInferenceListLoadedPipelines', ...)` JS helper.
+## Architecture coverage
 
-For v1, the routes are mostly there for command-line debugging (curl / browser-tab)
-and for the standard Backend-config UI to query device info. No custom tab is required.
+`GetSupportedArchs` and `ProbeModel` both read from
+`Generation/ModelSupport.cs`, the compat-class-to-engine-family mapping table.
+It's the whole of the extension's architecture knowledge: whether a mapped
+family is actually drivable is asked of the engine's `RecipeRegistry` /
+`VideoRecipeRegistry` at call time, not hard-coded here.

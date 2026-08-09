@@ -1,244 +1,114 @@
 # 04 — HartsyInference Integration
 
-The contract between this extension and the upstream HartsyInference library.
-Everything we use, everything we wish existed, and where to find it in the
-HartsyInference repo (`/home/kalebbroo/Desktop/Projects/HartsyInference/`).
+The contract between this extension and the `HartsyInference` engine: how it's
+distributed, what the extension actually calls, and what's genuinely still out
+of reach.
 
 ## Distribution model
 
-**Phase 1 — git submodule + ProjectReference.** Until HartsyInference ships on
-NuGet, vendor it under `Vendor/HartsyInference/` as a submodule and reference the
-relevant `.csproj` files directly:
-
-```bash
-cd src/Extensions/SwarmUI-HartsyInference
-git submodule add <HartsyInference-repo-url> Vendor/HartsyInference
-git submodule update --init --recursive
-```
-
-Then in `SwarmUI-HartsyInference.csproj`:
+The engine ships as a single NuGet meta-package, `HartsyInference`. It pulls
+in every backend (CPU/CUDA/Vulkan) and every modality assembly
+(`HartsyInference.Diffusion`, `.Video`, `.Audio`, `.Vision`, `.LLM`, `.World`,
+`.ThreeD`, …) plus private deps (`Microsoft.ML.Tokenizers`, `Google.Protobuf`).
+`SwarmUI-HartsyInference.csproj` references it as a plain
+`<PackageReference>`:
 
 ```xml
-<ItemGroup>
-  <ProjectReference Include="Vendor/HartsyInference/src/HartsyInference.Core/HartsyInference.Core.csproj" />
-  <ProjectReference Include="Vendor/HartsyInference/src/HartsyInference.Diffusion/HartsyInference.Diffusion.csproj" />
-  <ProjectReference Include="Vendor/HartsyInference/src/HartsyInference.ModelHandler/HartsyInference.ModelHandler.csproj" />
-  <ProjectReference Include="Vendor/HartsyInference/src/HartsyInference.Tokenizers/HartsyInference.Tokenizers.csproj" />
-  <ProjectReference Include="Vendor/HartsyInference/src/HartsyInference.Cpu/HartsyInference.Cpu.csproj" />
-  <ProjectReference Include="Vendor/HartsyInference/src/HartsyInference.Cuda/HartsyInference.Cuda.csproj" />
-  <ProjectReference Include="Vendor/HartsyInference/src/HartsyInference.Vulkan/HartsyInference.Vulkan.csproj" />
-</ItemGroup>
+<PackageReference Include="HartsyInference" Version="2.0.0-alpha.17" />
 ```
 
-**Phase 2 — NuGet PackageReferences.** Once HartsyInference publishes packages, swap
-the `<ProjectReference>` block for `<PackageReference Include="HartsyInference.Diffusion" Version="..." />`
-and a few siblings, and remove the submodule.
+There is no git submodule — the extension's `Vendor/` folder contains only a
+`.gitkeep`. The version is pinned to an **exact** prerelease, not a range: the engine's
+own type surface (constructors, request records, feature enums) is the
+contract, and it does shift between alpha builds, so a floating range would
+let an incompatible engine silently restore under this extension. `RestoreNoHttpCache`
+is set in the csproj so a freshly-published alpha isn't hidden behind NuGet's
+~30-minute flat-container cache.
 
-## What we consume from HartsyInference
+A `UseLocalHartsy=true` MSBuild property switches the `<PackageReference>`
+for direct `<Reference>`s with `HintPath`s into a locally built
+`HartsyInference.Cli` bin folder (the engine's full runtime closure), for
+engine development against unpublished DLLs. This must never be the default —
+end users only have nuget.org — and the csproj enforces that by defaulting it
+`false`.
 
-### From `HartsyInference.Core`
+## What the extension consumes
 
-| Type | Path | Why |
-|------|------|-----|
-| `IBackend` | `src/HartsyInference.Core/Backends/IBackend.cs:6` | Required by every pipeline; we instantiate one of `CpuBackend` / `CudaBackend` / `VulkanBackend` and pass it to pipelines |
-| `Tensor` | `src/HartsyInference.Core/Tensors/Tensor.cs:8` | We don't typically construct these — the pipeline does — but we touch them for LoRA application |
-| `DeviceKind` | `src/HartsyInference.Core/Backends/DeviceKind.cs:4` | Identifies the device of a tensor |
+The extension does not construct pipelines, load tokenizers/text-encoders/UNets/VAEs,
+or partition checkpoints by tensor prefix. All of that lives in
+`HartsyInference.Engine`, and the extension programs against exactly one
+entry point: `HartsyInference.Engine.InferenceEngine`.
 
-### From `HartsyInference.Cpu` / `HartsyInference.Cuda` / `HartsyInference.Vulkan`
+`Backends/HartsyInferenceBackend.cs` constructs one `InferenceEngine` per
+backend instance and calls into its lazily-constructed services:
 
-| Type | Why |
-|------|-----|
-| `CpuBackend` | Default fallback; constructor takes no args |
-| `CudaBackend(int deviceOrdinal, string ptxDir)` | Primary GPU path on NVIDIA |
-| `VulkanBackend()` (constructor signature TBC) | Cross-vendor GPU path |
+| Engine surface | Used for |
+|---|---|
+| `InferenceEngine(selector, options)` / `InferenceEngine(selector, ordinal, options)` | Construct the engine: compute backend (`auto`/`cpu`/`cuda`/`vulkan`), an explicit device ordinal when one is configured, low-VRAM policy, and multi-GPU `PlacementConfig` (text-encoder / VAE / CFG-parallel / shard device split) |
+| `InferenceEngine.Images.GenerateAsync(ModelSpec, ImageRequest, IProgress<StepPreview>, CancellationToken)` | Still images |
+| `InferenceEngine.Video.GenerateAsync(ModelSpec, VideoRequest, …)` | Video clips, returns `VideoGenerationResult` (frames + an optional `AudioBuffer` for the models that generate a synced soundtrack) |
+| `InferenceEngine.Music.GenerateAsync(ModelSpec, MusicRequest, …)` | Music/audio, returns an encoded `AudioResult` |
+| `InferenceEngine.Restore.RestoreAsync(ModelSpec, RestoreRequest, …)` | Optional SeedVR2 restore/upscale pass over an image or a video's frames |
+| `InferenceEngine.FreeMemory()` | Evict cached pipelines (used on OOM retry and on Swarm's "free memory" action) |
+| `InferenceEngine.BackendDescription` | Human-readable device string for the backend's load-status log |
+| `BackendFactory.Validate(selector)` / `.Resolve(selector)` / `.Kind(selector)` | Eager device validation at `Init()` so a bad `GPU_ID` fails at backend startup, not on the first generation |
+| `Engine.Recipes.RecipeRegistry` / `Video.WanVideoRecipe` / `VideoRecipeRegistry` | Per-family `ImageFeatures`/`VideoFeatures` flags (`Generation/ModelSupport.cs` reads these to answer "is this feature drivable for this architecture") |
 
-We instantiate exactly one of these per Swarm-configured backend instance, based on
-the user's setting.
+Every `GenerateAsync` overload above takes a `CancellationToken`; the backend
+links it to Swarm's `T2IParamInput.InterruptToken` so the UI's Stop button
+cancels an in-flight generation.
 
-### From `HartsyInference.ModelHandler`
+The request DTOs (`ImageRequest`, `VideoRequest`, `MusicRequest`) are flat
+records under `HartsyInference.Engine.Requests`. `Backends/HartsyInferenceBackend.cs`
+builds one per generation from `T2IParamInput` — this is the only place in
+the extension that reads `T2IParamTypes.*`. Composition features (LoRA stack,
+ControlNet conditioning list, IP-Adapter, refiner, img2img/inpaint, regional
+prompting, variation seed) are fields on `ImageRequest` itself; the engine
+applies them inside the pipeline, not the extension.
 
-| Type | Path | Why |
-|------|------|-----|
-| `SafeTensorsLoader` | `src/HartsyInference.ModelHandler/SafeTensors/` | Load `.safetensors` checkpoints. Pattern: `using var loader = new SafeTensorsLoader(); loader.Load(path); var tensors = loader.GetAllTensors();` |
-| `LoraStack` | `src/HartsyInference.ModelHandler/Lora/LoraStack.cs:9` | Multi-LoRA application |
-| `LoraFile` | `src/HartsyInference.ModelHandler/Lora/LoraFile.cs` | Loaded LoRA file representation |
-| `LoraTarget` enum | `src/HartsyInference.ModelHandler/Lora/LoraTarget.cs:7` | UNet / Transformer / ClipL / ClipG |
-| `ModelRegistry` | `src/HartsyInference.ModelHandler/Registry/` | Optional — in-memory model cache. We may use our own `PipelineCache` instead |
+`Generation/ModelSupport.cs` is the only architecture-mapping layer left: a
+dictionary from SwarmUI's `CompatClass.ID` to an engine family id plus a
+`Kind` (`Image`/`Video`/`Music`). It does not construct anything — whether a
+family is actually drivable is asked of `RecipeRegistry`/`VideoRecipeRegistry`
+at call time, so the mapping can't drift from what the engine will really do.
 
-We do **not** use `HuggingFace/` (download utilities) or `Gguf/` in v1. Models come
-from Swarm's `Models/` folder; the user is responsible for putting files there.
+## LoRA application
 
-### From `HartsyInference.Tokenizers`
+`HartsyInference.Engine.Features.LoraApplier.BuildAndApply` merges a LoRA
+stack directly into the weight dictionaries it's given (matching keys are
+replaced with newly-allocated merged tensors owned by the returned
+`LoraStack`, which the caller disposes once the components built from those
+dicts are done). That mutation is real, but it never poisons a shared cache:
+each per-family recipe (`SdxlRecipe`, `Flux1Recipe`, `Sd15Recipe`,
+`MiniMaxH3Recipe`) re-reads and converts the checkpoint from disk into fresh
+owned tensors on every `Construct()` call before handing them to
+`BuildAndApply`, and the engine's pipeline cache key includes the LoRA stack
+identity — a different LoRA selection is a cache miss that triggers a fresh
+`Construct()` rather than reusing (or re-merging into) an already-merged
+dictionary.
 
-| Type | Why |
-|------|-----|
-| `ClipTokenizer(string vocabPath, string mergesPath)` | Tokenize prompt + negative prompt for SD/SDXL/Flux CLIP-L paths |
-| `T5Tokenizer` | T5 path for Flux / SD3 |
+## Native dependencies
 
-### From `HartsyInference.Diffusion`
+The NuGet package's own build targets copy the CUDA PTX kernels (`Ptx/`) and
+Vulkan SPIR-V shaders (`Spirv/`) into the extension's output folder
+automatically — no manual `<Content>` copy rules needed in this extension's
+csproj. CPU is pure managed with no native deps. Per the engine's own
+`README.nuget.md`: CUDA needs compute capability 8.0+ and CUDA 12.x/13.x
+userspace libraries (FP8 paths need 8.9+); Vulkan needs a 1.3+ runtime.
 
-This is the bulk of our consumption surface.
+## Real remaining gaps
 
-#### Pipelines (`src/HartsyInference.Diffusion/Pipelines/`)
+These are refused or left undone in code today, not hypothetical:
 
-Each pipeline is **a sealed concrete class with a unique constructor**. There is
-no `IPipeline` interface (despite an unused skeleton at
-`src/HartsyInference.Core/Pipelines/IDiffusionPipeline.cs`). Every pipeline class
-exposes:
+| Gap | Where |
+|---|---|
+| No two-stage "generate an image, then animate it with a separate video model" flow (Comfy's `ImageToVideoGenInfo` / Video Model param) | `IsValidForThisBackend` refuses any non-video model with a `VideoModel` param set — no engine equivalent |
+| Comfy prompt-syntax tags `<object:…>`, `<clear:…>`, `<embed:…>`, `<break>` | `IsValidForThisBackend`'s `UnsupportedPromptSyntax` regex refuses these outright rather than feeding the raw tag into a text encoder |
+| No LoRA on music models | `ValidateMusic` refuses any LoRA selection for `acestep`/`musicgen`/`yue` |
+| HunyuanVideo image-to-video conditioning | `Generation/ModelSupport.cs`: the `hunyuan-video` family maps only the text-to-video recipe; I2V conditioning is a recipe TODO, not a mapping gap |
+| MiniMax-H3 fl2va vs ref2va task detection is filename-based | `ModelSupport.MiniMaxH3TaskFeatures` — the two checkpoint variants are byte-identical in key set and tensor shape, so there's no header sniff; an unrecognized filename keeps the full feature union rather than guessing |
 
-- A constructor taking the `IBackend`, the loaded model components, and (for some)
-  a config record
-- Either a `Generate(TextToImageRequest req, Action<GenerationProgress>?)` method
-  (returns `(byte[] rgbData, int w, int h, int seed)`) or a
-  `GenerateFromTokens(int[] promptTokenIds, int[] negativeTokenIds, TextToImageRequest, ...)`
-  variant
-
-**Pipelines we'll wire:**
-
-| Pipeline | Constructor signature (current) | Notes |
-|----------|---------------------------------|-------|
-| `StableDiffusion15Pipeline` | `(IBackend, ClipTextEncoder, UNet, VaeDecoder)` | SD1.5 |
-| `SdxlPipeline` | `(IBackend, ClipTextEncoder clipL, ClipTextEncoder clipG, UNet, VaeDecoder)` | SDXL |
-| `SdxlInpaintPipeline` | inpaint variant — takes pre-encoded source | Blocked by missing VaeEncoder |
-| `Sd3Pipeline` | TBC | SD3 |
-| `FluxPipeline` | `(IBackend, ClipTextEncoder clipL, T5TextEncoder t5, FluxTransformer, VaeDecoder, FluxConfig)` | Flux dev/schnell |
-| `Flux2Pipeline` | TBC | Flux 2 |
-| `AuraFlowPipeline` | TBC | AuraFlow |
-| `ChromaPipeline` | TBC | Chroma |
-| `ZImagePipeline` | TBC | Z-Image |
-| `HunyuanImagePipeline` | TBC | HunyuanImage |
-
-`TBC` = constructor signature to be confirmed by reading the upstream source. The
-pipeline-translation layer (`Generation/ModelSupport.cs`) holds one
-`IPipelineHandler` per architecture, so the dispatch is closed over the differences.
-
-#### Models (`src/HartsyInference.Diffusion/Models/`)
-
-| Subdir | What we use |
-|--------|-------------|
-| `Denoisers/` | `UNet`, `UNetConfig.Sd15`, `UNetConfig.SdxlBase`, `FluxTransformer`, `FluxConfig`, `Sd3Transformer`, `Flux2Transformer`, etc. |
-| `TextEncoders/` | `ClipTextEncoder`, `ClipTextEncoderConfig.{Sd15,SdxlClipL,SdxlClipG}`, `T5TextEncoder`, `LlamaStyleEncoder` |
-| `Vae/` | `VaeDecoder`, `VaeTiledDecoder`, `VaeConfig.{Sd15,Sdxl,Sd3,Flux,Flux2,...}` |
-
-Loading pattern (manual today, no façade):
-
-```csharp
-// 1. Tokenizer
-var tokenizer = new ClipTokenizer(vocabPath, mergesPath);
-
-// 2. Text encoder
-var clipConfig = ClipTextEncoderConfig.Sd15;
-var textEncoder = new ClipTextEncoder(clipConfig);
-using var clipLoader = new SafeTensorsLoader();
-clipLoader.Load(textEncoderPath);
-textEncoder.LoadWeights(clipLoader.GetAllTensors(), prefix: "text_model");
-
-// 3. UNet
-var unet = new UNet(UNetConfig.Sd15);
-using var unetLoader = new SafeTensorsLoader();
-unetLoader.Load(unetPath);
-unet.LoadWeights(unetLoader.GetAllTensors());
-
-// 4. VAE
-var vae = new VaeDecoder(VaeConfig.Sd15);
-using var vaeLoader = new SafeTensorsLoader();
-vaeLoader.Load(vaePath);
-vae.LoadWeights(vaeLoader.GetAllTensors());
-
-// 5. Pipeline
-using var pipeline = new StableDiffusion15Pipeline(backend, textEncoder, unet, vae);
-```
-
-For Swarm we don't have separate per-component files — Swarm checkpoints are
-typically a single .safetensors with everything inside. Our model loader
-(`Generation/ModelSupport.cs`) needs to **partition the all-in-one checkpoint by
-prefix** (e.g., `text_model.*`, `model.diffusion_model.*`, `first_stage_model.*`)
-and feed each component its slice.
-
-#### Schedulers (`src/HartsyInference.Diffusion/Schedulers/`)
-
-`EulerDiscreteScheduler`, `DdimScheduler`, `DpmPlusPlus2MScheduler`, `LcmScheduler`,
-`FlowMatchEulerDiscreteScheduler`. Pipelines select a scheduler internally based on
-`TextToImageRequest.Scheduler` (a string). We map Swarm's sampler enum to that string.
-
-#### Adapters (`src/HartsyInference.Diffusion/Adapters/`)
-
-`ControlNet`, `IpAdapter`. These exist as classes but **pipelines don't accept them
-yet.** Wiring them in is upstream work scheduled for phase 5.
-
-### From `HartsyInference.Diffusion/Requests/`
-
-`TextToImageRequest` is the only DTO. Properties:
-
-```
-Prompt          (string, required)
-NegativePrompt  (string, "")
-Steps           (int, 20)
-CfgScale        (float, 7.5f)
-Width           (int, 512)
-Height          (int, 512)
-Seed            (int?, null = random)
-Scheduler       (string?, null = pipeline default)
-```
-
-We populate this from `T2IParamInput`. There is no separate Img2ImgRequest /
-InpaintRequest yet — img2img/inpaint pipelines reuse `TextToImageRequest` plus
-explicit tensor parameters on the method signature.
-
-## Gaps we'll either route around or upstream
-
-These are required for Comfy parity but don't exist in HartsyInference today.
-
-| # | Gap | Impact | Plan |
-|---|-----|--------|------|
-| 1 | **TFM mismatch (net10 vs net8)** | Cannot reference HartsyInference at all | Upstream PR — multi-target net8.0/net10.0. **Phase 0 blocker.** |
-| 2 | **No `VaeEncoder`** | Blocks all img2img / inpaint paths | Upstream PR. Phase 4 dependency. Substantial — VAE encode is a real model, not a wrapper. |
-| 3 | **No `CancellationToken` on pipelines** | UI cancel button does nothing | Workaround in phase 3: stop-flag checked in progress callback (only stops at next-step boundary, with up-to-1-step latency). Long-term: upstream PR. |
-| 4 | **Progress callback exposes only `(Step, Total, Elapsed)`** | Can't show preview images | Upstream: extend `GenerationProgress` to expose the in-flight latent (or a hook to extract it). Phase 3. |
-| 5 | **No `IPipeline` interface — pipelines have non-uniform ctors** | Our dispatcher is a manual switch | We work around with our own `IPipelineHandler` abstraction in `Generation/ModelSupport.cs`. No upstream change strictly needed. |
-| 6 | **No `PipelineFactory` / `ModelRegistry.LoadAsync`** | We have to manually partition checkpoints by tensor-prefix | We do this in our model loader. Optional upstream improvement; not blocking. |
-| 7 | **`LoraStack.ApplyToWeights` is destructive** | Can't change LoRAs between gens cheaply | Workaround: keep an unmodified weights cache, deep-copy + apply per-generation, or PR a non-destructive variant upstream. Phase 2 design decision. |
-| 8 | **Pipelines don't accept ControlNet in ctor** | No ControlNet parity | Upstream PR per pipeline class. Phase 5. |
-| 9 | **No ControlNet preprocessors** | User has to provide pre-processed canny/depth maps | Upstream feature request — ports of canny (trivial), zoedepth (small NN), openpose (large), lineart. Phase 5. |
-| 10 | **No textual-inversion embedding API** | Embeddings parameter is dead | Upstream feature request. Phase 5 (low priority). |
-| 11 | **`HartsyInference.Server` is a stub** | We can't lean on it for an out-of-process variant | Upstream finishes phase 7 of their own roadmap; meanwhile our backend is in-process only |
-
-We open issues for #1 and #2 during phase 1 so they're in flight by the time we need them.
-
-## How we package the dependency
-
-Once HartsyInference ships NuGets:
-
-```xml
-<ItemGroup>
-  <PackageReference Include="HartsyInference.Core" Version="x.y.z" />
-  <PackageReference Include="HartsyInference.Diffusion" Version="x.y.z" />
-  <PackageReference Include="HartsyInference.ModelHandler" Version="x.y.z" />
-  <PackageReference Include="HartsyInference.Tokenizers" Version="x.y.z" />
-  <PackageReference Include="HartsyInference.Cpu" Version="x.y.z" />
-  <PackageReference Include="HartsyInference.Cuda" Version="x.y.z" />
-  <PackageReference Include="HartsyInference.Vulkan" Version="x.y.z" />
-</ItemGroup>
-```
-
-Then the user's Swarm install picks them up automatically as part of the extension's
-NuGet restore step. **No manual git-clone of HartsyInference required.**
-
-## Native dependencies (CUDA / Vulkan)
-
-- **CUDA** — HartsyInference's CUDA backend ships PTX files (`Ptx/` folder, copied to
-  output by HartsyInference's build). User must have CUDA 12.x driver installed; no CUDA
-  Toolkit needed (Driver API only).
-- **Vulkan** — HartsyInference ships SPIR-V shaders. User must have Vulkan 1.3 ICD.
-- **CPU** — pure managed; no native deps.
-
-The extension's csproj will need to ensure the `Ptx/` and SPIR-V folders are
-copied to the Swarm output directory. HartsyInference's build props should handle
-this; if not, we add an `<ItemGroup>` with `<Content>` copy rules.
-
-## Versioning and compatibility
-
-HartsyInference uses semantic versioning (planned). We pin to a specific minor in our
-`<PackageReference>` and bump intentionally. A HartsyInference major bump should
-require an explicit extension review — the pipeline constructors are the contract,
-and they could shift between majors.
+See `11-Comfy-Parity-Punchlist.md` for the broader Comfy-parity feature list
+and `14-Known-Issues-And-TODO.md` for open work tracked outside this contract.
+Architecture-level design (why the extension is a thin mapper at all) is in
+`01-Architecture.md`.

@@ -30,7 +30,10 @@ becomes a HartsyInference `TextToImageRequest` directly, with no JSON in the mid
 
 1. **Functional parity with the ComfyUI backend** for the common path: text-to-image,
    img2img, inpaint, LoRA, ControlNet, refiners — across SD1.5, SDXL, SD3, Flux on
-   models the HartsyInference team has already brought up.
+   models the HartsyInference team has already brought up. Parity here means feature
+   completeness, not identical pixels — different schedulers, attention
+   implementations, and fp accumulation order mean the same seed will never match
+   ComfyUI's output, and that will never change.
 2. **In-process execution** — no Python, no subprocess, no IPC.
 3. **Match Swarm's existing UX** — the user sees the same parameters, the same
    `Generate` button, the same image gallery. The backend swap should be invisible.
@@ -55,23 +58,6 @@ becomes a HartsyInference `TextToImageRequest` directly, with no JSON in the mid
   YOLO, LTX-Video) but Swarm's backend abstraction is `AbstractT2IBackend` — image
   generation. Audio/video can be a separate extension later.
 
-## Definition of done for v1
-
-The extension is "done" enough to ship when:
-
-- [ ] A user with a clean Swarm install can pick "HartsyInference" as their backend
-- [ ] Pick an SDXL .safetensors checkpoint from their `Models/` folder
-- [ ] Type a prompt, hit Generate, and get an image
-- [ ] LoRAs from `Models/Lora/` apply correctly
-- [ ] Live progress ticks in the Swarm UI (% complete, current step)
-- [ ] Cancel-mid-generation works
-- [ ] Memory is reclaimed cleanly on model swap
-- [ ] At least SDXL + SD1.5 + Flux schnell pass a parity test against the same model
-      run through ComfyUI (within a documented numerical tolerance)
-
-Everything past that is incremental milestones — see
-[`03-Implementation-Roadmap.md`](./03-Implementation-Roadmap.md).
-
 ## Out-of-scope but adjacent
 
 - **Audio/video extensions.** Separate extension repos that mount HartsyInference's
@@ -87,11 +73,13 @@ Everything past that is incremental milestones — see
 ## How to read these docs
 
 - Start with [`01-Architecture.md`](./01-Architecture.md) for the component diagram.
-- Skim [`02-Comfy-Feature-Parity-Matrix.md`](./02-Comfy-Feature-Parity-Matrix.md) to
-  see the feature surface we're targeting.
-- [`03-Implementation-Roadmap.md`](./03-Implementation-Roadmap.md) is the milestone
-  plan.
 - [`04-HartsyInference-Integration.md`](./04-HartsyInference-Integration.md) is the
   contract with the upstream library — read this before writing any consumption code.
-- [`10-Risks-And-Open-Questions.md`](./10-Risks-And-Open-Questions.md) is the list of
-  known unknowns. The .NET 10 vs .NET 8 TFM issue is the biggest one.
+- [`11-Comfy-Parity-Punchlist.md`](./11-Comfy-Parity-Punchlist.md) is the canonical
+  feature-status list — what's shipped, what's left.
+- [`14-Known-Issues-And-TODO.md`](./14-Known-Issues-And-TODO.md) covers what's
+  currently broken or unverified.
+- The rest cover specific slices: [`06-Backend-Lifecycle.md`](./06-Backend-Lifecycle.md)
+  (init/generate/shutdown), [`07-Parameters-And-Feature-Flags.md`](./07-Parameters-And-Feature-Flags.md),
+  [`08-Web-API-Routes.md`](./08-Web-API-Routes.md), [`13-Video-Models-Plan.md`](./13-Video-Models-Plan.md),
+  and [`15-Two-GPU-Setups.md`](./15-Two-GPU-Setups.md).
