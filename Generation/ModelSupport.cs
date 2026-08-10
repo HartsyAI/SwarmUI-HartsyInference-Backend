@@ -79,6 +79,11 @@ public static class ModelSupport
         ["hunyuan-video"] = new("hunyuan-video", Kind.Video),
         ["lightricks-ltx-video"] = new("ltx-video", Kind.Video),
         ["lightricks-ltx-video-2"] = new("ltx-video-2", Kind.Video),
+        // Both compat classes route to Kandinsky5VideoRecipe, which now weight-derives Lite vs. Pro from the
+        // loaded transformer's model_dim (see Kandinsky5VideoRecipe.DetectConfig) — mapping "vidpro" here was
+        // unsafe before that detection existed (it would have silently constructed the Lite-2B architecture).
+        ["kandinsky5-vidlite"] = new("kandinsky5-video", Kind.Video),
+        ["kandinsky5-vidpro"] = new("kandinsky5-video", Kind.Video),
         [ModelClassRegistrations.LanceVideoCompatClassId] = new("lance-video", Kind.Video),
         // Core owns the minimax-h3 compat class (T2IModelClassSorter, "MiniMax H3 support" #1469) and shares it
         // with the video/audio VAE classes, exactly as LTX-2 does — this maps it, it must not re-register it.

@@ -850,7 +850,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             },
             Regional = BuildRegional(input, prompt),
             VariationSeed = BuildVariationSeed(input),
-            Extra = BuildImageExtra(input, unionTypes),
+            Extra = BuildImageExtra(input, family, initImage, unionTypes),
         };
     }
 
@@ -1058,7 +1058,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
 
     /// <summary>Everything the Engine's flat image contract doesn't name: its own documented Extra keys plus this
     /// extension's registered custom params.</summary>
-    private static IReadOnlyDictionary<string, object> BuildImageExtra(T2IParamInput input, List<(int Index, string UnionType)> controlNetUnionTypes)
+    private IReadOnlyDictionary<string, object> BuildImageExtra(T2IParamInput input, ModelSupport.Family family, Image initImage,
+        List<(int Index, string UnionType)> controlNetUnionTypes)
     {
         Dictionary<string, object> extra = new(StringComparer.Ordinal);
         // Engine-documented keys (Features/HartsyInference.Engine.Features.RequestExtras.cs).
@@ -1124,6 +1125,30 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         if (input.TryGet(SwarmUIHartsyInference.Ideogram4MagicPromptModelParam, out string magicModel) && !string.IsNullOrWhiteSpace(magicModel))
         {
             extra["hartsy.ideogram4_magic_prompt_model"] = magicModel;
+        }
+        // FLUX.1 Canny/Depth: these are ordinary Flux.1 checkpoints with a wider x_embedder baked in — no separate
+        // ControlNet adapter to select, so there is no ControlNet-slot model to key preprocessing off. The engine
+        // only learns the checkpoint is Canny/Depth/Fill after loading its weights (Flux1RecipePipeline has no
+        // earlier hook), so detection here is a filename heuristic on the MAIN model, mirroring
+        // ControlNetPreprocessing.DetectMode's convention for real ControlNet checkpoints. A wrong guess degrades
+        // to FluxPipeline's own clear "requires/does not accept a control image" error, not silent corruption —
+        // Fill deliberately isn't matched here since it conditions via Img2Img + Inpaint, not a control image.
+        if (family.Id == "flux1" && initImage is not null)
+        {
+            string modelPath = input.Get(T2IParamTypes.Model)?.RawFilePath ?? "";
+            string modelName = System.IO.Path.GetFileNameWithoutExtension(modelPath).ToLowerInvariant();
+            HartsyInference.Diffusion.Adapters.ControlNetMode? toolsMode = modelName.Contains("canny") ? HartsyInference.Diffusion.Adapters.ControlNetMode.Canny
+                : modelName.Contains("depth") ? HartsyInference.Diffusion.Adapters.ControlNetMode.Depth
+                : null;
+            if (toolsMode is not null)
+            {
+                AddLoadStatus($"FLUX.1 Tools checkpoint detected ('{modelName}') → {toolsMode} preprocessing.");
+                EngineImage annotated = ControlNetPreprocessing.Preprocess(
+                    toolsMode.Value, initImage,
+                    input.Get(T2IParamTypes.Width, 1024), input.Get(T2IParamTypes.Height, 1024),
+                    PreprocessBackend, msg => AddLoadStatus(msg));
+                extra[HartsyInference.Engine.Features.RequestExtras.FluxToolsControlImage] = annotated;
+            }
         }
         return extra;
     }
@@ -1501,9 +1526,13 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     // ─────────────────────────────── 5. Validation (the honesty guard) ───────────────────────────────
 
     /// <summary>Cleaned IDs of "comfyui"-tagged params we genuinely service, so the comfy-only guard in
-    /// <see cref="IsValidForThisBackend"/> doesn't falsely refuse them.</summary>
+    /// <see cref="IsValidForThisBackend"/> doesn't falsely refuse them. <c>refinersampler</c>/<c>refinerscheduler</c>/
+    /// <c>refinerupscalemethod</c> were removed 2026-08-09: they allow-listed but <see cref="BuildRefiner"/> never
+    /// read any of them — StepSwap shares the base loop's scheduler by construction (no independent refiner
+    /// sampler/scheduler exists to honor), and upscale-method has no consumer until hires-fix ships. Re-add
+    /// <c>refinerupscalemethod</c> only once a real consumer exists.</summary>
     private static readonly HashSet<string> HonoredComfyParams =
-        ["sampler", "scheduler", "refinersampler", "refinerscheduler", "refinerupscalemethod",
+        ["sampler", "scheduler",
          // Style-model (FLUX.1 Redux) strengths — mapped onto the engine's redux.* Extra keys.
          "stylemodelmergestrength", "stylemodelmultiplystrength", "stylemodelapplystart",
          // IP-Adapter scheduling knobs — mapped onto the engine's ipadapter.* Extra keys.
