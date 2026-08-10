@@ -58,6 +58,13 @@ public class SwarmUIHartsyInference : Extension
     public static T2IRegisteredParam<Image> AnimateFaceVideoParam;
     public static T2IRegisteredParam<string> SamplerParam;
 
+    // CFG-Rescale: duplicates rather than reads a Comfy-side param. Confirmed against SwarmUI core:
+    // T2IParamType.FeatureFlag is a single string (its comma-separated multi-flag support is AND-semantics,
+    // not OR), so there's no way for one param to be satisfied by either of two independently-installed
+    // backends without one of them lying. Delete this duplicate in favor of reading Comfy's own rescale param
+    // directly if core ever adds a mechanism for one param to satisfy either backend's flag.
+    public static T2IRegisteredParam<double> CfgRescaleParam;
+
     /// <summary>How the Init Image is consumed: denoise (classic img2img) vs reference (in-context edit).</summary>
     public static T2IRegisteredParam<string> InitImageModeParam;
 
@@ -236,6 +243,16 @@ public class SwarmUIHartsyInference : Extension
             Group: HartsyInferenceParamGroup,
             FeatureFlag: "hartsyinference",
             GetValues: _ => new List<string> { "euler", "ddim", "dpm++2m", "lcm" }));
+
+        CfgRescaleParam = T2IParamTypes.Register<double>(new(
+            "HartsyInference CFG Rescale",
+            "Pulls a high-CFG-Scale guided prediction back toward the conditional prediction's magnitude, reducing the oversaturated/burnt-highlights look that high CFG Scale causes.\n0 (default) = off. 0.7 is a reasonable starting point at CFG Scale 10+. Only SDXL honors this today.\nNot the same math as ComfyUI's RescaleCFG node — this rescales per-token L2 norm, not per-sample standard deviation — so the same numeric value produces a different-strength effect.",
+            "0", Min: 0, Max: 1, Step: 0.05,
+            Toggleable: true,
+            Group: HartsyInferenceParamGroup,
+            FeatureFlag: "hartsyinference",
+            ViewType: ParamViewType.SLIDER,
+            IsAdvanced: true));
 
         InitImageModeParam = T2IParamTypes.Register<string>(new(
             "HartsyInference Init Image Mode",
