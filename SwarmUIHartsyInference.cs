@@ -237,12 +237,15 @@ public class SwarmUIHartsyInference : Extension
         // Comfy value over as a courtesy (euler/ddim/dpmpp_2m/lcm map; others → Euler).
         SamplerParam = T2IParamTypes.Register<string>(new(
             "HartsyInference Sampler",
-            "Sampler for SD 1.5 / SDXL generations on the HartsyInference backend.\n'euler' is the safe default; 'dpm++2m' is popular for SDXL; 'lcm' is for LCM/turbo checkpoints.\nFlow-matching models (Flux, SD3, Z-Image, etc.) use their canonical sampler and ignore this.",
+            "Sampler for SD 1.5 / SDXL generations on the HartsyInference backend.\n'euler' is the safe default; 'dpm++2m' is popular for SDXL; 'lcm'/'tcd' are for LCM/TCD-distilled turbo checkpoints.\nFlow-matching models (Flux, SD3, Z-Image, etc.) use their canonical sampler and ignore this.",
             "euler",
             Toggleable: true,
             Group: HartsyInferenceParamGroup,
             FeatureFlag: "hartsyinference",
-            GetValues: _ => new List<string> { "euler", "ddim", "dpm++2m", "lcm" }));
+            // SchedulerFactory (engine) already implements "tcd" (TcdScheduler) — this dropdown just never
+            // offered it. "ddim" listed as "dpmpp2m" in the engine's own SchedulerFactory doc comment is the
+            // same value as "dpm++2m" here; kept as one canonical spelling to avoid a silent no-match fallback.
+            GetValues: _ => new List<string> { "euler", "ddim", "dpm++2m", "lcm", "tcd" }));
 
         CfgRescaleParam = T2IParamTypes.Register<double>(new(
             "HartsyInference CFG Rescale",
