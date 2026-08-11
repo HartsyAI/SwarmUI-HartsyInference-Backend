@@ -670,13 +670,11 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         {
             throw new InvalidOperationException("HartsyInference: the video pipeline produced no frames.");
         }
-        if (input.Get(T2IParamTypes.VideoBoomerang, false))
-        {
-            for (int i = frames.Count - 2; i > 0; i--)
-            {
-                frames.Add(frames[i]);
-            }
-        }
+        // Boomerang is NOT applied here: BuildVideoRequest already sets VideoRequest.VideoBoomerang, and every
+        // *RecipePipeline.Generate routes through VideoRecipeUtils.ToVideoFrames, which applies it before the
+        // frames ever leave _engine.Video.GenerateAsync above. Re-applying it here used to ping-pong the
+        // already-ping-ponged sequence (found scoping Tier 3.5 — see VideoRecipeUtilsFrameEditsTests.cs in the
+        // engine repo for the frame-count/order proof) instead of the single loop the user asked for.
         // Optional SeedVR2 restore pass (Video Restore param group): frames go straight into the engine's
         // restore service (no container round-trip), replacing the frame list before muxing.
         if (input.TryGet(SwarmUIHartsyInference.VideoRestoreModelParam, out string restoreModel)
