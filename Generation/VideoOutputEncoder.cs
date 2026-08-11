@@ -45,6 +45,69 @@ public static class VideoOutputEncoder
         {
             return RgbToImage.FromHwcRgb(frames[0], width, height);
         }
+        (Process proc, string tmpFile, string audioTmp, MediaType type) = StartFfmpegEncode(width, height, fps, format, audio, cancel);
+        Logs.Verbose($"[HartsyInference] Encoding {frames.Length} frames {width}x{height}@{fps}fps as '{format}'"
+            + (audioTmp is not null ? $" with a {audio.SampleRate} Hz audio track" : ""));
+        try
+        {
+            Stream stdin = proc.StandardInput.BaseStream;
+            foreach (byte[] frame in frames)
+            {
+                cancel.ThrowIfCancellationRequested();
+                stdin.Write(frame, 0, frame.Length);
+            }
+            stdin.Close();
+            return FinishEncode(proc, tmpFile, audioTmp, type, format);
+        }
+        finally
+        {
+            CleanupEncode(proc, tmpFile, audioTmp);
+        }
+    }
+
+    /// <summary>Streaming sibling of <see cref="Encode"/> (Tier 3.5 backlog): writes frames to ffmpeg's stdin as
+    /// they arrive instead of requiring the whole clip materialized first — lower peak memory and a muxed file
+    /// available sooner after the last frame decodes, for the video pipelines that can genuinely produce frames
+    /// incrementally (<c>IVideoService.GenerateFramesAsync</c>). The ffmpeg command line itself never needed a
+    /// frame count up front (no <c>-frames:v</c> flag; duration is inferred from EOF on stdin), so this differs
+    /// from <see cref="Encode"/> only in the write loop — same args, same process lifecycle, same cleanup
+    /// (<see cref="StartFfmpegEncode"/>/<see cref="FinishEncode"/>/<see cref="CleanupEncode"/> are shared).
+    /// Unlike <see cref="Encode"/>, this does NOT special-case a single frame as a bare PNG — the count isn't
+    /// known until the source is exhausted. Acceptable because its only caller gates on multi-frame requests
+    /// before choosing this path (see the eligibility check in <c>HartsyInferenceBackend.GenerateVideo</c>).</summary>
+    public static async Task<Image> EncodeStreamingAsync(IAsyncEnumerable<byte[]> frames, int width, int height, int fps, string format, CancellationToken cancel, AudioTrack audio = null)
+    {
+        (Process proc, string tmpFile, string audioTmp, MediaType type) = StartFfmpegEncode(width, height, fps, format, audio, cancel);
+        Logs.Verbose($"[HartsyInference] Streaming-encoding {width}x{height}@{fps}fps as '{format}'"
+            + (audioTmp is not null ? $" with a {audio.SampleRate} Hz audio track" : "") + " (frame count unknown until EOF)");
+        try
+        {
+            Stream stdin = proc.StandardInput.BaseStream;
+            int count = 0;
+            await foreach (byte[] frame in frames.WithCancellation(cancel))
+            {
+                cancel.ThrowIfCancellationRequested();
+                await stdin.WriteAsync(frame, cancel);
+                count++;
+            }
+            if (count == 0)
+            {
+                throw new InvalidOperationException("Video pipeline produced no frames.");
+            }
+            stdin.Close();
+            return FinishEncode(proc, tmpFile, audioTmp, type, format);
+        }
+        finally
+        {
+            CleanupEncode(proc, tmpFile, audioTmp);
+        }
+    }
+
+    /// <summary>Resolves ffmpeg, builds its argv (same for the buffered and streaming encode paths), and starts
+    /// the subprocess with stdin/stderr redirected — writing frames to it is the caller's job.</summary>
+    private static (Process Proc, string TmpFile, string AudioTmp, MediaType Type) StartFfmpegEncode(
+        int width, int height, int fps, string format, AudioTrack audio, CancellationToken cancel)
+    {
         string ffmpeg = Utilities.FfmegLocation.Value;
         if (string.IsNullOrWhiteSpace(ffmpeg))
         {
@@ -72,41 +135,39 @@ public static class VideoOutputEncoder
             UseShellExecute = false,
             CreateNoWindow = true,
         };
-        Logs.Verbose($"[HartsyInference] Encoding {frames.Length} frames {width}x{height}@{fps}fps as '{format}'"
-            + (audioTmp is not null ? $" with a {audio.SampleRate} Hz audio track" : "") + $" via ffmpeg {args}");
         Process proc = Process.Start(psi) ?? throw new InvalidOperationException("Failed to launch ffmpeg.");
-        try
+        return (proc, tmpFile, audioTmp, type);
+    }
+
+    /// <summary>Closes out a successful encode: waits for ffmpeg to exit, checks its exit code, and reads back
+    /// the muxed file. Caller must have already closed stdin.</summary>
+    private static Image FinishEncode(Process proc, string tmpFile, string audioTmp, MediaType type, string format)
+    {
+        string stderr = proc.StandardError.ReadToEnd();
+        proc.WaitForExit();
+        if (proc.ExitCode != 0)
         {
-            Stream stdin = proc.StandardInput.BaseStream;
-            foreach (byte[] frame in frames)
-            {
-                cancel.ThrowIfCancellationRequested();
-                stdin.Write(frame, 0, frame.Length);
-            }
-            stdin.Close();
-            string stderr = proc.StandardError.ReadToEnd();
-            proc.WaitForExit();
-            if (proc.ExitCode != 0)
-            {
-                throw new InvalidOperationException($"ffmpeg exited with code {proc.ExitCode} while encoding '{format}': {stderr}");
-            }
-            byte[] bytes = File.ReadAllBytes(tmpFile);
-            return new Image(bytes, type);
+            throw new InvalidOperationException($"ffmpeg exited with code {proc.ExitCode} while encoding '{format}': {stderr}");
         }
-        finally
+        return new Image(File.ReadAllBytes(tmpFile), type);
+    }
+
+    /// <summary>Kills ffmpeg if it's still running (e.g. the caller threw before closing stdin) and deletes the
+    /// temp files. Always runs from a <c>finally</c> in both <see cref="Encode"/> and
+    /// <see cref="EncodeStreamingAsync"/>.</summary>
+    private static void CleanupEncode(Process proc, string tmpFile, string audioTmp)
+    {
+        if (!proc.HasExited)
         {
-            if (!proc.HasExited)
-            {
-                try { proc.Kill(); } catch (Exception ex) { Logs.Error($"[HartsyInference] Failed to kill ffmpeg: {ex.Message}"); }
-            }
-            proc.Dispose();
-            try { if (File.Exists(tmpFile)) File.Delete(tmpFile); }
-            catch (Exception ex) { Logs.Warning($"[HartsyInference] Failed to delete temp video file '{tmpFile}': {ex.Message}"); }
-            if (audioTmp is not null)
-            {
-                try { if (File.Exists(audioTmp)) File.Delete(audioTmp); }
-                catch (Exception ex) { Logs.Warning($"[HartsyInference] Failed to delete temp audio file '{audioTmp}': {ex.Message}"); }
-            }
+            try { proc.Kill(); } catch (Exception ex) { Logs.Error($"[HartsyInference] Failed to kill ffmpeg: {ex.Message}"); }
+        }
+        proc.Dispose();
+        try { if (File.Exists(tmpFile)) File.Delete(tmpFile); }
+        catch (Exception ex) { Logs.Warning($"[HartsyInference] Failed to delete temp video file '{tmpFile}': {ex.Message}"); }
+        if (audioTmp is not null)
+        {
+            try { if (File.Exists(audioTmp)) File.Delete(audioTmp); }
+            catch (Exception ex) { Logs.Warning($"[HartsyInference] Failed to delete temp audio file '{audioTmp}': {ex.Message}"); }
         }
     }
 

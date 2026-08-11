@@ -2,6 +2,7 @@ using System.Globalization;
 using System.IO;
 using System.Net.Http;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using SwarmUI.Builtin_ComfyUIBackend;
 using FreneticUtilities.FreneticDataSyntax;
 using Newtonsoft.Json.Linq;
@@ -656,6 +657,32 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     private async Task<Image> GenerateVideo(ModelSpec spec, T2IParamInput input, IProgress<StepPreview> progress, CancellationToken cancel)
     {
         VideoRequest request = BuildVideoRequest(input);
+        string format = input.Get(T2IParamTypes.VideoFormat, "h264-mp4");
+
+        // Tier 3.5: stream frames straight to ffmpeg's stdin instead of buffering the whole clip, for the subset
+        // of requests that can't need the full clip in memory first — no boomerang/trim (need the final frame
+        // count / random access to reorder) and no audio (VideoAudioResolver.Resolve needs the final frame count
+        // too, to compute clip duration for trimming/looping the track). IVideoService.GenerateFramesAsync itself
+        // throws NotSupportedException for any family/variant that can't stream at all (as of 2026-08-11, only
+        // Wan's plain T2V/I2V-TI2V path) — caught below and falls back to the buffered path rather than refusing
+        // the generation outright, since these are core Swarm params a user may legitimately have set without
+        // knowing which families can stream.
+        bool wantsBoomerang = input.Get(T2IParamTypes.VideoBoomerang, false);
+        bool wantsTrim = input.Get(T2IParamTypes.TrimVideoStartFrames, 0) > 0 || input.Get(T2IParamTypes.TrimVideoEndFrames, 0) > 0;
+        bool wantsRestore = input.TryGet(SwarmUIHartsyInference.VideoRestoreModelParam, out string restoreModelCheck) && !string.IsNullOrWhiteSpace(restoreModelCheck);
+        bool wantsAudio = input.Get(T2IParamTypes.VideoAudioInput) is not null;
+        if (!wantsBoomerang && !wantsTrim && !wantsRestore && !wantsAudio)
+        {
+            try
+            {
+                return await GenerateVideoStreaming(spec, request, format, progress, cancel);
+            }
+            catch (NotSupportedException ex)
+            {
+                Logs.Verbose($"[HartsyInference] Streaming generation not available ({ex.Message}); falling back to buffered.");
+            }
+        }
+
         VideoGenerationResult generated = await _engine.Video.GenerateAsync(spec, request, progress, cancel);
         List<byte[]> frames = [];
         int width = 0, height = 0;
@@ -698,13 +725,53 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             }
             frames = restoredFrames;
         }
-        string format = input.Get(T2IParamTypes.VideoFormat, "h264-mp4");
         if (audio is not null && !VideoOutputEncoder.FormatSupportsAudio(format))
         {
             Logs.Warning($"[HartsyInference] Video format '{format}' cannot carry audio; the {audio.SampleRate} Hz track is not muxed.");
             audio = null;
         }
         return VideoOutputEncoder.Encode([.. frames], width, height, request.Fps ?? 25, format, cancel, audio);
+    }
+
+    /// <summary>The streaming half of <see cref="GenerateVideo"/> (Tier 3.5): pulls frames from
+    /// <c>IVideoService.GenerateFramesAsync</c> and pipes them straight to <see cref="VideoOutputEncoder.EncodeStreamingAsync"/>
+    /// as they decode. Peeks exactly one frame to learn width/height (the encoder needs them before the first
+    /// write; the request's own Width/Height aren't reliable here — resolutions get snapped/defaulted per family)
+    /// and re-prepends it via a small local iterator so nothing is lost. No audio track — callers only reach this
+    /// when <c>VideoAudioInput</c> is unset, matching <see cref="GenerateVideo"/>'s eligibility gate.</summary>
+    private async Task<Image> GenerateVideoStreaming(ModelSpec spec, VideoRequest request, string format, IProgress<StepPreview> progress, CancellationToken cancel)
+    {
+        IAsyncEnumerator<VideoFrame> frames = _engine.Video.GenerateFramesAsync(spec, request, progress, cancel).GetAsyncEnumerator(cancel);
+        if (!await frames.MoveNextAsync())
+        {
+            await frames.DisposeAsync();
+            throw new InvalidOperationException("HartsyInference: the video pipeline produced no frames.");
+        }
+        VideoFrame first = frames.Current;
+        // RgbFramesFrom takes ownership of `frames` from here: its own finally disposes it once
+        // EncodeStreamingAsync's `await foreach` drains it or unwinds — the compiler-generated disposal on an
+        // `await foreach` target runs in both cases, so there's no double-dispose or leak on either path.
+        return await VideoOutputEncoder.EncodeStreamingAsync(
+            RgbFramesFrom(first, frames), first.Width, first.Height, request.Fps ?? 25, format, cancel);
+    }
+
+    /// <summary>Yields <paramref name="first"/>'s RGB bytes, then the rest of <paramref name="remaining"/>'s —
+    /// the peek-and-reprepend glue <see cref="GenerateVideoStreaming"/> needs to learn width/height before
+    /// handing the stream to the encoder.</summary>
+    private static async IAsyncEnumerable<byte[]> RgbFramesFrom(VideoFrame first, IAsyncEnumerator<VideoFrame> remaining)
+    {
+        try
+        {
+            yield return first.Rgb;
+            while (await remaining.MoveNextAsync())
+            {
+                yield return remaining.Current.Rgb;
+            }
+        }
+        finally
+        {
+            await remaining.DisposeAsync();
+        }
     }
 
     /// <summary>Adapts the Engine's planar <see cref="AudioBuffer"/> onto the encoder's stereo mux track.</summary>
