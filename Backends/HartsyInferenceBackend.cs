@@ -141,6 +141,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         "controlnet",     // per-family; gated by ImageFeatures.ControlNet
         "ipadapter",      // per-family; gated by ImageFeatures.IpAdapter
         "variation_seed", // per-family; gated by ImageFeatures.VariationSeed
+        "seamless",       // SeamlessTileable (shared core param, own flag); per-family, gated by ImageFeatures.SeamlessTiling
         "video",          // Wan (T2V/I2V + VACE / Animate / S2V) + LTX-Video + LTX-2 + Lance Video + MiniMax-H3
     ];
 
@@ -819,6 +820,11 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             CfgScale = input.TryGet(T2IParamTypes.CFGScale, out double cfg) ? (float)cfg : null,
             CfgRescale = input.TryGet(SwarmUIHartsyInference.CfgRescaleParam, out double cfgRescale) ? (float)cfgRescale : null,
             Tcfg = input.TryGet(SwarmUIHartsyInference.TcfgParam, out bool tcfg) ? tcfg : null,
+            // Reads SwarmUI core's shared SeamlessTileable param directly, unlike the Tier 2 CFG cluster above —
+            // it already carries its own "seamless" FeatureFlag (not "comfyui"), so there's no AND-semantics
+            // problem to work around by duplicating it (see SwarmUIHartsyInference.TcfgParam's doc comment for
+            // when duplication IS required).
+            SeamlessTiling = input.TryGet(T2IParamTypes.SeamlessTileable, out string seamless) ? seamless : null,
             Seed = input.Get(T2IParamTypes.Seed, -1L),
             ClipSkip = NullableInt(input, T2IParamTypes.ClipStopAtLayer),
             Sampler = input.Get(SwarmUIHartsyInference.SamplerParam, null),
