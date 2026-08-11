@@ -158,6 +158,7 @@ public static class ModelSupport
         {
             null => VideoFeatures.None,
             HartsyInference.Engine.Recipes.Video.WanVideoRecipe wan => wan.SupportsFor(checkpointPath),
+            HartsyInference.Engine.Recipes.Video.LtxVideoRecipe ltx => ltx.SupportsFor(checkpointPath),
             _ when family.Id == "minimax-h3" => MiniMaxH3TaskFeatures(recipe.Supports, checkpointPath),
             _ => recipe.Supports,
         };
