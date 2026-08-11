@@ -65,6 +65,12 @@ public class SwarmUIHartsyInference : Extension
     // directly if core ever adds a mechanism for one param to satisfy either backend's flag.
     public static T2IRegisteredParam<double> CfgRescaleParam;
 
+    // TCFG: same deliberate-duplication rationale as CfgRescaleParam directly above (no Comfy-side TCFG param
+    // exists to read from anyway, but the reasoning for why this is its own hartsyinference-flagged param
+    // rather than trying to share one is identical). Delete this duplicate in favor of reading a shared param
+    // if core ever adds a mechanism for one param to satisfy either backend's flag AND Comfy ships TCFG.
+    public static T2IRegisteredParam<bool> TcfgParam;
+
     /// <summary>How the Init Image is consumed: denoise (classic img2img) vs reference (in-context edit).</summary>
     public static T2IRegisteredParam<string> InitImageModeParam;
 
@@ -255,6 +261,15 @@ public class SwarmUIHartsyInference : Extension
             Group: HartsyInferenceParamGroup,
             FeatureFlag: "hartsyinference",
             ViewType: ParamViewType.SLIDER,
+            IsAdvanced: true));
+
+        TcfgParam = T2IParamTypes.Register<bool>(new(
+            "HartsyInference TCFG",
+            "Tangential Damping CFG (https://huggingface.co/papers/2503.18137): filters the unconditional prediction down to only the guidance direction it shares with the conditional prediction before combining, instead of using it as-is. Tends toward sharper, higher-contrast output at the same CFG Scale — a real steer of the result, not a subtle correction, so try it at your normal CFG Scale rather than assuming it needs a higher one. Off (default). Composes with CFG Rescale (TCFG combines first, rescale applies after). Only SDXL honors this today.",
+            "false",
+            Toggleable: true,
+            Group: HartsyInferenceParamGroup,
+            FeatureFlag: "hartsyinference",
             IsAdvanced: true));
 
         InitImageModeParam = T2IParamTypes.Register<string>(new(
