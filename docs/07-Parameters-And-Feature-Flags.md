@@ -152,13 +152,21 @@ is where each one is actually checked, if it's checked at all beyond just being 
 | `controlnet` | ControlNet inputs | per-family, `ImageFeatures.ControlNet` |
 | `ipadapter` | IP-Adapter inputs, plus `FaceIdV2WeightParam` | per-family, `ImageFeatures.IpAdapter` |
 | `variation_seed` | Second seed for blended noise | per-family, `ImageFeatures.VariationSeed` |
-| `video` | Video models: Wan (T2V/I2V/VACE/Animate/S2V), LTX-Video, LTX-2, Lance Video, MiniMax-H3 | per-family, `ValidateVideo` against `VideoFeatures` (a separate enum from `ImageFeatures`) |
+| `video` | Video models: Wan (T2V/I2V/VACE/Animate/S2V), LTX-Video, LTX-2 (2.3 and 2.5), Lance Video, MiniMax-H3 | per-family, `ValidateVideo` against `VideoFeatures` (a separate enum from `ImageFeatures`) |
 
 A family that doesn't support a per-family flag reports `ImageFeatures.None` for it
 (`ModelSupport.SupportedFeatures`), and `IsValidForThisBackend`'s `ValidateImageFeatures`
-step refuses the request early rather than letting it fail mid-generation. `freeu`,
-`seamless`, and `yolov8` are not advertised — the engine has no equivalent for the first
-two, and YOLO post-processing belongs to a separate extension.
+step refuses the request early rather than letting it fail mid-generation. `freeu` and
+`yolov8` are not advertised — the engine has no equivalent for the first, and YOLO
+post-processing belongs to a separate extension. (`seamless` *is* advertised as of the
+central `Conv2D` interception work; this list previously said otherwise.)
+
+`ValidateVideo` also refuses an incomplete **LTX-2.5 bundle**. 2.5 ships split across four
+files (DiT, Gemma-4 text encoder, conv video VAE, audio VAE) and the engine's recipe takes
+one path, so the extension hands it the containing *directory*. If a companion is missing
+the engine would silently fall back to LTX-**2.3**'s Gemma 3 and 2.3 VAEs and generate with
+them — a plausible video from the wrong model — so the request is refused instead, naming
+what to stage. See [13 — Video Models Plan](./13-Video-Models-Plan.md).
 
 With the exception of the broad `comfyui` routing flag (kept honest by the validator
 guard), a capability flag is **only** advertised when we can actually service requests

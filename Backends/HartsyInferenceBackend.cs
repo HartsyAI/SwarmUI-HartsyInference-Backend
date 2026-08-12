@@ -671,7 +671,12 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         bool wantsTrim = input.Get(T2IParamTypes.TrimVideoStartFrames, 0) > 0 || input.Get(T2IParamTypes.TrimVideoEndFrames, 0) > 0;
         bool wantsRestore = input.TryGet(SwarmUIHartsyInference.VideoRestoreModelParam, out string restoreModelCheck) && !string.IsNullOrWhiteSpace(restoreModelCheck);
         bool wantsAudio = input.Get(T2IParamTypes.VideoAudioInput) is not null;
-        if (!wantsBoomerang && !wantsTrim && !wantsRestore && !wantsAudio)
+        // ...and no GENERATED soundtrack either. The streaming path pipes frames straight to ffmpeg and has no
+        // AudioTrack to give it, so a family that samples audio jointly with video would have its soundtrack
+        // silently dropped. Core's own HasJointAVLatents names exactly that set (LTX-2.x and MiniMax-H3), so this
+        // stays right as families are added rather than needing a list here.
+        bool generatesAudio = input.Get(T2IParamTypes.Model)?.ModelClass?.CompatClass?.HasJointAVLatents == true;
+        if (!wantsBoomerang && !wantsTrim && !wantsRestore && !wantsAudio && !generatesAudio)
         {
             try
             {
@@ -1269,7 +1274,11 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             VideoSwapPercent = input.TryGet(T2IParamTypes.VideoSwapPercent, out double swapPercent) && swapPercent != 0.5
                 ? swapPercent : null,
             VideoResolution = input.Get(T2IParamTypes.VideoResolution, null),
-            Fps = input.Get(T2IParamTypes.VideoFPS, 25),
+            // 25 is Swarm's cross-family fallback and is wrong for LTX-2: the recipe's own default, core's param
+            // default and Swarm's docs ("LTXV prefers 24") all say 24. Sent as a value rather than null because the
+            // LTX-2 pipeline doesn't report the fps it used on VideoGenerationResult — a null would generate at the
+            // recipe's 24 and then mux at the encoder's 25 fallback, i.e. play back 4% fast.
+            Fps = input.Get(T2IParamTypes.VideoFPS, IsLtxVideo2(input) ? 24 : 25),
             VideoFormat = input.Get(T2IParamTypes.VideoFormat, null),
             // Boomerang is applied to the decoded frames on the way out (see GenerateVideo) so the Engine
             // doesn't waste a second pass; the flag is still carried for pipelines that want it.
@@ -1336,12 +1345,22 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 + "rather than Swarm's cross-family 25 (which would snap to 39 on H3's 17k+5 grid).");
             return null;
         }
+        if (IsLtxVideo2(input))
+        {
+            Logs.Verbose("[HartsyInference] No frame count set — leaving it to the LTX-2 recipe's own default rather "
+                + "than Swarm's cross-family 25, which is not on LTX-2's 8n+1 grid.");
+            return null;
+        }
         return 25;
     }
 
     /// <summary>Whether the selected model is MiniMax-H3, by core's own compat class rather than a name guess.</summary>
     private static bool IsMiniMaxH3(T2IParamInput input) =>
         input.Get(T2IParamTypes.Model)?.ModelClass?.CompatClass?.ID == T2IModelClassSorter.CompatMiniMaxH3.ID;
+
+    /// <summary>Whether the selected model is any LTX-2.x (2, 2.3 or 2.5 — they share core's compat class).</summary>
+    private static bool IsLtxVideo2(T2IParamInput input) =>
+        input.Get(T2IParamTypes.Model)?.ModelClass?.CompatClass?.ID == T2IModelClassSorter.CompatLtxv2.ID;
 
     /// <summary>Reference media caps the model was trained under, mirroring what the reference node accepts.</summary>
     private const int MaxRefImages = 9, MaxRefAudios = 3, MaxRefVideos = 3;
@@ -1773,6 +1792,16 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         // silently generate text-to-video, which looks like a working generation and is not. Checkpoint-aware:
         // Wan's Animate/VACE/S2V variants share the family compat classes (header-sniffed engine-side).
         VideoFeatures videoSupported = ModelSupport.SupportedVideoFeatures(compat, input.Get(T2IParamTypes.Model)?.RawFilePath);
+        // LTX-2.5 ships split across four files and must be handed to the Engine as a folder. Caught here rather than
+        // at load: an incomplete bundle makes the recipe fall back to LTX-2.3's Gemma 3 and 2.3 VAEs and generate a
+        // video with them, so "wrong model, plausible output" is the failure this prevents.
+        if (input.Get(T2IParamTypes.Model) is T2IModel videoModel
+            && videoModel.ModelClass?.ID == ModelSupport.Ltx25ModelClassId
+            && !ModelSupport.TryResolveLtx25Bundle(videoModel, out _, out string bundleProblem))
+        {
+            input.RefusalReasons.Add($"HartsyInference: LTX-2.5 bundle is incomplete — {bundleProblem}");
+            return false;
+        }
         // Reference media rides the prompt box (core's internal PromptImages/Audios/Videos carriers), so these read
         // what the user attached there rather than a param control of ours.
         bool hasRefImages = input.TryGet(T2IParamTypes.PromptImages, out List<Image> refImgs) && refImgs is { Count: > 0 };

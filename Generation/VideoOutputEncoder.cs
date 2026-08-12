@@ -171,8 +171,9 @@ public static class VideoOutputEncoder
         }
     }
 
-    /// <summary>True if the container for this <c>VideoFormat</c> value can carry an audio stream
-    /// (mp4/mov/webm). gif/webp can't, so LTX-2 falls back to a separate mp3 for those.</summary>
+    /// <summary>True if the container for this <c>VideoFormat</c> value can carry an audio stream (mp4/mov/webm).
+    /// gif/webp can't, so a generated soundtrack is dropped with a warning for those formats — there is no separate
+    /// audio-file fallback. Pick mp4/mov/webm to keep an LTX-2 or MiniMax-H3 soundtrack.</summary>
     public static bool FormatSupportsAudio(string format) => AudioArgsForContainer(FormatArgs(format).ext) is not null;
 
     /// <summary>Per-container audio codec args, or null if the container can't carry audio (gif/webp).

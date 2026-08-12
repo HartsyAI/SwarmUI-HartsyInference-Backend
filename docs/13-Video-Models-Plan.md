@@ -194,3 +194,57 @@ Entries reuse Comfy's canonical names/URLs/hashes so files are shared with Comfy
       removed outright (never built on either side) — Video2Video/VideoExtend stay out
       of scope. Audio-input params (`VideoAudioInput`, `VideoAudioReference`, reference
       audio) have since shipped, mainly for MiniMax-H3.
+
+## LTX-2.5 (2026-08-12)
+
+SwarmUI core added LTX-2.5 in `82dbd7f7` / `f9367de5`: a new model class
+`lightricks-ltx-video-2-5` (header-detected on `keyframes_abs_pos_embedding` +
+`audio_patchify_proj.weight` + `audio_proj_out.weight`) sharing the existing
+`lightricks-ltx-video-2` compat class. Because `ModelSupport.Resolve` keys on the **compat
+class**, 2.5 already routed to the `ltx-video-2` engine family with no mapping change; the
+engine's `LtxVideo2VariantDetector` then picks the V25 config from the checkpoint header.
+
+What did need building:
+
+- **Split-bundle directory resolution** (`ModelSupport.TryResolveLtx25Bundle` /
+  `BuildSpec`). 2.5 ships as four files — DiT, Gemma-4 text encoder (projection fused in),
+  conv video VAE, audio VAE — and `LtxVideo2Recipe` takes exactly one path, recursively
+  globbing a directory and re-bucketing the merged keys. So for 2.5 the extension passes
+  the **containing directory** as `ModelSpec.LocalPath`, not the checkpoint file.
+- **Refusing an incomplete bundle.** This is the reason the feature exists. Handed a bare
+  2.5 DiT, the recipe finds no video-VAE and no text-encoder keys and falls through to its
+  LTX-**2.3** side-model resolver — silently downloading Gemma 3 and the 2.3 VAEs and
+  generating with them. Wrong model, plausible output, no error. `ValidateVideo` now
+  header-probes the directory and refuses, naming what to stage.
+- Probing is by **header keys, not filenames** (repacks rename freely — the same reason the
+  engine refuses to infer the distilled schedule from a name). Discriminators:
+  `model.layers.0.layer_scalar` for the Gemma-4 tower, `decoder.conv_in.conv.bias` for the
+  conv video VAE (matched exactly, or under the engine's `vae.` prefix — **not** by suffix,
+  because the audio VAE carries the same tail under `audio_vae.`), an `audio_vae.` prefix or
+  `vocoder.mel_stft.mel_basis` for the audio VAE, and the engine's own
+  `LtxVideo2CheckpointConverter.IsDiffusionVideoVae` for the refusal case.
+- **Frames/FPS.** LTX-2.x now defers its frame count to the recipe rather than taking
+  Swarm's cross-family 25 (which is not on LTX-2's 8n+1 grid), and defaults FPS to 24 — the
+  recipe's default, core's own param default, and what Swarm's docs recommend. FPS is sent
+  as a value rather than null on purpose: the LTX-2 pipeline doesn't report the fps it used
+  on `VideoGenerationResult`, so a null would generate at 24 and mux at the encoder's 25.
+- **Streaming stays off for joint-AV families.** The streaming path has no `AudioTrack` to
+  give ffmpeg, so it is now gated on core's `HasJointAVLatents` (LTX-2.x and MiniMax-H3)
+  rather than only on *input* audio. Without that gate a generated soundtrack would be
+  dropped silently the moment LTX-2 gains a streaming path.
+
+Deliberate divergences, both mirroring what SwarmUI core actually does:
+
+- **No distilled selector.** The engine can run 2.5's baked 8-step sigma schedule, but only
+  via the `ltx-2.5-distilled` catalog id, and dev/distilled checkpoints are byte-identical.
+  Core auto-detects no distilled variant anywhere (SD3.5 Turbo and HunyuanVideo 1.5
+  distilled are `Remaps`-collapsed) and its Comfy backend applies no fixed-sigma path for
+  LTX at all — it lets the user set Steps/CFG. We do the same. The distilled contract stays
+  reachable from the CLI/API.
+- **Conv VAE only.** The engine's `NADiffusionDecoder` is ported and parity-checked but not
+  on the decode path, and it refuses a diffusion-VAE bundle. Note this is where SwarmUI and
+  upstream ComfyUI disagree: Swarm auto-downloads the conv VAE, while ComfyUI's own 2.5
+  template uses the diffusion decoder.
+
+Still engine-side and still refused for all of LTX-2.x: I2V, end-frame, LoRA, reference
+media, and the duration head.
