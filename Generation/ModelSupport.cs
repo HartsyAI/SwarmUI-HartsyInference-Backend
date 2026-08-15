@@ -316,21 +316,23 @@ public static class ModelSupport
             }
         }
         // Asked of the Engine's own whole-file rule rather than re-derived: both decoders share decoder.conv_in,
-        // so this cannot be answered per-key.
-        if (LtxVideo2CheckpointConverter.IsDiffusionVideoVae(allKeys))
+        // so this cannot be answered per-key. The Engine decodes with EITHER decoder now; only the ambiguity is fatal.
+        bool diffusionVae = LtxVideo2CheckpointConverter.IsDiffusionVideoVae(allKeys);
+        if (convVae && diffusionVae)
         {
-            return $"'{directory}' contains the LTX-2.5 diffusion video VAE, which the engine's LTX-2 pipeline does "
-                + "not decode with yet. Stage 'ltx-2.5-video-vae-conv-bf16.safetensors' instead and remove "
-                + "'ltx-2.5-video-vae-bf16.safetensors' from the folder.";
+            return $"'{directory}' stages both LTX-2.5 video VAEs. The diffusion/conv question is one boolean over the "
+                + "merged key set, so staging both corrupts the selection for either — keep exactly one of "
+                + "'ltx-2.5-video-vae-conv-bf16.safetensors' or 'ltx-2.5-video-vae-bf16.safetensors'.";
         }
         List<string> missing = [];
         if (!gemma4)
         {
             missing.Add("the Gemma-4 text encoder (gemma4-12b-with-proj-ltx-2.5-*.safetensors)");
         }
-        if (!convVae)
+        if (!convVae && !diffusionVae)
         {
-            missing.Add("the conv video VAE (ltx-2.5-video-vae-conv-bf16.safetensors)");
+            missing.Add("a video VAE (ltx-2.5-video-vae-conv-bf16.safetensors, or "
+                + "ltx-2.5-video-vae-bf16.safetensors with HARTSY_LTX2_DIFFUSION_VAE=1)");
         }
         if (!audioVae)
         {
