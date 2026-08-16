@@ -542,7 +542,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
 
             CurrentModelName = model.Name;
             CancellationToken cancel = _cancelCts.Token;
-            ModelSpec spec = ModelSupport.BuildSpec(model, family);
+            ModelSpec spec = ModelSupport.BuildSpec(model, family, input);
             IProgress<StepPreview> progress = BuildProgressBridge(batchId, takeOutput);
 
             async Task<Image[]> Dispatch() => family.Kind switch

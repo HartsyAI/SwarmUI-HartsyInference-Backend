@@ -1,5 +1,8 @@
 using System.IO;
 using System.Collections.Concurrent;
+using System.Security.Cryptography;
+using System.Text;
+using SwarmUI.Core;
 using SwarmUI.Text2Image;
 using SwarmUI.Utils;
 using HartsyInference.Engine;
@@ -245,12 +248,295 @@ public static class ModelSupport
     /// staged file appearing mid-session is picked up without re-reading a 21 GB header on every request.</summary>
     private static readonly ConcurrentDictionary<string, (string Signature, string Problem)> _ltx25Scans = new(StringComparer.Ordinal);
 
-    /// <summary>Resolves the directory an LTX-2.5 bundle must be loaded from, or explains why it can't be.</summary>
-    /// <remarks>LTX-2.5 ships split across four files and the Engine's <c>LtxVideo2Recipe</c> takes exactly ONE path,
-    /// recursively globbing a directory and re-bucketing the merged keys. Handing it the bare DiT instead is not a
-    /// soft failure: the recipe finds no video-VAE and no text-encoder keys and falls through to its LTX-<b>2.3</b>
-    /// side-model resolver, silently downloading Gemma 3 and the 2.3 VAEs and generating with them. That produces a
-    /// video rather than an error, so this refuses up front instead.</remarks>
+    /// <summary>Header-scans <paramref name="directory"/>, memoised on its file-set signature.</summary>
+    private static string ScanCached(string directory)
+    {
+        string[] files = Directory.GetFiles(directory, "*.safetensors", SearchOption.AllDirectories);
+        // Cheap signature first — computing it costs a stat per file, where a rescan costs a header parse per file.
+        string signature = $"{files.Length}|{files.Select(f => new FileInfo(f).LastWriteTimeUtc.Ticks).DefaultIfEmpty(0L).Max()}";
+        if (_ltx25Scans.TryGetValue(directory, out (string Signature, string Problem) cached) && cached.Signature == signature)
+        {
+            return cached.Problem;
+        }
+        string problem = ScanLtx25Bundle(directory, files);
+        _ltx25Scans[directory] = (signature, problem);
+        return problem;
+    }
+
+    // ────────────────────────────────────────────────────────────────────────────────────────────────────────────
+    // LTX-2.5 side models, resolved the way Swarm resolves them for every other backend.
+    //
+    // The model the user picks in the UI is the DiT alone. The video VAE and audio VAE come from the VAE folder and
+    // the Gemma-4 tower from the text-encoder folder, each resolved through core's own registry and downloaded into
+    // the folder core assigns when absent — exactly what Builtin_ComfyUIBackend does. The Engine's LtxVideo2Recipe
+    // takes exactly ONE path though (it globs a directory and re-buckets the merged keys, and honours no
+    // RecipeContext.Components override yet), so the resolved parts are linked into a staging directory and THAT is
+    // what the Engine is handed. The staging directory lives under Data/ rather than a model root, so Swarm never
+    // indexes the links as models of their own.
+    // ────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>Core's known-model ids for LTX-2.5's two VAEs (registered in <c>CommonModels.RegisterCoreSet</c>), so
+    /// the URL, hash and destination folder live in one place — core's registry — for both backends.</summary>
+    private const string Ltx25VideoVaeKnownId = "ltx2-5-video-vae";
+
+    /// <summary>Companion of <see cref="Ltx25VideoVaeKnownId"/> for the audio VAE. No user param selects an audio VAE,
+    /// so this is always the registry's answer.</summary>
+    private const string Ltx25AudioVaeKnownId = "ltx2-5-audio-vae";
+
+    /// <summary>The Gemma-4 tower. Deliberately NOT read from <c>CommonModels</c>: core doesn't register it there —
+    /// its ComfyUI backend fetches it inline via <c>RequireClipModel</c> — so the URL and hash are mirrored from that
+    /// call (<c>WorkflowGeneratorModelSupport.GetLTX25Gemma4Model</c>) rather than invented here.</summary>
+    private const string Ltx25GemmaFileName = "gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors";
+
+    private const string Ltx25GemmaUrl = "https://huggingface.co/mcmonkey/swarm-models/resolve/main/gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors";
+
+    private const string Ltx25GemmaHash = "09a89e084de1a149c3de60cfe9dfd3e5161967eb09eea39e806fcdeffdd568de";
+
+    /// <summary>Serialises staging so two concurrent generations can't half-build the same link set.</summary>
+    private static readonly object _ltx25StageLock = new();
+
+    /// <summary>The four files an LTX-2.5 run needs, as absolute paths.</summary>
+    private sealed record Ltx25Parts(string Dit, string VideoVae, string AudioVae, string Gemma);
+
+    /// <summary>Matches any LTX-2.5 Gemma-4 build already in the text-encoder folder, whatever it was repacked as —
+    /// the Engine's own <c>int8_lean_convrot</c> build and core's <c>comfy-int8-convrot</c> build are both valid.</summary>
+    private static bool IsLtx25GemmaName(string name) =>
+        name.Contains("gemma4", StringComparison.OrdinalIgnoreCase)
+        && name.Contains("ltx-2.5", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>A user's component pick, or null when there isn't one. "None" is a real selectable entry that arrives
+    /// as a model of that name and means "use the default" — core's <c>DoVaeLoader</c> nulls it the same way, and
+    /// without this it would read as a pick and push a complete bundle onto the staging path for nothing.</summary>
+    private static string PickedPath(T2IModel picked)
+    {
+        if (picked?.RawFilePath is null || picked.Name == "None" || !File.Exists(picked.RawFilePath))
+        {
+            return null;
+        }
+        return picked.RawFilePath;
+    }
+
+    /// <summary>Whether the Engine will decode with the diffusion video VAE. Read here as well as in the Engine so the
+    /// staged VAE is the one the recipe will actually ask for — staging both is what corrupts the selection.</summary>
+    private static bool WantDiffusionVae()
+    {
+        string raw = Environment.GetEnvironmentVariable("HARTSY_LTX2_DIFFUSION_VAE");
+        return raw is not null && (raw == "1" || raw.Equals("true", StringComparison.OrdinalIgnoreCase)
+            || raw.Equals("yes", StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>Matching models in <paramref name="setName"/>, ordered by file name. Ordered because the model set is
+    /// a concurrent dictionary: taking its first match would pick a different file run to run whenever a user has
+    /// more than one valid build of the same component staged.</summary>
+    private static List<T2IModel> FindInSet(string setName, Func<string, bool> matchesFileName)
+    {
+        if (!Program.T2IModelSets.TryGetValue(setName, out T2IModelHandler handler))
+        {
+            return [];
+        }
+        return [.. handler.Models.Values
+            .Where(m => m?.RawFilePath is not null && matchesFileName(Path.GetFileName(m.RawFilePath)) && File.Exists(m.RawFilePath))
+            .OrderBy(m => Path.GetFileName(m.RawFilePath), StringComparer.Ordinal)];
+    }
+
+    /// <summary>Resolves a core known model to its on-disk path, downloading it into the folder core assigns when it
+    /// isn't there. <paramref name="download"/> is false at validation time, where the question is only whether the
+    /// registration exists at all — the fetch itself belongs at load, same as the ComfyUI backend.</summary>
+    private static string EnsureKnownModel(string knownId, string setName, bool download, out string problem)
+    {
+        problem = null;
+        if (!CommonModels.Known.TryGetValue(knownId, out CommonModels.ModelInfo known))
+        {
+            problem = $"SwarmUI has no known-model registration '{knownId}', so it can't be downloaded automatically. "
+                + "Update SwarmUI, or download the file into your VAE folder and pass it as the VAE parameter.";
+            return null;
+        }
+        if (!Program.T2IModelSets.TryGetValue(setName, out T2IModelHandler handler))
+        {
+            problem = $"SwarmUI has no '{setName}' model folder configured.";
+            return null;
+        }
+        string path = $"{handler.DownloadFolderPath}/{known.FileName}";
+        if (File.Exists(path))
+        {
+            return path;
+        }
+        // May be under a different model root, or listed under a name without the extension.
+        T2IModel listed = handler.GetModel(known.FileName);
+        if (listed?.RawFilePath is not null && File.Exists(listed.RawFilePath))
+        {
+            return listed.RawFilePath;
+        }
+        if (!download)
+        {
+            // Registered, so it IS resolvable — validation is satisfied without paying for the download.
+            return null;
+        }
+        Logs.Info($"[HartsyInference] LTX-2.5: '{known.DisplayName}' is missing — downloading it to '{path}' through "
+            + "SwarmUI's known-model registry.");
+        known.DownloadNow().Wait();
+        Program.RefreshAllModelSets();
+        if (!File.Exists(path))
+        {
+            problem = $"the download of '{known.DisplayName}' did not produce '{path}'.";
+            return null;
+        }
+        return path;
+    }
+
+    /// <summary>Resolves the Gemma-4 tower: the user's pick, else any LTX-2.5 Gemma-4 already in the text-encoder
+    /// folder, else core's downloadable build. An already-present build wins over a download deliberately — an
+    /// existing install usually carries the Engine's own repack, and swapping it would change the text encoder
+    /// silently.</summary>
+    private static string ResolveLtx25Gemma(T2IParamInput input, bool download, out string problem)
+    {
+        problem = null;
+        if (PickedPath(input?.Get(T2IParamTypes.GemmaModel)) is string picked)
+        {
+            return picked;
+        }
+        List<T2IModel> present = FindInSet("Clip", IsLtx25GemmaName);
+        if (present.Count > 0)
+        {
+            // The Engine's own repack is preferred over core's when both are staged — it is what an existing install
+            // is already generating with, so picking the other one would change the text encoder without saying so.
+            T2IModel chosen = present.FirstOrDefault(m =>
+                Path.GetFileName(m.RawFilePath).Contains("lean", StringComparison.OrdinalIgnoreCase)) ?? present[0];
+            return chosen.RawFilePath;
+        }
+        if (!Program.T2IModelSets.TryGetValue("Clip", out T2IModelHandler handler))
+        {
+            problem = "SwarmUI has no text-encoder ('Clip') model folder configured.";
+            return null;
+        }
+        string path = $"{handler.DownloadFolderPath}/{Ltx25GemmaFileName}";
+        if (File.Exists(path))
+        {
+            return path;
+        }
+        if (!download)
+        {
+            return null;
+        }
+        Logs.Info($"[HartsyInference] LTX-2.5: the Gemma-4 text encoder is missing — downloading it to '{path}'.");
+        Utilities.DownloadFile(Ltx25GemmaUrl, path, null, verifyHash: Ltx25GemmaHash).Wait();
+        Program.RefreshAllModelSets();
+        if (!File.Exists(path))
+        {
+            problem = $"the Gemma-4 text-encoder download did not produce '{path}'.";
+            return null;
+        }
+        return path;
+    }
+
+    /// <summary>Resolves the video VAE: the user's <c>vae</c> parameter wins outright, else the registry's build for
+    /// whichever decoder the Engine is set to use.</summary>
+    private static string ResolveLtx25VideoVae(T2IParamInput input, bool download, out string problem)
+    {
+        problem = null;
+        if (PickedPath(input?.Get(T2IParamTypes.VAE)) is string picked)
+        {
+            return picked;
+        }
+        if (WantDiffusionVae())
+        {
+            // Core registers only the conv build, so the diffusion one is resolved by name from the VAE folder.
+            List<T2IModel> diffusion = FindInSet("VAE", n => n.Contains("ltx-2.5-video-vae", StringComparison.OrdinalIgnoreCase)
+                && !n.Contains("conv", StringComparison.OrdinalIgnoreCase));
+            if (diffusion.Count > 0)
+            {
+                return diffusion[0].RawFilePath;
+            }
+            problem = "HARTSY_LTX2_DIFFUSION_VAE is set but 'ltx-2.5-video-vae-bf16.safetensors' isn't in your VAE "
+                + "folder. Download it there, or unset the variable to use the convolutional VAE (which SwarmUI can "
+                + "fetch automatically).";
+            return null;
+        }
+        return EnsureKnownModel(Ltx25VideoVaeKnownId, "VAE", download, out problem);
+    }
+
+    /// <summary>Resolves all four parts. With <paramref name="download"/> false this is the validation-time question
+    /// ("is each part present or fetchable?"); with it true, the missing ones are actually fetched.</summary>
+    private static bool TryPlanLtx25Parts(T2IModel model, T2IParamInput input, bool download, out Ltx25Parts parts, out string problem)
+    {
+        parts = null;
+        string videoVae = ResolveLtx25VideoVae(input, download, out problem);
+        if (problem is not null)
+        {
+            return false;
+        }
+        string audioVae = EnsureKnownModel(Ltx25AudioVaeKnownId, "VAE", download, out problem);
+        if (problem is not null)
+        {
+            return false;
+        }
+        string gemma = ResolveLtx25Gemma(input, download, out problem);
+        if (problem is not null)
+        {
+            return false;
+        }
+        if (!download)
+        {
+            // Nulls here mean "registered but not downloaded yet", which is fine — nothing left to check.
+            return true;
+        }
+        List<string> missing = [];
+        if (videoVae is null)
+        {
+            missing.Add("the video VAE");
+        }
+        if (audioVae is null)
+        {
+            missing.Add("the audio VAE");
+        }
+        if (gemma is null)
+        {
+            missing.Add("the Gemma-4 text encoder");
+        }
+        if (missing.Count > 0)
+        {
+            problem = $"SwarmUI could not resolve {string.Join(", ", missing)} for LTX-2.5.";
+            return false;
+        }
+        parts = new Ltx25Parts(model.RawFilePath, videoVae, audioVae, gemma);
+        return true;
+    }
+
+    /// <summary>Links the resolved parts into a private directory under <c>Data/</c> and returns it. Named by a hash
+    /// of the resolved paths so switching the <c>vae</c> parameter yields a different directory — which is also what
+    /// keeps the Engine's path-keyed pipeline cache from serving a pipeline built with the previous pick.</summary>
+    private static string StageLtx25(Ltx25Parts parts)
+    {
+        string joined = string.Join('|', parts.Dit, parts.VideoVae, parts.AudioVae, parts.Gemma);
+        string key = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(joined)))[..16].ToLowerInvariant();
+        string dir = Path.Combine(Program.DataDir, "HartsyInference", "ltx2.5", key);
+        lock (_ltx25StageLock)
+        {
+            Directory.CreateDirectory(dir);
+            foreach (string target in new[] { parts.Dit, parts.VideoVae, parts.AudioVae, parts.Gemma })
+            {
+                string full = Path.GetFullPath(target);
+                string link = Path.Combine(dir, Path.GetFileName(full));
+                FileInfo info = new FileInfo(link);
+                // LinkTarget catches a dangling link, which Exists reports as absent but CreateSymbolicLink still
+                // refuses to overwrite.
+                if (info.Exists || info.LinkTarget is not null)
+                {
+                    info.Delete();
+                }
+                File.CreateSymbolicLink(link, full);
+            }
+        }
+        return dir;
+    }
+
+    /// <summary>Validation-time check: can this LTX-2.5 model be run? True when either a complete hand-assembled
+    /// bundle sits beside the DiT, or every side model resolves through SwarmUI. Nothing is downloaded here.</summary>
+    /// <remarks>The Engine's <c>LtxVideo2Recipe</c> takes exactly ONE path and re-buckets the merged keys of
+    /// everything under it. Handing it the bare DiT is not a soft failure: the recipe finds no video-VAE and no
+    /// text-encoder keys and falls through to its LTX-<b>2.3</b> side-model resolver, silently fetching Gemma 3 and
+    /// the 2.3 VAEs and generating with them. That produces a video rather than an error, which is why both this and
+    /// <see cref="ResolveLtx25LoadPath"/> refuse up front instead.</remarks>
     public static bool TryResolveLtx25Bundle(T2IModel model, out string directory, out string problem)
     {
         directory = null;
@@ -261,23 +547,68 @@ public static class ModelSupport
             problem = "the model has no resolved file path.";
             return false;
         }
-        directory = Path.GetDirectoryName(checkpoint);
-        if (string.IsNullOrEmpty(directory) || !Directory.Exists(directory))
+        string dir = Path.GetDirectoryName(checkpoint);
+        if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir))
         {
-            problem = $"'{checkpoint}' has no containing directory to load the bundle from.";
+            problem = $"'{checkpoint}' has no containing directory.";
             return false;
         }
-        string[] files = Directory.GetFiles(directory, "*.safetensors", SearchOption.AllDirectories);
-        // Cheap signature first — computing it costs a stat per file, where a rescan costs a header parse per file.
-        string signature = $"{files.Length}|{files.Select(f => new FileInfo(f).LastWriteTimeUtc.Ticks).DefaultIfEmpty(0L).Max()}";
-        if (_ltx25Scans.TryGetValue(directory, out (string Signature, string Problem) cached) && cached.Signature == signature)
+        if (LooksLikeBundleDir(model, dir) && ScanCached(dir) is null)
         {
-            problem = cached.Problem;
-            return problem is null;
+            directory = dir;
+            return true;
         }
-        problem = ScanLtx25Bundle(directory, files);
-        _ltx25Scans[directory] = (signature, problem);
-        return problem is null;
+        return TryPlanLtx25Parts(model, null, download: false, out _, out problem);
+    }
+
+    /// <summary>Whether a hand-assembled bundle could plausibly live beside the DiT — i.e. the DiT is in a SUBFOLDER
+    /// of its model root, not sitting directly in the root itself. A bare checkpoint in a model root (where
+    /// <c>diffusion_models</c> keeps them) is never bundle-scanned: that scan header-probes every neighbouring
+    /// safetensors, which over a model root means opening every checkpoint the user owns.</summary>
+    private static bool LooksLikeBundleDir(T2IModel model, string directory)
+    {
+        string root = model?.OriginatingFolderPath;
+        if (string.IsNullOrEmpty(root) || string.IsNullOrEmpty(directory))
+        {
+            return false;
+        }
+        string normRoot = Path.GetFullPath(root).Replace('\\', '/').TrimEnd('/');
+        string normDir = Path.GetFullPath(directory).Replace('\\', '/').TrimEnd('/');
+        return !string.Equals(normRoot, normDir, StringComparison.Ordinal);
+    }
+
+    /// <summary>The single path the Engine's LTX-2.5 recipe is handed: a pre-existing complete bundle beside the DiT
+    /// if there is one, else a staging directory linking the parts SwarmUI resolved and downloaded.</summary>
+    private static string ResolveLtx25LoadPath(T2IModel model, T2IParamInput input)
+    {
+        string checkpoint = model?.RawFilePath
+            ?? throw new SwarmUserErrorException("HartsyInference: the LTX-2.5 model has no resolved file path.");
+        string dir = Path.GetDirectoryName(checkpoint);
+        bool userPickedVae = PickedPath(input?.Get(T2IParamTypes.VAE)) is not null;
+        // A complete bundle beside the DiT still wins, so installs that already have one keep working unchanged —
+        // except when the user explicitly picked a VAE, which a bundle would silently ignore.
+        if (!userPickedVae && !string.IsNullOrEmpty(dir) && Directory.Exists(dir) && LooksLikeBundleDir(model, dir)
+            && ScanCached(dir) is null)
+        {
+            Logs.Verbose($"[HartsyInference] LTX-2.5: loading the complete bundle already staged at '{dir}'.");
+            return dir;
+        }
+        if (!TryPlanLtx25Parts(model, input, download: true, out Ltx25Parts parts, out string problem))
+        {
+            throw new SwarmUserErrorException($"HartsyInference: LTX-2.5 side models can't be resolved — {problem}");
+        }
+        string staged = StageLtx25(parts);
+        // Re-scanned over what the Engine will actually read. A staging bug fails loudly HERE rather than reaching
+        // the recipe's LTX-2.3 fallback, which would generate a plausible video with the wrong model.
+        if (ScanCached(staged) is string staleProblem)
+        {
+            throw new SwarmUserErrorException("HartsyInference: LTX-2.5 side models resolved but the staged set is "
+                + $"not loadable — {staleProblem}");
+        }
+        Logs.Info($"[HartsyInference] LTX-2.5 resolved through SwarmUI: video VAE '{Path.GetFileName(parts.VideoVae)}', "
+            + $"audio VAE '{Path.GetFileName(parts.AudioVae)}', text encoder '{Path.GetFileName(parts.Gemma)}' "
+            + $"(linked into '{staged}').");
+        return staged;
     }
 
     /// <summary>Header-probes every safetensors file beside the checkpoint and reports the first missing companion.
@@ -349,7 +680,9 @@ public static class ModelSupport
 
     /// <summary>Builds the Engine's load request for a Swarm model: the family id travels as the catalog id (that is
     /// what the Engine keys its recipe registry on), and the checkpoint path as the resolved local path.</summary>
-    public static ModelSpec BuildSpec(SwarmUI.Text2Image.T2IModel model, Family family)
+    /// <param name="input">The request, when there is one, so a user-picked VAE / text encoder is honoured. Optional
+    /// only so callers that merely describe a model (rather than run it) need not supply one.</param>
+    public static ModelSpec BuildSpec(SwarmUI.Text2Image.T2IModel model, Family family, T2IParamInput input = null)
     {
         ArgumentNullException.ThrowIfNull(model);
         ArgumentNullException.ThrowIfNull(family);
@@ -362,15 +695,10 @@ public static class ModelSupport
         string localPath = model.RawFilePath;
         if (IsLtx25(model))
         {
-            // Backstop: ValidateVideo already refused this case with the same message, so reaching here means the
-            // request bypassed validation. Throwing beats loading 2.3 components under a 2.5 name.
-            if (!TryResolveLtx25Bundle(model, out string bundleDir, out string problem))
-            {
-                throw new SwarmUserErrorException($"HartsyInference: LTX-2.5 bundle can't be loaded — {problem}");
-            }
-            localPath = bundleDir;
-            Logs.Verbose($"[HartsyInference] LTX-2.5 split bundle — loading the folder '{bundleDir}' rather than the "
-                + "bare checkpoint, so the Gemma-4 tower and both VAEs are merged in.");
+            // LTX-2.5 ships split, and the Engine takes ONE path. This resolves the side models through SwarmUI and
+            // hands over a directory holding exactly the right set — throwing rather than letting the recipe load
+            // 2.3 components under a 2.5 name.
+            localPath = ResolveLtx25LoadPath(model, input);
         }
         return new ModelSpec
         {
