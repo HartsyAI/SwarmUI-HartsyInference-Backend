@@ -14,7 +14,7 @@ in every backend (CPU/CUDA/Vulkan) and every modality assembly
 `<PackageReference>`:
 
 ```xml
-<PackageReference Include="HartsyInference" Version="2.0.0-alpha.17" />
+<PackageReference Include="HartsyInference" Version="2.0.0-alpha.22" />
 ```
 
 There is no git submodule — the extension's `Vendor/` folder contains only a

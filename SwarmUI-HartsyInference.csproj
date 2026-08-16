@@ -152,7 +152,7 @@
                  skipped with a named warning instead of being handed to backend.Add.
              Restore 404s until the engine's alpha.17 publish lands — by design (alpha.4/.5/.10/.11 precedent):
              merge the engine bump FIRST, then this pin. -->
-        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.17" />
+        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.22" />
     </ItemGroup>
 
     <!-- LOCAL ENGINE: prebuilt DLLs from the HartsyInference Cli bin (its full runtime closure). Referenced

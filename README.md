@@ -74,7 +74,8 @@ ComfyUI baseline recorded yet.
 | Wan 2.2 TI2V-5B | `wan-22-5b` | ✅ Verified in production | 22 s | — | RTX 4090 |
 | Wan 2.1 T2V 1.3B | `wan-2_1-*` | ✅ Verified in production | 17 s | — | RTX 4090 |
 | Wan VACE / Animate / S2V / I2V | `wan-*` | ✅ Verified (control-video, driving-video, speech→video) | — | — | RTX 4090 |
-| LTX-2.3 (with audio) | LTX-2 | ✅ Verified in production (was 451 s) | 57–105 s | — | RTX 4090 |
+| LTX-2.3 (with audio) | LTX-2 | ✅ Verified in production | 57–105 s | — | RTX 4090 |
+| LTX-2.5 (with audio) | LTX-2 | ⚠️ Wired, awaiting first real generation | — | — | RTX 4090 |
 | LTX-Video 0.9 | `lightricks-ltx-video` | ✅ Verified | — | — | RTX 4090 |
 | HunyuanVideo 13B | `hunyuan-video` | ✅ Verified (1.29 s/step) | — | — | RTX 4090 |
 | Kandinsky-5 T2V | `kandinsky-5` | ✅ Verified (0.83 s/step) | — | — | RTX 4090 |

@@ -1,8 +1,12 @@
 using System.IO;
+using System.Collections.Concurrent;
 using SwarmUI.Text2Image;
+using SwarmUI.Utils;
 using HartsyInference.Engine;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Recipes;
+using HartsyInference.ModelAssets.CheckpointConverters;
+using HartsyInference.ModelAssets.SafeTensors;
 
 namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
@@ -158,6 +162,7 @@ public static class ModelSupport
         {
             null => VideoFeatures.None,
             HartsyInference.Engine.Recipes.Video.WanVideoRecipe wan => wan.SupportsFor(checkpointPath),
+            HartsyInference.Engine.Recipes.Video.LtxVideoRecipe ltx => ltx.SupportsFor(checkpointPath),
             _ when family.Id == "minimax-h3" => MiniMaxH3TaskFeatures(recipe.Supports, checkpointPath),
             _ => recipe.Supports,
         };
@@ -220,6 +225,128 @@ public static class ModelSupport
             .Order(StringComparer.Ordinal)
             .ToDictionary(k => k, WhyNotSupported, StringComparer.Ordinal);
 
+    /// <summary>Core's model class id for LTX-2.5. Read directly — and uniquely in this extension — because the
+    /// compat class deliberately cannot answer this: core header-sniffs LTX-2 / 2.3 / 2.5 into three distinct model
+    /// classes that all share <c>lightricks-ltx-video-2</c>, and only 2.5 ships as a split bundle.</summary>
+    public const string Ltx25ModelClassId = "lightricks-ltx-video-2-5";
+
+    /// <summary>Whether the selected model is LTX-2.5, by core's own header detection rather than a name guess.</summary>
+    private static bool IsLtx25(T2IModel model) => model?.ModelClass?.ID == Ltx25ModelClassId;
+
+    /// <summary>The Gemma-4 tower's discriminator. Its per-layer <c>layer_scalar</c> is the key the Engine's own
+    /// converter keys on — NOT a missing <c>v_proj</c>, which the global layers also lack in Gemma 3.</summary>
+    private const string Gemma4SignatureKey = "model.layers.0.layer_scalar";
+
+    /// <summary>The convolutional video decoder's marker. Shared with LTX-2.3's VAE, and absent from the 2.5
+    /// diffusion decoder — which is what makes it usable as the "is the conv VAE here" test.</summary>
+    private const string ConvVideoVaeSignatureKey = "decoder.conv_in.conv.bias";
+
+    /// <summary>Cached bundle scans, keyed by directory. Invalidated on the directory's file-set signature so a
+    /// staged file appearing mid-session is picked up without re-reading a 21 GB header on every request.</summary>
+    private static readonly ConcurrentDictionary<string, (string Signature, string Problem)> _ltx25Scans = new(StringComparer.Ordinal);
+
+    /// <summary>Resolves the directory an LTX-2.5 bundle must be loaded from, or explains why it can't be.</summary>
+    /// <remarks>LTX-2.5 ships split across four files and the Engine's <c>LtxVideo2Recipe</c> takes exactly ONE path,
+    /// recursively globbing a directory and re-bucketing the merged keys. Handing it the bare DiT instead is not a
+    /// soft failure: the recipe finds no video-VAE and no text-encoder keys and falls through to its LTX-<b>2.3</b>
+    /// side-model resolver, silently downloading Gemma 3 and the 2.3 VAEs and generating with them. That produces a
+    /// video rather than an error, so this refuses up front instead.</remarks>
+    public static bool TryResolveLtx25Bundle(T2IModel model, out string directory, out string problem)
+    {
+        directory = null;
+        problem = null;
+        string checkpoint = model?.RawFilePath;
+        if (string.IsNullOrEmpty(checkpoint))
+        {
+            problem = "the model has no resolved file path.";
+            return false;
+        }
+        directory = Path.GetDirectoryName(checkpoint);
+        if (string.IsNullOrEmpty(directory) || !Directory.Exists(directory))
+        {
+            problem = $"'{checkpoint}' has no containing directory to load the bundle from.";
+            return false;
+        }
+        string[] files = Directory.GetFiles(directory, "*.safetensors", SearchOption.AllDirectories);
+        // Cheap signature first — computing it costs a stat per file, where a rescan costs a header parse per file.
+        string signature = $"{files.Length}|{files.Select(f => new FileInfo(f).LastWriteTimeUtc.Ticks).DefaultIfEmpty(0L).Max()}";
+        if (_ltx25Scans.TryGetValue(directory, out (string Signature, string Problem) cached) && cached.Signature == signature)
+        {
+            problem = cached.Problem;
+            return problem is null;
+        }
+        problem = ScanLtx25Bundle(directory, files);
+        _ltx25Scans[directory] = (signature, problem);
+        return problem is null;
+    }
+
+    /// <summary>Header-probes every safetensors file beside the checkpoint and reports the first missing companion.
+    /// Probes headers rather than filenames because repacks rename freely — the same reason the Engine refuses to
+    /// infer the distilled schedule from a filename.</summary>
+    private static string ScanLtx25Bundle(string directory, string[] files)
+    {
+        List<string> allKeys = [];
+        bool gemma4 = false, convVae = false, audioVae = false;
+        foreach (string file in files)
+        {
+            IReadOnlyCollection<string> keys;
+            try
+            {
+                using SafeTensorsLoader loader = new SafeTensorsLoader();
+                loader.Load(file);
+                keys = [.. loader.Descriptors.Keys];
+            }
+            catch (Exception ex)
+            {
+                // A neighbouring file we can't parse isn't fatal — the Engine would skip it too. Say so and move on.
+                Logs.Verbose($"[HartsyInference] LTX-2.5 bundle scan skipped '{Path.GetFileName(file)}': {ex.Message}");
+                continue;
+            }
+            allKeys.AddRange(keys);
+            foreach (string key in keys)
+            {
+                gemma4 |= key == Gemma4SignatureKey;
+                // The conv decoder's marker, shared with 2.3's VAE; the diffusion decoder does NOT carry it.
+                // Matched exactly (bare or under the Engine's "vae." prefix) rather than by suffix: the AUDIO VAE
+                // carries the same tail under "audio_vae.", so a suffix match would call a bundle complete when only
+                // the audio VAE is staged.
+                convVae |= key == ConvVideoVaeSignatureKey || key == $"vae.{ConvVideoVaeSignatureKey}";
+                audioVae |= key.StartsWith("audio_vae.", StringComparison.Ordinal)
+                    || key.Contains("vocoder.mel_stft.mel_basis", StringComparison.Ordinal);
+            }
+        }
+        // Asked of the Engine's own whole-file rule rather than re-derived: both decoders share decoder.conv_in,
+        // so this cannot be answered per-key. The Engine decodes with EITHER decoder now; only the ambiguity is fatal.
+        bool diffusionVae = LtxVideo2CheckpointConverter.IsDiffusionVideoVae(allKeys);
+        if (convVae && diffusionVae)
+        {
+            return $"'{directory}' stages both LTX-2.5 video VAEs. The diffusion/conv question is one boolean over the "
+                + "merged key set, so staging both corrupts the selection for either — keep exactly one of "
+                + "'ltx-2.5-video-vae-conv-bf16.safetensors' or 'ltx-2.5-video-vae-bf16.safetensors'.";
+        }
+        List<string> missing = [];
+        if (!gemma4)
+        {
+            missing.Add("the Gemma-4 text encoder (gemma4-12b-with-proj-ltx-2.5-*.safetensors)");
+        }
+        if (!convVae && !diffusionVae)
+        {
+            missing.Add("a video VAE (ltx-2.5-video-vae-conv-bf16.safetensors, or "
+                + "ltx-2.5-video-vae-bf16.safetensors with HARTSY_LTX2_DIFFUSION_VAE=1)");
+        }
+        if (!audioVae)
+        {
+            missing.Add("the audio VAE (ltx-2.5-audio-vae-bf16.safetensors)");
+        }
+        if (missing.Count > 0)
+        {
+            return $"'{directory}' is missing {string.Join(", ", missing)}. LTX-2.5 ships split across four files and "
+                + "must be loaded as a folder — put the DiT, text encoder and both VAEs (or symlinks to them) in one "
+                + "directory. Without them the engine would silently fall back to LTX-2.3's Gemma 3 and 2.3 VAEs.";
+        }
+        return null;
+    }
+
     /// <summary>Builds the Engine's load request for a Swarm model: the family id travels as the catalog id (that is
     /// what the Engine keys its recipe registry on), and the checkpoint path as the resolved local path.</summary>
     public static ModelSpec BuildSpec(SwarmUI.Text2Image.T2IModel model, Family family)
@@ -232,11 +359,24 @@ public static class ModelSupport
             Kind.Music => Modality.Music,
             _ => Modality.Image,
         };
+        string localPath = model.RawFilePath;
+        if (IsLtx25(model))
+        {
+            // Backstop: ValidateVideo already refused this case with the same message, so reaching here means the
+            // request bypassed validation. Throwing beats loading 2.3 components under a 2.5 name.
+            if (!TryResolveLtx25Bundle(model, out string bundleDir, out string problem))
+            {
+                throw new SwarmUserErrorException($"HartsyInference: LTX-2.5 bundle can't be loaded — {problem}");
+            }
+            localPath = bundleDir;
+            Logs.Verbose($"[HartsyInference] LTX-2.5 split bundle — loading the folder '{bundleDir}' rather than the "
+                + "bare checkpoint, so the Gemma-4 tower and both VAEs are merged in.");
+        }
         return new ModelSpec
         {
             Requested = family.Id,
             Modality = modality,
-            LocalPath = model.RawFilePath,
+            LocalPath = localPath,
             Catalog = new CatalogEntry
             {
                 Id = family.Id,

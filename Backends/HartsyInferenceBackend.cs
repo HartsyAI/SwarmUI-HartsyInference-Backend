@@ -2,6 +2,7 @@ using System.Globalization;
 using System.IO;
 using System.Net.Http;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using SwarmUI.Builtin_ComfyUIBackend;
 using FreneticUtilities.FreneticDataSyntax;
 using Newtonsoft.Json.Linq;
@@ -141,6 +142,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         "controlnet",     // per-family; gated by ImageFeatures.ControlNet
         "ipadapter",      // per-family; gated by ImageFeatures.IpAdapter
         "variation_seed", // per-family; gated by ImageFeatures.VariationSeed
+        "seamless",       // SeamlessTileable (shared core param, own flag); per-family, gated by ImageFeatures.SeamlessTiling
         "video",          // Wan (T2V/I2V + VACE / Animate / S2V) + LTX-Video + LTX-2 + Lance Video + MiniMax-H3
     ];
 
@@ -655,6 +657,37 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     private async Task<Image> GenerateVideo(ModelSpec spec, T2IParamInput input, IProgress<StepPreview> progress, CancellationToken cancel)
     {
         VideoRequest request = BuildVideoRequest(input);
+        string format = input.Get(T2IParamTypes.VideoFormat, "h264-mp4");
+
+        // Tier 3.5: stream frames straight to ffmpeg's stdin instead of buffering the whole clip, for the subset
+        // of requests that can't need the full clip in memory first — no boomerang/trim (need the final frame
+        // count / random access to reorder) and no audio (VideoAudioResolver.Resolve needs the final frame count
+        // too, to compute clip duration for trimming/looping the track). IVideoService.GenerateFramesAsync itself
+        // throws NotSupportedException for any family/variant that can't stream at all (as of 2026-08-11, only
+        // Wan's plain T2V/I2V-TI2V path) — caught below and falls back to the buffered path rather than refusing
+        // the generation outright, since these are core Swarm params a user may legitimately have set without
+        // knowing which families can stream.
+        bool wantsBoomerang = input.Get(T2IParamTypes.VideoBoomerang, false);
+        bool wantsTrim = input.Get(T2IParamTypes.TrimVideoStartFrames, 0) > 0 || input.Get(T2IParamTypes.TrimVideoEndFrames, 0) > 0;
+        bool wantsRestore = input.TryGet(SwarmUIHartsyInference.VideoRestoreModelParam, out string restoreModelCheck) && !string.IsNullOrWhiteSpace(restoreModelCheck);
+        bool wantsAudio = input.Get(T2IParamTypes.VideoAudioInput) is not null;
+        // ...and no GENERATED soundtrack either. The streaming path pipes frames straight to ffmpeg and has no
+        // AudioTrack to give it, so a family that samples audio jointly with video would have its soundtrack
+        // silently dropped. Core's own HasJointAVLatents names exactly that set (LTX-2.x and MiniMax-H3), so this
+        // stays right as families are added rather than needing a list here.
+        bool generatesAudio = input.Get(T2IParamTypes.Model)?.ModelClass?.CompatClass?.HasJointAVLatents == true;
+        if (!wantsBoomerang && !wantsTrim && !wantsRestore && !wantsAudio && !generatesAudio)
+        {
+            try
+            {
+                return await GenerateVideoStreaming(spec, request, format, progress, cancel);
+            }
+            catch (NotSupportedException ex)
+            {
+                Logs.Verbose($"[HartsyInference] Streaming generation not available ({ex.Message}); falling back to buffered.");
+            }
+        }
+
         VideoGenerationResult generated = await _engine.Video.GenerateAsync(spec, request, progress, cancel);
         List<byte[]> frames = [];
         int width = 0, height = 0;
@@ -669,13 +702,11 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         {
             throw new InvalidOperationException("HartsyInference: the video pipeline produced no frames.");
         }
-        if (input.Get(T2IParamTypes.VideoBoomerang, false))
-        {
-            for (int i = frames.Count - 2; i > 0; i--)
-            {
-                frames.Add(frames[i]);
-            }
-        }
+        // Boomerang is NOT applied here: BuildVideoRequest already sets VideoRequest.VideoBoomerang, and every
+        // *RecipePipeline.Generate routes through VideoRecipeUtils.ToVideoFrames, which applies it before the
+        // frames ever leave _engine.Video.GenerateAsync above. Re-applying it here used to ping-pong the
+        // already-ping-ponged sequence (found scoping Tier 3.5 — see VideoRecipeUtilsFrameEditsTests.cs in the
+        // engine repo for the frame-count/order proof) instead of the single loop the user asked for.
         // Optional SeedVR2 restore pass (Video Restore param group): frames go straight into the engine's
         // restore service (no container round-trip), replacing the frame list before muxing.
         if (input.TryGet(SwarmUIHartsyInference.VideoRestoreModelParam, out string restoreModel)
@@ -699,13 +730,53 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             }
             frames = restoredFrames;
         }
-        string format = input.Get(T2IParamTypes.VideoFormat, "h264-mp4");
         if (audio is not null && !VideoOutputEncoder.FormatSupportsAudio(format))
         {
             Logs.Warning($"[HartsyInference] Video format '{format}' cannot carry audio; the {audio.SampleRate} Hz track is not muxed.");
             audio = null;
         }
         return VideoOutputEncoder.Encode([.. frames], width, height, request.Fps ?? 25, format, cancel, audio);
+    }
+
+    /// <summary>The streaming half of <see cref="GenerateVideo"/> (Tier 3.5): pulls frames from
+    /// <c>IVideoService.GenerateFramesAsync</c> and pipes them straight to <see cref="VideoOutputEncoder.EncodeStreamingAsync"/>
+    /// as they decode. Peeks exactly one frame to learn width/height (the encoder needs them before the first
+    /// write; the request's own Width/Height aren't reliable here — resolutions get snapped/defaulted per family)
+    /// and re-prepends it via a small local iterator so nothing is lost. No audio track — callers only reach this
+    /// when <c>VideoAudioInput</c> is unset, matching <see cref="GenerateVideo"/>'s eligibility gate.</summary>
+    private async Task<Image> GenerateVideoStreaming(ModelSpec spec, VideoRequest request, string format, IProgress<StepPreview> progress, CancellationToken cancel)
+    {
+        IAsyncEnumerator<VideoFrame> frames = _engine.Video.GenerateFramesAsync(spec, request, progress, cancel).GetAsyncEnumerator(cancel);
+        if (!await frames.MoveNextAsync())
+        {
+            await frames.DisposeAsync();
+            throw new InvalidOperationException("HartsyInference: the video pipeline produced no frames.");
+        }
+        VideoFrame first = frames.Current;
+        // RgbFramesFrom takes ownership of `frames` from here: its own finally disposes it once
+        // EncodeStreamingAsync's `await foreach` drains it or unwinds — the compiler-generated disposal on an
+        // `await foreach` target runs in both cases, so there's no double-dispose or leak on either path.
+        return await VideoOutputEncoder.EncodeStreamingAsync(
+            RgbFramesFrom(first, frames), first.Width, first.Height, request.Fps ?? 25, format, cancel);
+    }
+
+    /// <summary>Yields <paramref name="first"/>'s RGB bytes, then the rest of <paramref name="remaining"/>'s —
+    /// the peek-and-reprepend glue <see cref="GenerateVideoStreaming"/> needs to learn width/height before
+    /// handing the stream to the encoder.</summary>
+    private static async IAsyncEnumerable<byte[]> RgbFramesFrom(VideoFrame first, IAsyncEnumerator<VideoFrame> remaining)
+    {
+        try
+        {
+            yield return first.Rgb;
+            while (await remaining.MoveNextAsync())
+            {
+                yield return remaining.Current.Rgb;
+            }
+        }
+        finally
+        {
+            await remaining.DisposeAsync();
+        }
     }
 
     /// <summary>Adapts the Engine's planar <see cref="AudioBuffer"/> onto the encoder's stereo mux track.</summary>
@@ -817,6 +888,13 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             Height = NullableInt(input, T2IParamTypes.Height),
             Steps = NullableInt(input, T2IParamTypes.Steps),
             CfgScale = input.TryGet(T2IParamTypes.CFGScale, out double cfg) ? (float)cfg : null,
+            CfgRescale = input.TryGet(SwarmUIHartsyInference.CfgRescaleParam, out double cfgRescale) ? (float)cfgRescale : null,
+            Tcfg = input.TryGet(SwarmUIHartsyInference.TcfgParam, out bool tcfg) ? tcfg : null,
+            // Reads SwarmUI core's shared SeamlessTileable param directly, unlike the Tier 2 CFG cluster above —
+            // it already carries its own "seamless" FeatureFlag (not "comfyui"), so there's no AND-semantics
+            // problem to work around by duplicating it (see SwarmUIHartsyInference.TcfgParam's doc comment for
+            // when duplication IS required).
+            SeamlessTiling = input.TryGet(T2IParamTypes.SeamlessTileable, out string seamless) ? seamless : null,
             Seed = input.Get(T2IParamTypes.Seed, -1L),
             ClipSkip = NullableInt(input, T2IParamTypes.ClipStopAtLayer),
             Sampler = input.Get(SwarmUIHartsyInference.SamplerParam, null),
@@ -1206,7 +1284,11 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             VideoSwapPercent = input.TryGet(T2IParamTypes.VideoSwapPercent, out double swapPercent) && swapPercent != 0.5
                 ? swapPercent : null,
             VideoResolution = input.Get(T2IParamTypes.VideoResolution, null),
-            Fps = input.Get(T2IParamTypes.VideoFPS, 25),
+            // 25 is Swarm's cross-family fallback and is wrong for LTX-2: the recipe's own default, core's param
+            // default and Swarm's docs ("LTXV prefers 24") all say 24. Sent as a value rather than null because the
+            // LTX-2 pipeline doesn't report the fps it used on VideoGenerationResult — a null would generate at the
+            // recipe's 24 and then mux at the encoder's 25 fallback, i.e. play back 4% fast.
+            Fps = input.Get(T2IParamTypes.VideoFPS, IsLtxVideo2(input) ? 24 : 25),
             VideoFormat = input.Get(T2IParamTypes.VideoFormat, null),
             // Boomerang is applied to the decoded frames on the way out (see GenerateVideo) so the Engine
             // doesn't waste a second pass; the flag is still carried for pipelines that want it.
@@ -1273,12 +1355,22 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 + "rather than Swarm's cross-family 25 (which would snap to 39 on H3's 17k+5 grid).");
             return null;
         }
+        if (IsLtxVideo2(input))
+        {
+            Logs.Verbose("[HartsyInference] No frame count set — leaving it to the LTX-2 recipe's own default rather "
+                + "than Swarm's cross-family 25, which is not on LTX-2's 8n+1 grid.");
+            return null;
+        }
         return 25;
     }
 
     /// <summary>Whether the selected model is MiniMax-H3, by core's own compat class rather than a name guess.</summary>
     private static bool IsMiniMaxH3(T2IParamInput input) =>
         input.Get(T2IParamTypes.Model)?.ModelClass?.CompatClass?.ID == T2IModelClassSorter.CompatMiniMaxH3.ID;
+
+    /// <summary>Whether the selected model is any LTX-2.x (2, 2.3 or 2.5 — they share core's compat class).</summary>
+    private static bool IsLtxVideo2(T2IParamInput input) =>
+        input.Get(T2IParamTypes.Model)?.ModelClass?.CompatClass?.ID == T2IModelClassSorter.CompatLtxv2.ID;
 
     /// <summary>Reference media caps the model was trained under, mirroring what the reference node accepts.</summary>
     private const int MaxRefImages = 9, MaxRefAudios = 3, MaxRefVideos = 3;
@@ -1710,6 +1802,16 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         // silently generate text-to-video, which looks like a working generation and is not. Checkpoint-aware:
         // Wan's Animate/VACE/S2V variants share the family compat classes (header-sniffed engine-side).
         VideoFeatures videoSupported = ModelSupport.SupportedVideoFeatures(compat, input.Get(T2IParamTypes.Model)?.RawFilePath);
+        // LTX-2.5 ships split across four files and must be handed to the Engine as a folder. Caught here rather than
+        // at load: an incomplete bundle makes the recipe fall back to LTX-2.3's Gemma 3 and 2.3 VAEs and generate a
+        // video with them, so "wrong model, plausible output" is the failure this prevents.
+        if (input.Get(T2IParamTypes.Model) is T2IModel videoModel
+            && videoModel.ModelClass?.ID == ModelSupport.Ltx25ModelClassId
+            && !ModelSupport.TryResolveLtx25Bundle(videoModel, out _, out string bundleProblem))
+        {
+            input.RefusalReasons.Add($"HartsyInference: LTX-2.5 bundle is incomplete — {bundleProblem}");
+            return false;
+        }
         // Reference media rides the prompt box (core's internal PromptImages/Audios/Videos carriers), so these read
         // what the user attached there rather than a param control of ours.
         bool hasRefImages = input.TryGet(T2IParamTypes.PromptImages, out List<Image> refImgs) && refImgs is { Count: > 0 };

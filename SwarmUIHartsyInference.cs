@@ -58,6 +58,19 @@ public class SwarmUIHartsyInference : Extension
     public static T2IRegisteredParam<Image> AnimateFaceVideoParam;
     public static T2IRegisteredParam<string> SamplerParam;
 
+    // CFG-Rescale: duplicates rather than reads a Comfy-side param. Confirmed against SwarmUI core:
+    // T2IParamType.FeatureFlag is a single string (its comma-separated multi-flag support is AND-semantics,
+    // not OR), so there's no way for one param to be satisfied by either of two independently-installed
+    // backends without one of them lying. Delete this duplicate in favor of reading Comfy's own rescale param
+    // directly if core ever adds a mechanism for one param to satisfy either backend's flag.
+    public static T2IRegisteredParam<double> CfgRescaleParam;
+
+    // TCFG: same deliberate-duplication rationale as CfgRescaleParam directly above (no Comfy-side TCFG param
+    // exists to read from anyway, but the reasoning for why this is its own hartsyinference-flagged param
+    // rather than trying to share one is identical). Delete this duplicate in favor of reading a shared param
+    // if core ever adds a mechanism for one param to satisfy either backend's flag AND Comfy ships TCFG.
+    public static T2IRegisteredParam<bool> TcfgParam;
+
     /// <summary>How the Init Image is consumed: denoise (classic img2img) vs reference (in-context edit).</summary>
     public static T2IRegisteredParam<string> InitImageModeParam;
 
@@ -230,12 +243,34 @@ public class SwarmUIHartsyInference : Extension
         // Comfy value over as a courtesy (euler/ddim/dpmpp_2m/lcm map; others → Euler).
         SamplerParam = T2IParamTypes.Register<string>(new(
             "HartsyInference Sampler",
-            "Sampler for SD 1.5 / SDXL generations on the HartsyInference backend.\n'euler' is the safe default; 'dpm++2m' is popular for SDXL; 'lcm' is for LCM/turbo checkpoints.\nFlow-matching models (Flux, SD3, Z-Image, etc.) use their canonical sampler and ignore this.",
+            "Sampler for SD 1.5 / SDXL generations on the HartsyInference backend.\n'euler' is the safe default; 'dpm++2m' is popular for SDXL; 'lcm'/'tcd' are for LCM/TCD-distilled turbo checkpoints.\nFlow-matching models (Flux, SD3, Z-Image, etc.) use their canonical sampler and ignore this.",
             "euler",
             Toggleable: true,
             Group: HartsyInferenceParamGroup,
             FeatureFlag: "hartsyinference",
-            GetValues: _ => new List<string> { "euler", "ddim", "dpm++2m", "lcm" }));
+            // SchedulerFactory (engine) already implements "tcd" (TcdScheduler) — this dropdown just never
+            // offered it. "ddim" listed as "dpmpp2m" in the engine's own SchedulerFactory doc comment is the
+            // same value as "dpm++2m" here; kept as one canonical spelling to avoid a silent no-match fallback.
+            GetValues: _ => new List<string> { "euler", "ddim", "dpm++2m", "lcm", "tcd" }));
+
+        CfgRescaleParam = T2IParamTypes.Register<double>(new(
+            "HartsyInference CFG Rescale",
+            "Pulls a high-CFG-Scale guided prediction back toward the conditional prediction's magnitude, reducing the oversaturated/burnt-highlights look that high CFG Scale causes.\n0 (default) = off. 0.7 is a reasonable starting point at CFG Scale 10+. Only SDXL honors this today.\nNot the same math as ComfyUI's RescaleCFG node — this rescales per-token L2 norm, not per-sample standard deviation — so the same numeric value produces a different-strength effect.",
+            "0", Min: 0, Max: 1, Step: 0.05,
+            Toggleable: true,
+            Group: HartsyInferenceParamGroup,
+            FeatureFlag: "hartsyinference",
+            ViewType: ParamViewType.SLIDER,
+            IsAdvanced: true));
+
+        TcfgParam = T2IParamTypes.Register<bool>(new(
+            "HartsyInference TCFG",
+            "Tangential Damping CFG (https://huggingface.co/papers/2503.18137): filters the unconditional prediction down to only the guidance direction it shares with the conditional prediction before combining, instead of using it as-is. Tends toward sharper, higher-contrast output at the same CFG Scale — a real steer of the result, not a subtle correction, so try it at your normal CFG Scale rather than assuming it needs a higher one. Off (default). Composes with CFG Rescale (TCFG combines first, rescale applies after). Only SDXL honors this today.",
+            "false",
+            Toggleable: true,
+            Group: HartsyInferenceParamGroup,
+            FeatureFlag: "hartsyinference",
+            IsAdvanced: true));
 
         InitImageModeParam = T2IParamTypes.Register<string>(new(
             "HartsyInference Init Image Mode",

@@ -75,7 +75,7 @@ the extension's source is consistent with it.
 └───────────────────────────────────────────────────────────────────────────┘
 ```
 
-Distribution: the Engine is a `<PackageReference Include="HartsyInference" Version="2.0.0-alpha.17">`
+Distribution: the Engine is a `<PackageReference Include="HartsyInference" Version="2.0.0-alpha.22">`
 in `SwarmUI-HartsyInference.csproj` — not a git submodule, not a `Vendor/` folder, not a
 `ProjectReference`. The private `HartsyInference.*` assemblies (and their own deps,
 Google.Protobuf / Microsoft.ML.Tokenizers) are copied into this extension's own output
