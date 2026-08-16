@@ -692,6 +692,7 @@ public static class ModelSupport
             Kind.Music => Modality.Music,
             _ => Modality.Image,
         };
+        string familyId = Ltx25DistilledFamilyOr(model, family.Id);
         string localPath = model.RawFilePath;
         if (IsLtx25(model))
         {
@@ -702,18 +703,38 @@ public static class ModelSupport
         }
         return new ModelSpec
         {
-            Requested = family.Id,
+            Requested = familyId,
             Modality = modality,
             LocalPath = localPath,
             Catalog = new CatalogEntry
             {
-                Id = family.Id,
+                Id = familyId,
                 Modality = modality,
                 DisplayName = model.Name,
-                Architecture = family.Id,
+                Architecture = familyId,
                 Status = ModelStatus.Verified,
             },
         };
+    }
+
+    /// <summary>Routes an LTX-2.5 <b>distilled</b> checkpoint to the Engine's <c>ltx-2.5-distilled</c> family, which
+    /// carries the baked 8-sigma schedule at guidance 1; everything else keeps <paramref name="familyId"/>.</summary>
+    /// <remarks>Both 2.5 transformers report the same compat class, so the compat-class table alone maps distilled
+    /// onto the DEV recipe and the distilled family is simply unreachable — it has a registered recipe that nothing
+    /// can select. The variant genuinely cannot be read from the checkpoint (see <c>LtxVideo2Recipe</c>'s own note:
+    /// dev and distilled share a model version), so the name is the only signal there is. Getting this wrong is
+    /// expensive in one direction only: driving the distilled weights on the dev contract runs 40 CFG-paired steps
+    /// on a schedule whose sigmas were baked for 8 unguided ones.</remarks>
+    private static string Ltx25DistilledFamilyOr(SwarmUI.Text2Image.T2IModel model, string familyId)
+    {
+        if (familyId != "ltx-video-2" || !IsLtx25(model))
+        {
+            return familyId;
+        }
+        // Match on the file name, not the display name: Swarm's display name is folder-relative and a user can
+        // rename a folder, but "distilled" is carried by every official build of these weights.
+        string file = Path.GetFileName(model.RawFilePath ?? model.Name ?? "");
+        return file.Contains("distilled", StringComparison.OrdinalIgnoreCase) ? "ltx-2.5-distilled" : familyId;
     }
 
     /// <summary>Kept for the extension entry point's call order; the Engine's registries are self-registering, so
