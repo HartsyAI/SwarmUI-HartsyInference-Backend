@@ -1153,11 +1153,21 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         return extra;
     }
 
+    /// <summary>Reads the video end image, by name as the Swarm field name varies across versions.</summary>
+    private static Image GetVideoEndImage(T2IParamInput input)
+    {
+        if (T2IParamTypes.TryGetType("videoendimage", out T2IParamType type, input) && input.TryGetRaw(type, out object raw) && raw is Image endImage)
+        {
+            return endImage;
+        }
+        return null;
+    }
+
     /// <summary>Maps the Swarm request onto the Engine's <see cref="VideoRequest"/>.</summary>
     private static VideoRequest BuildVideoRequest(T2IParamInput input)
     {
         Image initImage = input.Get(T2IParamTypes.InitImage);
-        Image endFrame = input.Get(T2IParamTypes.VideoEndFrame);
+        Image endFrame = GetVideoEndImage(input);
         int? frames = ResolveFrames(input);
         RefuseIncompatibleH3Conditioning(input, initImage, endFrame);
         Dictionary<string, object> extra = new(StringComparer.Ordinal);
@@ -1708,7 +1718,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         (VideoFeatures Feature, string Name, bool Requested)[] videoChecks =
         [
             (VideoFeatures.InitImage, "image-to-video (Init Image)", input.Get(T2IParamTypes.InitImage) is not null),
-            (VideoFeatures.EndFrame, "end-frame conditioning (Video End Frame)", input.Get(T2IParamTypes.VideoEndFrame) is not null),
+            (VideoFeatures.EndFrame, "end-frame conditioning (Video End Image)", GetVideoEndImage(input) is not null),
             (VideoFeatures.ReferenceImages, "reference images (attached to the prompt)", hasRefImages),
             (VideoFeatures.ReferenceVideos, "reference videos (attached to the prompt)", hasRefVideos),
             (VideoFeatures.ReferenceAudios, "reference audio (attached to the prompt, or Video Audio Reference)",
