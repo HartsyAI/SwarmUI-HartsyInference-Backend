@@ -96,32 +96,46 @@ public override void OnInit()
 {
     HartsyInferenceParamGroup = new("HartsyInference", Toggles: false, Open: false, IsAdvanced: true);
 
-    SamplerParam = T2IParamTypes.Register<string>(new(
-        "HartsyInference Sampler",
-        "Sampler for SD 1.5 / SDXL generations on the HartsyInference backend.",
-        "euler",
+    AceStepSolverParam = T2IParamTypes.Register<string>(new(
+        "ACE-Step Solver",
+        "ACE-Step diffusion solver.",
+        "ode",
         Toggleable: true,
-        Group: HartsyInferenceParamGroup,
-        FeatureFlag: "hartsyinference",
-        GetValues: _ => new List<string> { "euler", "ddim", "dpm++2m", "lcm" }));
+        Group: MusicParamGroup,
+        // Comma is AND: our backend must be running AND an ACE-Step model selected.
+        FeatureFlag: "hartsyinference,hartsy_acestep",
+        GetValues: _ => new List<string> { "ode", "sde" }));
 }
 ```
+
+### Names carry the model family, never the vendor
+
+A param is named for the **model family that honors it** (`ACE-Step Solver`, `YuE Stage-1 Top K`),
+never for this extension. Two consequences worth knowing before adding one:
+
+- A param's ID is its name with everything except `a-z` stripped
+  (`T2IParamTypes.CleanTypeNameMatcher = AsciiMatcher.LowercaseLetters`), so digits and
+  punctuation vanish — "Ideogram 4 Magic Prompt" is `ideogrammagicprompt`. Check a new name
+  against every registered param before using it: `T2IParamTypes.Register` is backed by
+  `Dictionary.Add`, so a cleaned-name collision crashes SwarmUI at init. AudioLab in particular
+  owns the bare `Cover Strength` / `LM Top K` / `YuE Temperature` spellings.
+- Renaming an existing param needs a `T2IParamTypes.ParameterRemaps` entry
+  (`RegisterParameterRemaps`). That dictionary is applied inside `GetType`, so one entry covers
+  both saved presets and "reuse parameters" from previously generated images.
 
 In practice `SwarmUIHartsyInference.OnInit` registers several dozen params across a handful
 of groups, one per feature area rather than one flat list:
 
-- **`HartsyInferenceParamGroup`** — the catch-all: `HartsyInference Sampler`, `HartsyInference
-  Init Image Mode`, and the Wan-Animate conditioning inputs (reference image, auto-preprocess
-  toggle, pose/face driving-video overrides, video audio reference).
+- **`HartsyInferenceParamGroup`** — `CFG Rescale`, `Init Image Mode`, and the Wan-Animate
+  conditioning inputs (reference image, auto-preprocess toggle, pose/face driving-video
+  overrides, video audio reference).
 - **`Ideogram4ParamGroup`** — the Ideogram 4 magic-prompt toggle and its optional LLM-model
   override (`Generation.Ideogram4MagicPrompt`).
 - **`VideoRestoreParamGroup`** — SeedVR2 restore/upscale knobs (model, target width/height,
-  clip frames, overlap, strength), applied to generated video frames or a still image.
+  clip frames, frame overlap, strength), applied to generated video frames or a still image.
 - **`MusicParamGroup`** — ACE-Step edit modes (source audio, edit mode, repaint span, cover
-  strength) plus the 5 Hz LM planner and advanced CFG/sampling knobs, and the YuE sampling
-  knobs (temperature/top-k/top-p/repetition penalty). Every name carries a `Hartsy Music`
-  prefix because AudioLab already registers plain names like "Source Audio" or "Top K", and a
-  cleaned-name collision in `T2IParamTypes.Register` crashes SwarmUI at init.
+  strength) plus the 5 Hz LM planner and advanced CFG/solver knobs, and the YuE Stage-1
+  sampling knobs (temperature/top-k/top-p/repetition penalty).
 
 One param breaks the "own group" pattern deliberately: `FaceIdV2WeightParam` (FaceID-PlusV2
 shortcut strength) is registered into *Comfy's* `GroupImagePrompting`, flagged `"ipadapter"`

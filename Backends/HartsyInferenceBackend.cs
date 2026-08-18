@@ -625,7 +625,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         // Optional SeedVR2 restore/upscale pass over the still (same param group as the video path). No
         // FreeMemory here: RestoreService frees on pipeline load, and evicting a cached image model every
         // generation would defeat the pipeline cache.
-        if (input.TryGet(SwarmUIHartsyInference.VideoRestoreModelParam, out string restoreModel)
+        if (input.TryGet(SwarmUIHartsyInference.RestoreModelParam, out string restoreModel)
             && !string.IsNullOrWhiteSpace(restoreModel))
         {
             ModelSpec restoreSpec = ModelResolver.Resolve(restoreModel, null, Modality.Restore);
@@ -653,9 +653,9 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     /// <summary>The restore knobs shared by the still and video paths (target size, strength, seed).</summary>
     private static RestoreRequest BuildRestoreKnobs(T2IParamInput input) => new()
     {
-        TargetWidth = input.TryGet(SwarmUIHartsyInference.VideoRestoreWidthParam, out int rw) ? rw : null,
-        TargetHeight = input.TryGet(SwarmUIHartsyInference.VideoRestoreHeightParam, out int rh) ? rh : null,
-        Strength = input.TryGet(SwarmUIHartsyInference.VideoRestoreStrengthParam, out double rst) ? (float)rst : null,
+        TargetWidth = input.TryGet(SwarmUIHartsyInference.RestoreWidthParam, out int rw) ? rw : null,
+        TargetHeight = input.TryGet(SwarmUIHartsyInference.RestoreHeightParam, out int rh) ? rh : null,
+        Strength = input.TryGet(SwarmUIHartsyInference.RestoreStrengthParam, out double rst) ? (float)rst : null,
         Seed = input.Get(T2IParamTypes.Seed, -1L) is long seed and >= 0 ? (int)(seed & 0x7FFFFFFF) : null,
     };
 
@@ -675,7 +675,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         // knowing which families can stream.
         bool wantsBoomerang = input.Get(T2IParamTypes.VideoBoomerang, false);
         bool wantsTrim = input.Get(T2IParamTypes.TrimVideoStartFrames, 0) > 0 || input.Get(T2IParamTypes.TrimVideoEndFrames, 0) > 0;
-        bool wantsRestore = input.TryGet(SwarmUIHartsyInference.VideoRestoreModelParam, out string restoreModelCheck) && !string.IsNullOrWhiteSpace(restoreModelCheck);
+        bool wantsRestore = input.TryGet(SwarmUIHartsyInference.RestoreModelParam, out string restoreModelCheck) && !string.IsNullOrWhiteSpace(restoreModelCheck);
         bool wantsAudio = input.Get(T2IParamTypes.VideoAudioInput) is not null;
         // ...and no GENERATED soundtrack either. The streaming path pipes frames straight to ffmpeg and has no
         // AudioTrack to give it, so a family that samples audio jointly with video would have its soundtrack
@@ -713,9 +713,9 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         // frames ever leave _engine.Video.GenerateAsync above. Re-applying it here used to ping-pong the
         // already-ping-ponged sequence (found scoping Tier 3.5 — see VideoRecipeUtilsFrameEditsTests.cs in the
         // engine repo for the frame-count/order proof) instead of the single loop the user asked for.
-        // Optional SeedVR2 restore pass (Video Restore param group): frames go straight into the engine's
+        // Optional SeedVR2 restore pass (Restore param group): frames go straight into the engine's
         // restore service (no container round-trip), replacing the frame list before muxing.
-        if (input.TryGet(SwarmUIHartsyInference.VideoRestoreModelParam, out string restoreModel)
+        if (input.TryGet(SwarmUIHartsyInference.RestoreModelParam, out string restoreModel)
             && !string.IsNullOrWhiteSpace(restoreModel))
         {
             // The resident T2V DiT and SeedVR2's VAE peak cannot share 24 GB.
@@ -724,8 +724,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             RestoreRequest restoreRequest = BuildRestoreKnobs(input) with
             {
                 Frames = [.. frames.Select(f => new ImageData { Rgb = f, Width = width, Height = height })],
-                ClipFrames = input.TryGet(SwarmUIHartsyInference.VideoRestoreClipFramesParam, out int rcf) ? rcf : 5,
-                Overlap = input.TryGet(SwarmUIHartsyInference.VideoRestoreOverlapParam, out int rov) ? rov : 1,
+                ClipFrames = input.TryGet(SwarmUIHartsyInference.RestoreClipFramesParam, out int rcf) ? rcf : 5,
+                Overlap = input.TryGet(SwarmUIHartsyInference.RestoreOverlapParam, out int rov) ? rov : 1,
             };
             List<byte[]> restoredFrames = [];
             await foreach (VideoFrame restoredFrame in _engine.Restore.RestoreAsync(restoreSpec, restoreRequest, progress, cancel))
@@ -1443,9 +1443,9 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     private static MusicRequest BuildMusicRequest(T2IParamInput input)
     {
         long seed = input.Get(T2IParamTypes.Seed, -1L);
-        AudioClip sourceAudio = ToAudioClip(input.Get(SwarmUIHartsyInference.MusicSourceAudioParam));
-        string editMode = input.Get(SwarmUIHartsyInference.MusicEditModeParam, "continuation");
-        string lmModel = input.Get(SwarmUIHartsyInference.MusicLmModelParam, "none");
+        AudioClip sourceAudio = ToAudioClip(input.Get(SwarmUIHartsyInference.AceStepSourceAudioParam));
+        string editMode = input.Get(SwarmUIHartsyInference.AceStepEditModeParam, "continuation");
+        string lmModel = input.Get(SwarmUIHartsyInference.AceStepLmPlannerParam, "none");
         MusicRequest request = new MusicRequest
         {
             // ACE-Step convention (which the Engine follows): the prompt carries the lyrics, the style/genre tags
@@ -1465,15 +1465,15 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             Repaint = editMode == "repaint" ? sourceAudio : null,
             Cover = editMode == "cover" ? sourceAudio : null,
         };
-        if (input.TryGet(SwarmUIHartsyInference.MusicRepaintStartParam, out double repaintStart))
+        if (input.TryGet(SwarmUIHartsyInference.AceStepRepaintStartParam, out double repaintStart))
         {
             request = request with { RepaintStart = repaintStart };
         }
-        if (input.TryGet(SwarmUIHartsyInference.MusicRepaintEndParam, out double repaintEnd))
+        if (input.TryGet(SwarmUIHartsyInference.AceStepRepaintEndParam, out double repaintEnd))
         {
             request = request with { RepaintEnd = repaintEnd };
         }
-        if (input.TryGet(SwarmUIHartsyInference.MusicCoverStrengthParam, out double coverStrength))
+        if (input.TryGet(SwarmUIHartsyInference.AceStepCoverStrengthParam, out double coverStrength))
         {
             request = request with { CoverStrength = coverStrength };
         }
@@ -1482,43 +1482,43 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             request = request with
             {
                 LmModel = lmModel,
-                Thinking = input.Get(SwarmUIHartsyInference.MusicLmThinkingParam, true),
-                LmTemperature = input.Get(SwarmUIHartsyInference.MusicLmTemperatureParam, 0.85),
-                LmCfgScale = input.Get(SwarmUIHartsyInference.MusicLmCfgParam, 2.0),
-                LmTopK = input.Get(SwarmUIHartsyInference.MusicLmTopKParam, 0),
-                LmTopP = input.Get(SwarmUIHartsyInference.MusicLmTopPParam, 0.9),
-                LmNegativePrompt = input.Get(SwarmUIHartsyInference.MusicLmNegativePromptParam, "") ?? "",
+                Thinking = input.Get(SwarmUIHartsyInference.AceStepLmThinkingParam, true),
+                LmTemperature = input.Get(SwarmUIHartsyInference.AceStepLmTemperatureParam, 0.85),
+                LmCfgScale = input.Get(SwarmUIHartsyInference.AceStepLmCfgParam, 2.0),
+                LmTopK = input.Get(SwarmUIHartsyInference.AceStepLmTopKParam, 0),
+                LmTopP = input.Get(SwarmUIHartsyInference.AceStepLmTopPParam, 0.9),
+                LmNegativePrompt = input.Get(SwarmUIHartsyInference.AceStepLmNegativePromptParam, "") ?? "",
             };
         }
-        if (input.TryGet(SwarmUIHartsyInference.MusicInferMethodParam, out string inferMethod))
+        if (input.TryGet(SwarmUIHartsyInference.AceStepSolverParam, out string inferMethod))
         {
             request = request with { InferMethod = inferMethod };
         }
-        if (input.TryGet(SwarmUIHartsyInference.MusicUseAdgParam, out bool useAdg))
+        if (input.TryGet(SwarmUIHartsyInference.AceStepUseAdgParam, out bool useAdg))
         {
             request = request with { UseAdg = useAdg };
         }
-        if (input.TryGet(SwarmUIHartsyInference.MusicCfgIntervalStartParam, out double cfgStart))
+        if (input.TryGet(SwarmUIHartsyInference.AceStepCfgIntervalStartParam, out double cfgStart))
         {
             request = request with { CfgIntervalStart = cfgStart };
         }
-        if (input.TryGet(SwarmUIHartsyInference.MusicCfgIntervalEndParam, out double cfgEnd))
+        if (input.TryGet(SwarmUIHartsyInference.AceStepCfgIntervalEndParam, out double cfgEnd))
         {
             request = request with { CfgIntervalEnd = cfgEnd };
         }
-        if (input.TryGet(SwarmUIHartsyInference.MusicTemperatureParam, out double temperature))
+        if (input.TryGet(SwarmUIHartsyInference.YueTemperatureParam, out double temperature))
         {
             request = request with { Temperature = temperature };
         }
-        if (input.TryGet(SwarmUIHartsyInference.MusicTopKParam, out int topK))
+        if (input.TryGet(SwarmUIHartsyInference.YueTopKParam, out int topK))
         {
             request = request with { TopK = topK };
         }
-        if (input.TryGet(SwarmUIHartsyInference.MusicTopPParam, out double topP))
+        if (input.TryGet(SwarmUIHartsyInference.YueTopPParam, out double topP))
         {
             request = request with { TopP = topP };
         }
-        if (input.TryGet(SwarmUIHartsyInference.MusicRepetitionPenaltyParam, out double repetitionPenalty))
+        if (input.TryGet(SwarmUIHartsyInference.YueRepetitionPenaltyParam, out double repetitionPenalty))
         {
             request = request with { RepetitionPenalty = repetitionPenalty };
         }
@@ -1733,40 +1733,40 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             input.RefusalReasons.Add("HartsyInference: LoRAs aren't supported for music models. Remove the LoRA selection.");
             return false;
         }
-        bool hasSourceAudio = input.Get(SwarmUIHartsyInference.MusicSourceAudioParam) is not null;
+        bool hasSourceAudio = input.Get(SwarmUIHartsyInference.AceStepSourceAudioParam) is not null;
         bool isAceStep = family.Id == "acestep";
         if (hasSourceAudio && !isAceStep)
         {
             input.RefusalReasons.Add(
                 $"HartsyInference: music editing (continuation/repaint/cover) is ACE-Step only; '{family.Id}' has no "
-                + "audio-conditioned edit path. Remove Hartsy Music Source Audio or pick an ACE-Step model.");
+                + "audio-conditioned edit path. Remove ACE-Step Source Audio or pick an ACE-Step model.");
             return false;
         }
         // Pre-empt the engine's src_latents-conflict throw with a routable refusal.
-        if (hasSourceAudio && input.TryGet(SwarmUIHartsyInference.MusicLmModelParam, out string lmModel) && lmModel != "none")
+        if (hasSourceAudio && input.TryGet(SwarmUIHartsyInference.AceStepLmPlannerParam, out string lmModel) && lmModel != "none")
         {
             input.RefusalReasons.Add(
                 "HartsyInference: the ACE-Step edit modes and the 5 Hz LM planner both occupy the src_latents slot — "
-                + "set Hartsy Music LM Planner to none, or remove the Source Audio.");
+                + "set ACE-Step LM Planner to none, or remove the Source Audio.");
             return false;
         }
-        if (hasSourceAudio && input.Get(SwarmUIHartsyInference.MusicEditModeParam, "continuation") == "repaint"
-            && input.Get(SwarmUIHartsyInference.MusicRepaintEndParam, 0.0) <= input.Get(SwarmUIHartsyInference.MusicRepaintStartParam, 0.0))
+        if (hasSourceAudio && input.Get(SwarmUIHartsyInference.AceStepEditModeParam, "continuation") == "repaint"
+            && input.Get(SwarmUIHartsyInference.AceStepRepaintEndParam, 0.0) <= input.Get(SwarmUIHartsyInference.AceStepRepaintStartParam, 0.0))
         {
             input.RefusalReasons.Add(
-                $"HartsyInference: repaint needs Repaint End > Repaint Start (got {input.Get(SwarmUIHartsyInference.MusicRepaintStartParam, 0.0)}"
-                + $"..{input.Get(SwarmUIHartsyInference.MusicRepaintEndParam, 0.0)} s).");
+                $"HartsyInference: repaint needs Repaint End > Repaint Start (got {input.Get(SwarmUIHartsyInference.AceStepRepaintStartParam, 0.0)}"
+                + $"..{input.Get(SwarmUIHartsyInference.AceStepRepaintEndParam, 0.0)} s).");
             return false;
         }
         if (!isAceStep)
         {
             (bool Set, string Name)[] aceOnly =
             [
-                (input.TryGet(SwarmUIHartsyInference.MusicLmModelParam, out string lm) && lm != "none", "Hartsy Music LM Planner"),
-                (input.TryGet(SwarmUIHartsyInference.MusicInferMethodParam, out string im) && im != "ode", "Hartsy Music Infer Method"),
-                (input.TryGet(SwarmUIHartsyInference.MusicUseAdgParam, out bool adg) && adg, "Hartsy Music Use ADG"),
-                (input.TryGet(SwarmUIHartsyInference.MusicCfgIntervalStartParam, out double cis) && cis > 0, "Hartsy Music CFG Interval Start"),
-                (input.TryGet(SwarmUIHartsyInference.MusicCfgIntervalEndParam, out double cie) && cie < 1, "Hartsy Music CFG Interval End"),
+                (input.TryGet(SwarmUIHartsyInference.AceStepLmPlannerParam, out string lm) && lm != "none", "ACE-Step LM Planner"),
+                (input.TryGet(SwarmUIHartsyInference.AceStepSolverParam, out string im) && im != "ode", "ACE-Step Solver"),
+                (input.TryGet(SwarmUIHartsyInference.AceStepUseAdgParam, out bool adg) && adg, "ACE-Step Use ADG"),
+                (input.TryGet(SwarmUIHartsyInference.AceStepCfgIntervalStartParam, out double cis) && cis > 0, "ACE-Step CFG Interval Start"),
+                (input.TryGet(SwarmUIHartsyInference.AceStepCfgIntervalEndParam, out double cie) && cie < 1, "ACE-Step CFG Interval End"),
             ];
             foreach ((bool set, string name) in aceOnly)
             {
@@ -1782,10 +1782,10 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         {
             (bool Set, string Name)[] yueOnly =
             [
-                (input.TryGet(SwarmUIHartsyInference.MusicTemperatureParam, out double _), "Hartsy Music Temperature"),
-                (input.TryGet(SwarmUIHartsyInference.MusicTopKParam, out int _), "Hartsy Music Top K"),
-                (input.TryGet(SwarmUIHartsyInference.MusicTopPParam, out double _), "Hartsy Music Top P"),
-                (input.TryGet(SwarmUIHartsyInference.MusicRepetitionPenaltyParam, out double _), "Hartsy Music Repetition Penalty"),
+                (input.TryGet(SwarmUIHartsyInference.YueTemperatureParam, out double _), "YuE Stage-1 Temperature"),
+                (input.TryGet(SwarmUIHartsyInference.YueTopKParam, out int _), "YuE Stage-1 Top K"),
+                (input.TryGet(SwarmUIHartsyInference.YueTopPParam, out double _), "YuE Stage-1 Top P"),
+                (input.TryGet(SwarmUIHartsyInference.YueRepetitionPenaltyParam, out double _), "YuE Stage-1 Repetition Penalty"),
             ];
             foreach ((bool set, string name) in yueOnly)
             {
