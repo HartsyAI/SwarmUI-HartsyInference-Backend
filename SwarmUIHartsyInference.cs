@@ -3,6 +3,8 @@ using SwarmUI.Core;
 using SwarmUI.Media;
 using SwarmUI.Text2Image;
 using SwarmUI.Utils;
+using HartsyInference.Engine;
+using HartsyInference.Engine.Registry;
 using Hartsy.Extensions.HartsyInferenceBackend.Backends;
 using Hartsy.Extensions.HartsyInferenceBackend.WebAPI;
 
@@ -349,11 +351,16 @@ public class SwarmUIHartsyInference : Extension
 
         RestoreModelParam = T2IParamTypes.Register<string>(new(
             "Restore Model",
-            "Restore/upscale the generated output with SeedVR2 — video frames before muxing, or a still image after generation.\nToggle ON to enable; seedvr2-3b is the catalog default.",
+            "Restore/upscale the generated output with SeedVR2 — video frames before muxing, or a still image after generation.\nToggle ON to enable; the weights are fetched on first use.",
             "seedvr2-3b",
             Toggleable: true,
             Group: VideoRestoreParamGroup,
-            FeatureFlag: "hartsyinference"));
+            FeatureFlag: "hartsyinference",
+            // The engine's own restore catalog, not the model folder: these resolve through ModelResolver by
+            // catalog id and download themselves, so a free-text box here just invited typos that fail at
+            // generate time.
+            GetValues: _ => [.. ModelCatalog.ForModality(Modality.Restore)
+                .Select(entry => $"{entry.Id}///{entry.DisplayName}")]));
 
         RestoreWidthParam = T2IParamTypes.Register<int>(new(
             "Restore Target Width",
