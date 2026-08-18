@@ -209,7 +209,7 @@ public class SwarmUIHartsyInference : Extension
             null,
             Toggleable: true,
             Group: HartsyInferenceParamGroup,
-            FeatureFlag: "hartsyinference",
+            FeatureFlag: "hartsyinference,hartsy_wan_animate",
             ChangeWeight: 2));
 
         // MiniMax-H3 ref2va reference media is NOT registered as params here. Core already carries
@@ -227,7 +227,7 @@ public class SwarmUIHartsyInference : Extension
             "true",
             Toggleable: true,
             Group: HartsyInferenceParamGroup,
-            FeatureFlag: "hartsyinference",
+            FeatureFlag: "hartsyinference,hartsy_wan_animate",
             ChangeWeight: 2));
 
         AnimatePoseVideoParam = T2IParamTypes.Register<Image>(new(
@@ -236,7 +236,7 @@ public class SwarmUIHartsyInference : Extension
             null,
             Toggleable: true,
             Group: HartsyInferenceParamGroup,
-            FeatureFlag: "hartsyinference",
+            FeatureFlag: "hartsyinference,hartsy_wan_animate",
             ChangeWeight: 2));
 
         AnimateFaceVideoParam = T2IParamTypes.Register<Image>(new(
@@ -245,7 +245,7 @@ public class SwarmUIHartsyInference : Extension
             null,
             Toggleable: true,
             Group: HartsyInferenceParamGroup,
-            FeatureFlag: "hartsyinference",
+            FeatureFlag: "hartsyinference,hartsy_wan_animate",
             ChangeWeight: 2));
 
         // Extension-registered (NOT a Swarm core param — verified absent upstream as of 2026-08-05): the
@@ -257,7 +257,7 @@ public class SwarmUIHartsyInference : Extension
             null,
             Toggleable: true,
             Group: HartsyInferenceParamGroup,
-            FeatureFlag: "hartsyinference",
+            FeatureFlag: "hartsyinference,hartsy_audio_ref",
             ChangeWeight: 2));
 
         // Sampler and TCFG are NOT registered here — the backend reads Comfy's own "Sampler" and "Use TCFG"
@@ -283,7 +283,7 @@ public class SwarmUIHartsyInference : Extension
             Toggleable: true,
             IgnoreIf: "auto",
             Group: HartsyInferenceParamGroup,
-            FeatureFlag: "hartsyinference",
+            FeatureFlag: "hartsyinference,hartsy_refedit_choice",
             GetValues: _ => new List<string> { "auto", "denoise", "reference" }));
 
         // FaceID-PlusV2 shortcut strength: sits with the Comfy extension's IP-Adapter params in the

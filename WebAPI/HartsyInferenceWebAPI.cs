@@ -44,14 +44,22 @@ public static class HartsyInferenceWebAPI
     }
 
     /// <summary>POST /API/HartsyInferenceGetSupportedArchs — list dispatched architectures plus the
-    /// engine-blocked "pending" ones with their reasons. Lets a UI explain coverage at a glance.</summary>
+    /// engine-blocked "pending" ones with their reasons. Lets a UI explain coverage at a glance.
+    /// <para>Also returns per-architecture <c>features</c>: the composition features that architecture's recipe
+    /// declares, lowercased, as the same names <c>IsValidForThisBackend</c> refuses on. The gen-page script reads
+    /// this to hide LoRAs / ControlNet / IP-Adapter / Refiner / Seamless Tiling / Variation Seed / inpainting on
+    /// the families that don't have them — otherwise core offers all of those for every model and the refusal only
+    /// arrives after the user hits Generate. Asked of the Engine's registries at call time, so it can't drift from
+    /// what the pipeline will really do.</para></summary>
     public static async Task<JObject> HartsyInferenceGetSupportedArchs(Session session)
     {
         await Task.CompletedTask;
         JArray supported = [];
+        JObject features = [];
         foreach (string arch in ModelSupport.SupportedArchitectures)
         {
             supported.Add(arch);
+            features[arch] = DescribeFeatures(arch);
         }
         JObject pending = [];
         foreach (KeyValuePair<string, string> kv in ModelSupport.PendingArchitectures)
@@ -63,7 +71,33 @@ public static class HartsyInferenceWebAPI
             ["success"] = true,
             ["supported"] = supported,
             ["pending"] = pending,
+            ["features"] = features,
         };
+    }
+
+    /// <summary>The declared feature names for one compat class as a lowercase array. Video families are described
+    /// by their <see cref="VideoFeatures"/> instead; the checkpoint-specific narrowing Wan/LTX/MiniMax-H3 do in
+    /// <c>SupportedVideoFeatures(compat, checkpointPath)</c> can't be answered per-class, so this reports the
+    /// family's declared set and the per-file narrowing stays a server-side refusal.</summary>
+    private static JArray DescribeFeatures(string arch)
+    {
+        ModelSupport.Family family = ModelSupport.Resolve(arch);
+        string flags = family?.Kind switch
+        {
+            ModelSupport.Kind.Image => ModelSupport.SupportedFeatures(arch).ToString(),
+            ModelSupport.Kind.Video => ModelSupport.SupportedVideoFeatures(arch).ToString(),
+            _ => "None",
+        };
+        JArray result = [];
+        if (flags == "None")
+        {
+            return result;
+        }
+        foreach (string flag in flags.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
+        {
+            result.Add(flag.ToLowerInvariant());
+        }
+        return result;
     }
 
     /// <summary>POST /API/HartsyInferenceProbeModel — answer "will HartsyInference run this model, and how?"

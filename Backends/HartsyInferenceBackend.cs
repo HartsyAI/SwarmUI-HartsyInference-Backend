@@ -150,6 +150,9 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         "hartsy_ideogram4",
         "hartsy_acestep",
         "hartsy_yue",
+        "hartsy_wan_animate",
+        "hartsy_audio_ref",
+        "hartsy_refedit_choice",
     ];
 
     public override IEnumerable<string> SupportedFeatures => DeclaredFeatures;
