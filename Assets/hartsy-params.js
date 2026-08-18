@@ -209,20 +209,28 @@ const HartsyCoreGating = {
         return needed ? this.lacks(compatClass, needed) : false;
     },
 
+    /** One-shot guard for the deferred re-run scheduled when a foreign marker blocks a param we want. */
+    revisePending: false,
+
     apply(compatClass, hartsyIsOnlyOption) {
         if (typeof gen_param_types == 'undefined' || !gen_param_types) {
             return;
         }
+        let sawForeignMarker = false;
         for (let param of gen_param_types) {
             if (this.shouldHide(compatClass, param, hartsyIsOnlyOption)) {
-                // Never capture another extension's marker as the "original". AudioLab and API-Backends
-                // rewrite feature_flag on these same core params with their own save/restore keys, and
-                // changers run in load order — capturing '__audiolab_incompatible__' here would restore it
-                // later and hide a core param on every model until the page is reloaded. Skipping the save
-                // leaves the real original with whichever extension took it first, which is the one that
-                // will put it back.
-                if (!param.hasOwnProperty('original_feature_flag_hartsy')
-                    && !`${param.feature_flag}`.startsWith('__')) {
+                // Never touch a param currently carrying another extension's marker. AudioLab and
+                // API-Backends rewrite feature_flag on these same core params with their own save/restore
+                // keys, and OUR changer runs FIRST (extension prep order) — so if we blocked it now, the
+                // foreign extension's restore would clobber our marker later in this same pass, and if we
+                // saved the marker as our "original" we'd restore garbage. Leave it alone and schedule ONE
+                // deferred re-run: by then the foreign extension has restored the true original and we can
+                // gate it cleanly.
+                if (`${param.feature_flag}`.startsWith('__') && param.feature_flag != this.BLOCKED) {
+                    sawForeignMarker = true;
+                    continue;
+                }
+                if (!param.hasOwnProperty('original_feature_flag_hartsy')) {
                     param.original_feature_flag_hartsy = param.feature_flag;
                 }
                 param.feature_flag = this.BLOCKED;
@@ -231,6 +239,13 @@ const HartsyCoreGating = {
                 param.feature_flag = param.original_feature_flag_hartsy;
                 delete param.original_feature_flag_hartsy;
             }
+        }
+        if (sawForeignMarker && !this.revisePending) {
+            this.revisePending = true;
+            setTimeout(() => {
+                this.revisePending = false;
+                reviseBackendFeatureSet();
+            }, 1);
         }
     },
 
