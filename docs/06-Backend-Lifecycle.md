@@ -145,7 +145,7 @@ only fight that cache, not warm it usefully.
   private helpers: `GenerateImage` (→ `_engine.Images.GenerateAsync`), `GenerateVideo`
   (→ `_engine.Video.GenerateAsync`, then frame collection + optional boomerang + muxing), or
   `GenerateMusic` (→ `_engine.Music.GenerateAsync`, wrapped as a WAV `Image` with
-  `MediaType.AudioWav`). The optional SeedVR2 restore pass (Video Restore param group) runs
+  `MediaType.AudioWav`). The optional SeedVR2 restore pass (Restore / Upscale param group) runs
   inside `GenerateImage` and `GenerateVideo` only, when the user selected a restore model —
   `GenerateMusic` has no restore path. Engine result metadata is folded into
   `input.ExtraMeta["hartsy_*"]` inside `GenerateImage` (plus `hartsy_engine_seed`) and

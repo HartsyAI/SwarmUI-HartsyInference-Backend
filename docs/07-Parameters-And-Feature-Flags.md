@@ -89,19 +89,21 @@ it with `Toggleable: true` and `FeatureFlag: "hartsyinference"` (see the invaria
 why `Toggleable` is not optional). A minimal example:
 
 ```csharp
-public static T2IParamGroup HartsyInferenceParamGroup;
-public static T2IRegisteredParam<string> SamplerParam;
+public static T2IParamGroup AceStepParamGroup, AceStepGuidanceGroup;
+public static T2IRegisteredParam<string> AceStepSolverParam;
 
 public override void OnInit()
 {
-    HartsyInferenceParamGroup = new("HartsyInference", Toggles: false, Open: false, IsAdvanced: true);
+    ScriptFiles.Add("Assets/hartsy-params.js");   // the model-aware half; see below
+    AceStepParamGroup = new("ACE-Step", Toggles: false, Open: false);
+    AceStepGuidanceGroup = new("ACE-Step Guidance", Open: false, IsAdvanced: true, Parent: AceStepParamGroup);
 
     AceStepSolverParam = T2IParamTypes.Register<string>(new(
         "ACE-Step Solver",
         "ACE-Step diffusion solver.",
         "ode",
         Toggleable: true,
-        Group: MusicParamGroup,
+        Group: AceStepGuidanceGroup,
         // Comma is AND: our backend must be running AND an ACE-Step model selected.
         FeatureFlag: "hartsyinference,hartsy_acestep",
         GetValues: _ => new List<string> { "ode", "sde" }));
@@ -123,24 +125,67 @@ never for this extension. Two consequences worth knowing before adding one:
   (`RegisterParameterRemaps`). That dictionary is applied inside `GetType`, so one entry covers
   both saved presets and "reuse parameters" from previously generated images.
 
-In practice `SwarmUIHartsyInference.OnInit` registers several dozen params across a handful
-of groups, one per feature area rather than one flat list:
+`SwarmUIHartsyInference.OnInit` registers 35 params. **There is deliberately no group named
+after this extension.** A group named for the backend can never be model-scoped, and that is
+the structural reason every param used to be permanently visible. Each one either lives in the
+matching *core* group or in a group named for the *model family* — which is safe precisely
+because such a group is model-gated and therefore absent for other models.
 
-- **`HartsyInferenceParamGroup`** — `CFG Rescale`, `Init Image Mode`, and the Wan-Animate
-  conditioning inputs (reference image, auto-preprocess toggle, pose/face driving-video
-  overrides, video audio reference).
-- **`Ideogram4ParamGroup`** — the Ideogram 4 magic-prompt toggle and its optional LLM-model
+Into core's own groups:
+
+| Param | Core group |
+|---|---|
+| `CFG Rescale` | Alternate Guidance |
+| `Init Image Mode` | Init Image |
+| `Video Audio Reference` | Advanced Video (beside core's `Video Audio Input`) |
+| `FaceID V2 Weight` | Image Prompting (flagged `"ipadapter"`, not `"hartsyinference"`, so it appears whenever an IP-Adapter is selected rather than only when our backend is picked) |
+
+Into model-family groups:
+
+- **`WanAnimateParamGroup`** ("Wan Animate") — reference image, auto-preprocess toggle, and the
+  pose/face driving-video overrides.
+- **`Ideogram4ParamGroup`** ("Ideogram 4") — the magic-prompt toggle and its optional LLM-model
   override (`Generation.Ideogram4MagicPrompt`).
-- **`VideoRestoreParamGroup`** — SeedVR2 restore/upscale knobs (model, target width/height,
-  clip frames, frame overlap, strength), applied to generated video frames or a still image.
-- **`MusicParamGroup`** — ACE-Step edit modes (source audio, edit mode, repaint span, cover
-  strength) plus the 5 Hz LM planner and advanced CFG/solver knobs, and the YuE Stage-1
-  sampling knobs (temperature/top-k/top-p/repetition penalty).
+- **`VideoRestoreParamGroup`** ("Restore / Upscale") — SeedVR2 knobs (model, target
+  width/height, clip frames, frame overlap, strength). Not named "Video": it runs over a still
+  image just as well. This one keeps the plain `"hartsyinference"` flag, because the pass really
+  is backend-scoped rather than model-scoped.
+- **`AceStepParamGroup`** ("ACE-Step") with three real nested children via `Parent:` —
+  *Editing* (source audio, edit mode, repaint span, cover strength), *Planner* (the 5 Hz LM
+  planner and its sampling knobs), *Guidance* (solver, ADG, CFG interval).
+- **`YueParamGroup`** ("YuE") — the Stage-1 sampling knobs.
 
-One param breaks the "own group" pattern deliberately: `FaceIdV2WeightParam` (FaceID-PlusV2
-shortcut strength) is registered into *Comfy's* `GroupImagePrompting`, flagged `"ipadapter"`
-instead of `"hartsyinference"`, so it surfaces next to the rest of the IP-Adapter controls
-exactly when an IP-Adapter is selected — not only when our backend happens to be picked.
+Nested groups are real: `T2IParamGroup` takes a `Parent`, which is how core nests Video Obscure
+Options under Advanced Video. A group needs no flag of its own — `hideUnsupportableParams` hides
+any group left with no visible params, so selecting MusicGen collapses the whole ACE-Step tree.
+
+### Model gating lives in `Assets/hartsy-params.js`
+
+`"hartsyinference"` answers "is our backend running", never "can this model use this". The
+model half is a `featureSetChangers` entry (core's hook, also used by SwarmUI-AudioLab and
+SwarmUI-API-Backends) that grants/removes a small set of `hartsy_*` flags from the selected
+model's compat class: `hartsy_ideogram4`, `hartsy_acestep`, `hartsy_yue`, `hartsy_wan_animate`,
+`hartsy_audio_ref`, `hartsy_refedit_choice`. Params then require `"hartsyinference,<flag>"` —
+comma is **AND**. Every such flag must also be in `HartsyInferenceBackend.DeclaredFeatures`, or
+the generation is refused with a message naming no param; `WarnOnUndeclaredFeatureFlags` checks
+this at startup for every registered param carrying a `hartsy`-prefixed flag.
+
+Two flags come free from core and need no JS: `sdxl` (used by `CFG Rescale`, which only SDXL
+honors) is granted per model by core and sits in `T2IEngine.DisregardedFeatureFlags`, so it
+gates visibility without ever gating backend selection.
+
+The same script also hides *core's* params — LoRAs, ControlNet, Refiner, Seamless Tiling,
+Variation Seed, inpainting — on families whose recipe doesn't declare the matching
+`ImageFeatures`, using the per-architecture map that `HartsyInferenceGetSupportedArchs` now
+returns. That half only applies when no ComfyUI backend is loaded, since Comfy can service
+those on families our engine can't. The audio half (hiding Width/Height/Init Image on ACE-Step,
+YuE and MusicGen checkpoints) applies regardless, because those controls are meaningless on a
+music model whichever backend runs it.
+
+⚠️ Three extensions now rewrite `param.feature_flag` on the same core params (ours, AudioLab's
+and API-Backends'), each with its own save/restore key. Never capture a value starting with
+`__` as the "original" — that is another extension's marker, and restoring it would hide a core
+param on every model until the page reloads.
 
 (The old `HartsyInference Dtype` / `Tile VAE Threshold` params were removed: the engine
 never read them — dtype is engine-policy per model (bf16 unsupported by the shared kernels) and VAE

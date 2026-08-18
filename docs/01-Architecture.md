@@ -92,7 +92,7 @@ unpublished builds.
 Inherits `SwarmUI.Core.Extension`. `OnPreInit()` registers model classes core doesn't know
 about (ACE-Step v1, Lance image/video, MusicGen, YuE, F-Lite) before model folders are
 scanned. `OnInit()` registers the HartsyInference-specific `T2IParamGroup`s and params
-(Wan-Animate driving, Ideogram 4 magic prompt, Video Restore, the Music group), registers
+(Wan-Animate driving, Ideogram 4 magic prompt, Restore / Upscale, the ACE-Step and YuE groups), registers
 the backend type via `Program.Backends.RegisterBackendType<Backends.HartsyInferenceBackend>("hartsyinference", ...)`
 — one type, no `_api`/`_selfstart` split, because there is no "remote" mode: everything
 runs in-process — registers the web routes, and finally calls
@@ -204,7 +204,7 @@ in `08-Web-API-Routes.md`.
    second `OutOfVramException` becomes a `SwarmReadableErrorException` built by
    `DescribeVramFailure`, which quotes the Engine's own geometry/byte-requirement message
    and adds actionable advice (lower resolution/frames, or configure a shard/LowVram setting).
-7. Optional SeedVR2 restore pass: if the request set a Video Restore model, the still or
+7. Optional SeedVR2 restore pass: if the request set a Restore Model, the still or
    video path routes the decoded pixels/frames through `_engine.Restore.RestoreAsync`
    before returning. The video path calls `_engine.FreeMemory()` first — the resident
    video DiT and SeedVR2's VAE peak can't both fit in VRAM at once.

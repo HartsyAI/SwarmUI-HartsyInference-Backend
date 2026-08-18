@@ -188,24 +188,41 @@ const HartsyCoreGating = {
         return false;
     },
 
-    /** Whether this param should be hidden for the given model. */
-    shouldHide(compatClass, param) {
-        if (this.audioArchs.includes(compatClass)) {
-            if (this.audioHideParams.includes(param.id) || this.inHiddenGroup(param)) {
-                return true;
-            }
+    /**
+     * Whether this param should be hidden.
+     *
+     * The two halves have different conditions on purpose. Width/height/init-image on a MUSIC checkpoint are
+     * meaningless whichever backend runs it, so that half applies whenever our backend is up. The
+     * feature-map half is different: it says "our engine's recipe for this family can't do LoRAs", which is
+     * only a reason to hide the control when our backend is the one that would serve it — a ComfyUI backend
+     * can service LoRAs and ControlNet on families our engine cannot, and Swarm would route there.
+     */
+    shouldHide(compatClass, param, hartsyIsOnlyOption) {
+        if (this.audioArchs.includes(compatClass)
+            && (this.audioHideParams.includes(param.id) || this.inHiddenGroup(param))) {
+            return true;
+        }
+        if (!hartsyIsOnlyOption) {
+            return false;
         }
         let needed = this.requires[param.id];
         return needed ? this.lacks(compatClass, needed) : false;
     },
 
-    apply(compatClass) {
+    apply(compatClass, hartsyIsOnlyOption) {
         if (typeof gen_param_types == 'undefined' || !gen_param_types) {
             return;
         }
         for (let param of gen_param_types) {
-            if (this.shouldHide(compatClass, param)) {
-                if (!param.hasOwnProperty('original_feature_flag_hartsy')) {
+            if (this.shouldHide(compatClass, param, hartsyIsOnlyOption)) {
+                // Never capture another extension's marker as the "original". AudioLab and API-Backends
+                // rewrite feature_flag on these same core params with their own save/restore keys, and
+                // changers run in load order — capturing '__audiolab_incompatible__' here would restore it
+                // later and hide a core param on every model until the page is reloaded. Skipping the save
+                // leaves the real original with whichever extension took it first, which is the one that
+                // will put it back.
+                if (!param.hasOwnProperty('original_feature_flag_hartsy')
+                    && !`${param.feature_flag}`.startsWith('__')) {
                     param.original_feature_flag_hartsy = param.feature_flag;
                 }
                 param.feature_flag = this.BLOCKED;
@@ -230,13 +247,9 @@ const HartsyCoreGating = {
 };
 
 featureSetChangers.push(() => {
-    let compat = currentModelHelper.curCompatClass;
-    // Only gate core params while a HartsyInference backend is the one that would serve this. With a Comfy
-    // backend running too, Comfy can service LoRAs/ControlNet on families our engine can't, so hiding them
-    // would be wrong.
-    let hartsyOnly = currentBackendFeatureSet.includes('hartsyinference') && !hasAnyComfyBackend();
-    HartsyCoreGating.apply(hartsyOnly ? compat : null);
-    let active = HartsyParamConfig.activeFlags(compat, currentModelHelper.curModel);
+    let compat = currentBackendFeatureSet.includes('hartsyinference') ? currentModelHelper.curCompatClass : null;
+    HartsyCoreGating.apply(compat, !hasAnyComfyBackend());
+    let active = HartsyParamConfig.activeFlags(currentModelHelper.curCompatClass, currentModelHelper.curModel);
     let inactive = HartsyParamConfig.allFlags.filter(f => !active.includes(f));
     return [active, inactive];
 });

@@ -31,7 +31,7 @@ upstream (waiting on HartsyInference.Core).
 
 ## Production push (active order)
 
-- [x] **P1 — Sampler + clip skip.** `SamplerParam` ("HartsyInference Sampler":
+- [x] **P1 — Sampler + clip skip.** `SamplerParam` (now Comfy's shared "Sampler" param:
   euler/ddim/dpm++2m/lcm) routes through `SchedulerFactory` for SD 1.5 / SDXL;
   flow-match architectures (Flux, SD3, Z-Image, …) ignore it by design. Clip
   skip reads Swarm's `T2IParamTypes.ClipStopAtLayer` straight into
@@ -143,7 +143,7 @@ upstream (waiting on HartsyInference.Core).
   deferred as a minor variant.
 - [~] **Upscaling** — `HartsyInference.Vision/Upscale` (Real-ESRGAN, image)
   and SeedVR2 restoration (`engine.Restore`, video+image, wired into this
-  extension's Video Restore group) both ship. The only remaining gap is the
+  extension's Restore / Upscale group) both ship. The only remaining gap is the
   image-side "Refiner Upscale Method" dropdown — see P2.
 
 ## Tier 2 — Sampling / quality
