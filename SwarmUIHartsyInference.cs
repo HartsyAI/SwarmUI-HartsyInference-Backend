@@ -56,20 +56,14 @@ public class SwarmUIHartsyInference : Extension
     public static T2IRegisteredParam<bool> AnimateAutoPreprocessParam;
     public static T2IRegisteredParam<Image> AnimatePoseVideoParam;
     public static T2IRegisteredParam<Image> AnimateFaceVideoParam;
-    public static T2IRegisteredParam<string> SamplerParam;
 
-    // CFG-Rescale: duplicates rather than reads a Comfy-side param. Confirmed against SwarmUI core:
-    // T2IParamType.FeatureFlag is a single string (its comma-separated multi-flag support is AND-semantics,
-    // not OR), so there's no way for one param to be satisfied by either of two independently-installed
-    // backends without one of them lying. Delete this duplicate in favor of reading Comfy's own rescale param
-    // directly if core ever adds a mechanism for one param to satisfy either backend's flag.
+    // CFG-Rescale is registered here rather than reading Comfy's "Rescale CFG Multiplier" because the two
+    // compute different things: CfgHelper.ApplyCfgRescale rescales the per-token last-dim L2 norm, Comfy's
+    // RescaleCFG node reduces standard deviation over all non-batch dims. The same slider value would produce a
+    // different-strength effect on each backend, so sharing one control would mislead.
+    // Sampler and TCFG have no such difference and are read from Comfy's params instead (see the backend's
+    // BuildImageRequest); this is the only member of that cluster left.
     public static T2IRegisteredParam<double> CfgRescaleParam;
-
-    // TCFG: same deliberate-duplication rationale as CfgRescaleParam directly above (no Comfy-side TCFG param
-    // exists to read from anyway, but the reasoning for why this is its own hartsyinference-flagged param
-    // rather than trying to share one is identical). Delete this duplicate in favor of reading a shared param
-    // if core ever adds a mechanism for one param to satisfy either backend's flag AND Comfy ships TCFG.
-    public static T2IRegisteredParam<bool> TcfgParam;
 
     /// <summary>How the Init Image is consumed: denoise (classic img2img) vs reference (in-context edit).</summary>
     public static T2IRegisteredParam<string> InitImageModeParam;
@@ -138,6 +132,26 @@ public class SwarmUIHartsyInference : Extension
         // the extension reuses core's classification — no registration needed.
     }
 
+    /// <summary>Adds <c>tcd</c> to the shared Sampler dropdown. We read Comfy's Sampler param rather than
+    /// registering a second one, but its stock list has no <c>tcd</c> entry while the engine's
+    /// <c>SchedulerFactory</c> implements <c>TcdScheduler</c> — without this, adopting the shared param would
+    /// quietly drop TCD-distilled checkpoint support. The list is a union across backends by design (core
+    /// concatenates whatever a live Comfy reports from its own <c>object_info</c>), so contributing one value a
+    /// running backend can service is the same pattern, not a special case.</summary>
+    private static void PopulateSamplerValues()
+    {
+        try
+        {
+            T2IParamTypes.ConcatDropdownValsClean(
+                ref SwarmUI.Builtin_ComfyUIBackend.ComfyUIBackendExtension.Samplers,
+                ["tcd///TCD (for TCD-distilled models)"]);
+        }
+        catch (Exception ex)
+        {
+            Logs.Error($"[HartsyInference] Failed to add 'tcd' to the Sampler dropdown: {ex.Message}");
+        }
+    }
+
     /// <summary>Lists <c>&lt;ModelRoot&gt;/ipadapter/*.safetensors|*.bin</c> into the Comfy extension's IP-Adapter dropdown values.</summary>
     private static void PopulateIpAdapterModels()
     {
@@ -184,6 +198,7 @@ public class SwarmUIHartsyInference : Extension
         // dropdown uses), so IPA works Comfy-free. Refresh keeps it current after downloads.
         PopulateIpAdapterModels();
         Program.ModelRefreshEvent += PopulateIpAdapterModels;
+        PopulateSamplerValues();
 
         // 1. Param group + HartsyInference-specific params.
         HartsyInferenceParamGroup = new("HartsyInference", Toggles: false, Open: false, IsAdvanced: true);
@@ -245,20 +260,9 @@ public class SwarmUIHartsyInference : Extension
             FeatureFlag: "hartsyinference",
             ChangeWeight: 2));
 
-        // Named "HartsyInference Sampler" because Comfy already owns the "sampler" param ID.
-        // When this is unset but Comfy's Sampler param is, SamplingParamResolver maps the
-        // Comfy value over as a courtesy (euler/ddim/dpmpp_2m/lcm map; others → Euler).
-        SamplerParam = T2IParamTypes.Register<string>(new(
-            "HartsyInference Sampler",
-            "Sampler for SD 1.5 / SDXL generations on the HartsyInference backend.\n'euler' is the safe default; 'dpm++2m' is popular for SDXL; 'lcm'/'tcd' are for LCM/TCD-distilled turbo checkpoints.\nFlow-matching models (Flux, SD3, Z-Image, etc.) use their canonical sampler and ignore this.",
-            "euler",
-            Toggleable: true,
-            Group: HartsyInferenceParamGroup,
-            FeatureFlag: "hartsyinference",
-            // SchedulerFactory (engine) already implements "tcd" (TcdScheduler) — this dropdown just never
-            // offered it. "ddim" listed as "dpmpp2m" in the engine's own SchedulerFactory doc comment is the
-            // same value as "dpm++2m" here; kept as one canonical spelling to avoid a silent no-match fallback.
-            GetValues: _ => new List<string> { "euler", "ddim", "dpm++2m", "lcm", "tcd" }));
+        // Sampler and TCFG are NOT registered here — the backend reads Comfy's own "Sampler" and "Use TCFG"
+        // params instead (both are in HonoredComfyParams). Registering our own would put a second, near-identical
+        // control beside Comfy's for no gain.
 
         CfgRescaleParam = T2IParamTypes.Register<double>(new(
             "CFG Rescale",
@@ -266,17 +270,10 @@ public class SwarmUIHartsyInference : Extension
             "0", Min: 0, Max: 1, Step: 0.05,
             Toggleable: true,
             Group: HartsyInferenceParamGroup,
-            FeatureFlag: "hartsyinference",
+            // "sdxl" is granted/removed by core per selected model and sits in T2IEngine.DisregardedFeatureFlags,
+            // so it hides this for every other family without ever gating backend selection.
+            FeatureFlag: "hartsyinference,sdxl",
             ViewType: ParamViewType.SLIDER,
-            IsAdvanced: true));
-
-        TcfgParam = T2IParamTypes.Register<bool>(new(
-            "HartsyInference TCFG",
-            "Tangential Damping CFG (https://huggingface.co/papers/2503.18137): filters the unconditional prediction down to only the guidance direction it shares with the conditional prediction before combining, instead of using it as-is. Tends toward sharper, higher-contrast output at the same CFG Scale — a real steer of the result, not a subtle correction, so try it at your normal CFG Scale rather than assuming it needs a higher one. Off (default). Composes with CFG Rescale (TCFG combines first, rescale applies after). Only SDXL honors this today.",
-            "false",
-            Toggleable: true,
-            Group: HartsyInferenceParamGroup,
-            FeatureFlag: "hartsyinference",
             IsAdvanced: true));
 
         InitImageModeParam = T2IParamTypes.Register<string>(new(
@@ -653,6 +650,11 @@ public class SwarmUIHartsyInference : Extension
             ("hartsymusictopk", "yuestagetopk"),
             ("hartsymusictopp", "yuestagetopp"),
             ("hartsymusicrepetitionpenalty", "yuestagerepetitionpenalty"),
+            // Deleted in favour of Comfy's own param. Safe to point at it: same boolean, same meaning, so an old
+            // preset's "true"/"false" carries over unchanged. The deleted Sampler param deliberately has NO entry
+            // here — it spelled DPM++ 2M as "dpm++2m" where Comfy's dropdown says "dpmpp_2m", so remapping would
+            // hand that dropdown a value it doesn't list. Losing the preference is better than an invalid value.
+            ("hartsyinferencetcfg", "usetcfg"),
         ];
         foreach ((string old, string updated) in renames)
         {

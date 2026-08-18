@@ -895,15 +895,16 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             Steps = NullableInt(input, T2IParamTypes.Steps),
             CfgScale = input.TryGet(T2IParamTypes.CFGScale, out double cfg) ? (float)cfg : null,
             CfgRescale = input.TryGet(SwarmUIHartsyInference.CfgRescaleParam, out double cfgRescale) ? (float)cfgRescale : null,
-            Tcfg = input.TryGet(SwarmUIHartsyInference.TcfgParam, out bool tcfg) ? tcfg : null,
-            // Reads SwarmUI core's shared SeamlessTileable param directly, unlike the Tier 2 CFG cluster above —
-            // it already carries its own "seamless" FeatureFlag (not "comfyui"), so there's no AND-semantics
-            // problem to work around by duplicating it (see SwarmUIHartsyInference.TcfgParam's doc comment for
-            // when duplication IS required).
+            // Comfy's own TCFG param, not a duplicate of it: same paper (arXiv 2503.18137), same boolean, and
+            // ValidateComfyOnlyParams lets it through because "usetcfg" is in HonoredComfyParams.
+            Tcfg = input.TryGet(ComfyUIBackendExtension.UseTCFG, out bool tcfg) ? tcfg : null,
             SeamlessTiling = input.TryGet(T2IParamTypes.SeamlessTileable, out string seamless) ? seamless : null,
             Seed = input.Get(T2IParamTypes.Seed, -1L),
             ClipSkip = NullableInt(input, T2IParamTypes.ClipStopAtLayer),
-            Sampler = input.Get(SwarmUIHartsyInference.SamplerParam, null),
+            // Comfy's shared Sampler param. Only SD 1.5 / SDXL read it (Sd15/SdxlRecipePipeline); the flow-match
+            // families use their canonical schedule. ValidateSamplerChoice refuses a value the engine can't map,
+            // rather than letting SamplingParamResolver silently fall back to Euler.
+            Sampler = input.Get(ComfyUIBackendExtension.SamplerParam, null),
             Scheduler = null, // the Engine resolves the family's canonical schedule; Comfy's Scheduler param has no analogue
             SigmaShift = input.TryGet(T2IParamTypes.SigmaShift, out double shift) ? shift : null,
             EndStepsEarly = input.TryGet(T2IParamTypes.EndStepsEarly, out double endEarly) ? endEarly : null,
@@ -1639,8 +1640,42 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     /// read any of them — StepSwap shares the base loop's scheduler by construction (no independent refiner
     /// sampler/scheduler exists to honor), and upscale-method has no consumer until hires-fix ships. Re-add
     /// <c>refinerupscalemethod</c> only once a real consumer exists.</summary>
+    /// <summary>The sampler names <c>SamplingParamResolver.MapSamplerName</c> can actually map. Comfy's Sampler
+    /// dropdown offers roughly thirty; everything outside this set resolves to Euler with only a Verbose log, so a
+    /// user who picks "dpmpp_3m_sde" would silently get Euler. Refuse instead — and route to a Comfy backend, which
+    /// can service the choice.</summary>
+    private static readonly HashSet<string> MappableSamplers =
+        ["euler", "ddim", "dpm++2m", "dpmpp_2m", "dpmpp2m", "lcm", "tcd"];
+
+    /// <summary>Refuses a sampler this engine cannot honor, but only for the two families that read one at all —
+    /// SD 1.5 and SDXL (<c>Sd15RecipePipeline</c> / <c>SdxlRecipePipeline</c> are its only consumers). The
+    /// flow-matching families use their canonical schedule and ignore the param, so refusing there would block a
+    /// perfectly valid Flux generation over a setting that has no effect on it.</summary>
+    private static bool ValidateSamplerChoice(T2IParamInput input, ModelSupport.Family family)
+    {
+        if (family.Id is not ("sd15" or "sdxl" or "sdxl-refiner"))
+        {
+            return true;
+        }
+        if (!input.TryGet(ComfyUIBackendExtension.SamplerParam, out string sampler) || string.IsNullOrWhiteSpace(sampler))
+        {
+            return true;
+        }
+        if (MappableSamplers.Contains(sampler.ToLowerInvariant()))
+        {
+            return true;
+        }
+        input.RefusalReasons.Add(
+            $"HartsyInference: the '{sampler}' sampler isn't implemented by this backend (it has euler, ddim, "
+            + "dpm++2m, lcm and tcd). Pick one of those, or use a ComfyUI backend for this generation.");
+        return false;
+    }
+
     private static readonly HashSet<string> HonoredComfyParams =
         ["sampler", "scheduler",
+         // Tangential Damping CFG — Comfy's param drives our own ImageRequest.Tcfg (same paper, same boolean),
+         // so we honor it rather than registering a second control beside it.
+         "usetcfg",
          // Style-model (FLUX.1 Redux) strengths — mapped onto the engine's redux.* Extra keys.
          "stylemodelmergestrength", "stylemodelmultiplystrength", "stylemodelapplystart",
          // IP-Adapter scheduling knobs — mapped onto the engine's ipadapter.* Extra keys.
@@ -1878,6 +1913,10 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     /// <see cref="IArchitectureRecipe.Supports"/>, so it can never claim more than the Engine will really apply.</summary>
     private static bool ValidateImageFeatures(T2IParamInput input, string compat, ModelSupport.Family family)
     {
+        if (!ValidateSamplerChoice(input, family))
+        {
+            return false;
+        }
         ImageFeatures supported = ModelSupport.SupportedFeatures(compat);
         List<(ImageFeatures Feature, string Name, bool Requested)> checks =
         [
