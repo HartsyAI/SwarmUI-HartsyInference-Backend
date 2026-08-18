@@ -136,6 +136,36 @@ const HartsyCoreGating = {
     /** compat class -> array of lowercase feature names. Populated from the backend, empty until it answers. */
     featuresByArch: null,
 
+    /**
+     * Our music compat classes. Core does not act on the compat class's IsAudioModel flag in JS at all — only
+     * AudioLab's own hide-list does, and that is keyed on ITS virtual model classes (acestep_music, yue_music),
+     * not on a checkpoint file's compat class. So picking an ACE-Step/YuE/MusicGen checkpoint still shows
+     * Width, Height, Init Image, ControlNet and the rest of the image-only surface.
+     */
+    audioArchs: ['ace-step-1_5', 'yue', 'musicgen'],
+
+    /**
+     * Image-only core params to hide for those. Deliberately shorter than AudioLab's equivalent list:
+     * BuildMusicRequest genuinely reads Steps, CFG Scale, Seed and Sigma Shift for ACE-Step, so hiding those
+     * would remove working controls.
+     */
+    audioHideParams: [
+        'width', 'height', 'sidelength', 'aspectratio', 'batchsize',
+        'initimage', 'initimagecreativity', 'initimageresettonorm', 'initimagenoise',
+        'maskimage', 'maskblur', 'maskgrow', 'maskshrinkgrow', 'useinpaintingencode',
+        'initimagerecompositemask', 'maskbehavior', 'seamlesstileable', 'clipstopatlayer',
+        'vaetilesize', 'vaetileoverlap', 'removebackground', 'automaticvae',
+        'modelspecificenhancements', 'fluxguidancescale', 'fluxdisableguidance', 'zeronegative',
+    ],
+
+    /** Image/video-only groups to hide for those, matched including inherited parents. */
+    audioHideGroups: [
+        'resolution', 'refineupscale', 'refinerparamoverrides', 'controlnet', 'controlnettwo', 'controlnetthree',
+        'imageprompting', 'initimage', 'freeu', 'regionalprompting', 'segmentrefining', 'segmentparamoverrides',
+        'texttovideo', 'imagetovideo', 'advancedvideo', 'videoobscureoptions', 'videoextend', 'seedvr',
+        'alternateguidance', 'variationseed', 'restoreupscale', 'wananimate', 'ideogram',
+    ],
+
     /** Marker flag parked on a param to hide it; nothing ever grants it. */
     BLOCKED: '__hartsy_unsupported__',
 
@@ -148,16 +178,33 @@ const HartsyCoreGating = {
         return !map[compatClass].includes(feature);
     },
 
+    /** True when this param sits in (or under) one of the groups hidden for audio models. */
+    inHiddenGroup(param) {
+        for (let group = param.group; group; group = group.parent) {
+            if (this.audioHideGroups.includes(group.id)) {
+                return true;
+            }
+        }
+        return false;
+    },
+
+    /** Whether this param should be hidden for the given model. */
+    shouldHide(compatClass, param) {
+        if (this.audioArchs.includes(compatClass)) {
+            if (this.audioHideParams.includes(param.id) || this.inHiddenGroup(param)) {
+                return true;
+            }
+        }
+        let needed = this.requires[param.id];
+        return needed ? this.lacks(compatClass, needed) : false;
+    },
+
     apply(compatClass) {
         if (typeof gen_param_types == 'undefined' || !gen_param_types) {
             return;
         }
         for (let param of gen_param_types) {
-            let needed = this.requires[param.id];
-            if (!needed) {
-                continue;
-            }
-            if (this.lacks(compatClass, needed)) {
+            if (this.shouldHide(compatClass, param)) {
                 if (!param.hasOwnProperty('original_feature_flag_hartsy')) {
                     param.original_feature_flag_hartsy = param.feature_flag;
                 }
