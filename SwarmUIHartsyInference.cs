@@ -45,8 +45,9 @@ public static class HartsyInferencePermissions
 /// </summary>
 public class SwarmUIHartsyInference : Extension
 {
-    // HartsyInference-specific param group (see docs/07-Parameters-And-Feature-Flags.md).
-    public static T2IParamGroup HartsyInferenceParamGroup;
+    // Wan-Animate conditioning inputs. A model-named group is right here precisely BECAUSE it is model-gated:
+    // hartsy_wan_animate is only granted for an Animate checkpoint, so the group is absent otherwise.
+    public static T2IParamGroup WanAnimateParamGroup;
 
     // HartsyInference-specific params. Registered under feature flag "hartsyinference"
     // so they only show when our backend is the active target.
@@ -88,7 +89,8 @@ public class SwarmUIHartsyInference : Extension
     // family that honors each one, which is also what keeps them off AudioLab's names — it owns the bare
     // "Cover Strength"/"LM Top K"/"YuE Temperature" spellings, and a cleaned-name collision in
     // T2IParamTypes.Register crashes SwarmUI at init. "YuE Stage-1" because these drive the Stage-1 LM only.
-    public static T2IParamGroup MusicParamGroup;
+    // Real nested groups (T2IParamGroup.Parent), the way core nests Video Obscure Options under Advanced Video.
+    public static T2IParamGroup AceStepParamGroup, AceStepEditingGroup, AceStepPlannerGroup, AceStepGuidanceGroup, YueParamGroup;
     public static T2IRegisteredParam<AudioFile> AceStepSourceAudioParam;
     public static T2IRegisteredParam<string> AceStepEditModeParam;
     public static T2IRegisteredParam<double> AceStepRepaintStartParam;
@@ -200,15 +202,19 @@ public class SwarmUIHartsyInference : Extension
         Program.ModelRefreshEvent += PopulateIpAdapterModels;
         PopulateSamplerValues();
 
-        // 1. Param group + HartsyInference-specific params.
-        HartsyInferenceParamGroup = new("HartsyInference", Toggles: false, Open: false, IsAdvanced: true);
+        // 1. Param groups. There is deliberately no group named after this extension: a group named for the
+        //    backend can never be model-scoped, which is what left every param below permanently visible.
+        //    Everything either lives in the matching core group or in a group named for the model family.
+        WanAnimateParamGroup = new("Wan Animate", Toggles: true, Open: false,
+            Description: "Wan-Animate conditioning: the character image to animate, plus optional pre-rendered "
+                + "pose/face driving clips. The Init Image slot carries the driving video.");
 
         AnimateReferenceImageParam = T2IParamTypes.Register<Image>(new(
             "Animate Reference Image",
             "Wan-Animate: the character/identity image to animate.\nThe Init Image slot carries the driving (pose/motion) video; this image is who performs that motion.\nRequired for Wan-Animate generations on the HartsyInference backend.",
             null,
             Toggleable: true,
-            Group: HartsyInferenceParamGroup,
+            Group: WanAnimateParamGroup,
             FeatureFlag: "hartsyinference,hartsy_wan_animate",
             ChangeWeight: 2));
 
@@ -226,7 +232,7 @@ public class SwarmUIHartsyInference : Extension
             "Wan-Animate: auto-derive the pose skeleton + cropped face from the Init-Image driving video (the format the model was trained on).\nOn (default) = best motion fidelity; off = feed the raw clip (legacy). The pose/face override params below take precedence when set.",
             "true",
             Toggleable: true,
-            Group: HartsyInferenceParamGroup,
+            Group: WanAnimateParamGroup,
             FeatureFlag: "hartsyinference,hartsy_wan_animate",
             ChangeWeight: 2));
 
@@ -235,18 +241,20 @@ public class SwarmUIHartsyInference : Extension
             "Wan-Animate: an already-rendered pose/skeleton driving video (OpenPose/DWPose colored limbs).\nOverrides auto-preprocessing for the pose branch — supply this when you have a pre-rendered skeleton.",
             null,
             Toggleable: true,
-            Group: HartsyInferenceParamGroup,
+            Group: WanAnimateParamGroup,
             FeatureFlag: "hartsyinference,hartsy_wan_animate",
-            ChangeWeight: 2));
+            ChangeWeight: 2,
+            DependNonDefault: AnimateReferenceImageParam.Type.ID));
 
         AnimateFaceVideoParam = T2IParamTypes.Register<Image>(new(
             "Animate Face Video",
             "Wan-Animate: an already-cropped, face-centered driving video (square, ~512px) for the facial-motion branch.\nOverrides auto-preprocessing for the face branch.",
             null,
             Toggleable: true,
-            Group: HartsyInferenceParamGroup,
+            Group: WanAnimateParamGroup,
             FeatureFlag: "hartsyinference,hartsy_wan_animate",
-            ChangeWeight: 2));
+            ChangeWeight: 2,
+            DependNonDefault: AnimateReferenceImageParam.Type.ID));
 
         // Extension-registered (NOT a Swarm core param — verified absent upstream as of 2026-08-05): the
         // audio-reference input for joint audio+video models (MiniMax-H3 voice/style reference). The backend
@@ -256,7 +264,7 @@ public class SwarmUIHartsyInference : Extension
             "For audio+video models that support a reference audio clip (e.g. MiniMax-H3 voice reference): the generated soundtrack imitates this clip's voice/style rather than treating it as literal input audio.",
             null,
             Toggleable: true,
-            Group: HartsyInferenceParamGroup,
+            Group: T2IParamTypes.GroupAdvancedVideo,
             FeatureFlag: "hartsyinference,hartsy_audio_ref",
             ChangeWeight: 2));
 
@@ -269,7 +277,7 @@ public class SwarmUIHartsyInference : Extension
             "Pulls a high-CFG-Scale guided prediction back toward the conditional prediction's magnitude, reducing the oversaturated/burnt-highlights look that high CFG Scale causes.\n0 (default) = off. 0.7 is a reasonable starting point at CFG Scale 10+. Only SDXL honors this today.\nNot the same math as ComfyUI's RescaleCFG node — this rescales per-token L2 norm, not per-sample standard deviation — so the same numeric value produces a different-strength effect.",
             "0", Min: 0, Max: 1, Step: 0.05,
             Toggleable: true,
-            Group: HartsyInferenceParamGroup,
+            Group: T2IParamTypes.GroupAlternateGuidance,
             // "sdxl" is granted/removed by core per selected model and sits in T2IEngine.DisregardedFeatureFlags,
             // so it hides this for every other family without ever gating backend selection.
             FeatureFlag: "hartsyinference,sdxl",
@@ -282,9 +290,10 @@ public class SwarmUIHartsyInference : Extension
             "auto",
             Toggleable: true,
             IgnoreIf: "auto",
-            Group: HartsyInferenceParamGroup,
+            Group: T2IParamTypes.GroupInitImage,
             FeatureFlag: "hartsyinference,hartsy_refedit_choice",
-            GetValues: _ => new List<string> { "auto", "denoise", "reference" }));
+            GetValues: _ => new List<string> { "auto", "denoise", "reference" },
+            DependNonDefault: T2IParamTypes.InitImage.Type.ID));
 
         // FaceID-PlusV2 shortcut strength: sits with the Comfy extension's IP-Adapter params in the
         // Image Prompting group (same "ipadapter" feature flag + dropdown dependency) so it appears
@@ -325,13 +334,18 @@ public class SwarmUIHartsyInference : Extension
             "",
             Toggleable: true,
             Group: Ideogram4ParamGroup,
-            FeatureFlag: "hartsyinference,hartsy_ideogram4"));
+            FeatureFlag: "hartsyinference,hartsy_ideogram4",
+            DependNonDefault: Ideogram4MagicPromptParam.Type.ID));
 
         // Restore (SeedVR2): optional one-step restoration/upscale pass over the generated frames
         // before muxing. The target is an AREA (aspect preserved by the model's bicubic area-resize) —
         // SeedVR2 has no scale factor. Enabled by toggling the model param on; all params are Toggleable
         // for the same feature-flag reason as Ideogram 4 above.
-        VideoRestoreParamGroup = new("Video Restore", Toggles: false, Open: false, IsAdvanced: true);
+        // Not "Video Restore": it runs over a still image just as well, and this is the group users toggle to
+        // enable the pass at all, so it toggles as one.
+        VideoRestoreParamGroup = new("Restore / Upscale", Toggles: true, Open: false, IsAdvanced: true,
+            Description: "SeedVR2 restoration pass over the finished generation — video frames before muxing, or a "
+                + "still image after generation.");
 
         RestoreModelParam = T2IParamTypes.Register<string>(new(
             "Restore Model",
@@ -348,7 +362,8 @@ public class SwarmUIHartsyInference : Extension
             Min: 256, Max: 4096, Step: 16,
             Toggleable: true,
             Group: VideoRestoreParamGroup,
-            FeatureFlag: "hartsyinference"));
+            FeatureFlag: "hartsyinference",
+            DependNonDefault: RestoreModelParam.Type.ID));
 
         RestoreHeightParam = T2IParamTypes.Register<int>(new(
             "Restore Target Height",
@@ -357,7 +372,8 @@ public class SwarmUIHartsyInference : Extension
             Min: 256, Max: 4096, Step: 16,
             Toggleable: true,
             Group: VideoRestoreParamGroup,
-            FeatureFlag: "hartsyinference"));
+            FeatureFlag: "hartsyinference",
+            DependNonDefault: RestoreModelParam.Type.ID));
 
         RestoreClipFramesParam = T2IParamTypes.Register<int>(new(
             "Restore Clip Frames",
@@ -366,7 +382,8 @@ public class SwarmUIHartsyInference : Extension
             Min: 1, Max: 121, Step: 4,
             Toggleable: true,
             Group: VideoRestoreParamGroup,
-            FeatureFlag: "hartsyinference"));
+            FeatureFlag: "hartsyinference",
+            DependNonDefault: RestoreModelParam.Type.ID));
 
         RestoreOverlapParam = T2IParamTypes.Register<int>(new(
             "Restore Frame Overlap",
@@ -375,7 +392,8 @@ public class SwarmUIHartsyInference : Extension
             Min: 0, Max: 16, Step: 1,
             Toggleable: true,
             Group: VideoRestoreParamGroup,
-            FeatureFlag: "hartsyinference"));
+            FeatureFlag: "hartsyinference",
+            DependNonDefault: RestoreModelParam.Type.ID));
 
         RestoreStrengthParam = T2IParamTypes.Register<double>(new(
             "Restore Strength",
@@ -384,18 +402,32 @@ public class SwarmUIHartsyInference : Extension
             Min: 0, Max: 1, Step: 0.05,
             Toggleable: true,
             Group: VideoRestoreParamGroup,
-            FeatureFlag: "hartsyinference"));
+            FeatureFlag: "hartsyinference",
+            DependNonDefault: RestoreModelParam.Type.ID));
 
-        // Music group: ACE-Step editing + planner + advanced knobs, YuE sampling. Subgroups are faked with
-        // OrderPriority bands (edit 1-5, LM 10-16, CFG 20-23, sampling 30-33); Swarm has no nested groups.
-        MusicParamGroup = new("HartsyInference Music", Toggles: false, Open: false, IsAdvanced: false);
+        // One group per music family, with real nested subgroups. These used to be a single vendor-named group
+        // whose subgroups were faked with OrderPriority bands, on the belief that Swarm had no nested groups —
+        // it does: T2IParamGroup takes a Parent, which is how core nests Video Obscure Options under Advanced
+        // Video. Each group is model-gated by its params' flags, so selecting MusicGen (which honours none of
+        // these) collapses the whole tree: hideUnsupportableParams hides a group with no visible params.
+        AceStepParamGroup = new("ACE-Step", Toggles: false, Open: false,
+            Description: "ACE-Step editing, planning and guidance controls.");
+        AceStepEditingGroup = new("ACE-Step Editing", Toggles: true, Open: false, OrderPriority: 1, Parent: AceStepParamGroup,
+            Description: "Generate from an existing clip: continue past it, regenerate a span inside it, or "
+                + "re-render it in the prompt's style.");
+        AceStepPlannerGroup = new("ACE-Step Planner", Toggles: false, Open: false, OrderPriority: 2, Parent: AceStepParamGroup,
+            Description: "The 5 Hz LM planner, which plans the song's structure before diffusion runs.");
+        AceStepGuidanceGroup = new("ACE-Step Guidance", Toggles: false, Open: false, OrderPriority: 3, IsAdvanced: true,
+            Parent: AceStepParamGroup, Description: "Solver and classifier-free-guidance shaping.");
+        YueParamGroup = new("YuE", Toggles: false, Open: false, IsAdvanced: true,
+            Description: "Sampling controls for YuE's Stage-1 language model.");
 
         AceStepSourceAudioParam = T2IParamTypes.Register<AudioFile>(new(
             "ACE-Step Source Audio",
             "Source audio clip for ACE-Step music editing. What happens to it is picked by ACE-Step Edit Mode:\ncontinuation extends it, repaint regenerates a time span inside it, cover re-renders it in the prompt's style.\nACE-Step models only. Cannot be combined with the ACE-Step LM Planner.",
             null,
             Toggleable: true,
-            Group: MusicParamGroup,
+            Group: AceStepEditingGroup,
             FeatureFlag: "hartsyinference,hartsy_acestep",
             OrderPriority: 1,
             ChangeWeight: 2));
@@ -405,7 +437,7 @@ public class SwarmUIHartsyInference : Extension
             "What the Source Audio is used for.\n'continuation' = generate Duration seconds continuing past the clip.\n'repaint' = regenerate only Repaint Start..Repaint End seconds inside the clip.\n'cover' = re-render the whole clip in the prompt's style at Cover Strength.",
             "continuation",
             Toggleable: true,
-            Group: MusicParamGroup,
+            Group: AceStepEditingGroup,
             FeatureFlag: "hartsyinference,hartsy_acestep",
             OrderPriority: 2,
             GetValues: _ => new List<string> { "continuation", "repaint", "cover" }));
@@ -415,28 +447,31 @@ public class SwarmUIHartsyInference : Extension
             "Repaint mode: start of the regenerated span, in seconds from the start of the Source Audio.",
             "0", Min: 0, Max: 600, Step: 0.5,
             Toggleable: true,
-            Group: MusicParamGroup,
+            Group: AceStepEditingGroup,
             FeatureFlag: "hartsyinference,hartsy_acestep",
-            OrderPriority: 3));
+            OrderPriority: 3,
+            DependNonDefault: AceStepSourceAudioParam.Type.ID));
 
         AceStepRepaintEndParam = T2IParamTypes.Register<double>(new(
             "ACE-Step Repaint End",
             "Repaint mode: end of the regenerated span, in seconds. Must be greater than Repaint Start.",
             "0", Min: 0, Max: 600, Step: 0.5,
             Toggleable: true,
-            Group: MusicParamGroup,
+            Group: AceStepEditingGroup,
             FeatureFlag: "hartsyinference,hartsy_acestep",
-            OrderPriority: 4));
+            OrderPriority: 4,
+            DependNonDefault: AceStepSourceAudioParam.Type.ID));
 
         AceStepCoverStrengthParam = T2IParamTypes.Register<double>(new(
             "ACE-Step Cover Strength",
             "Cover mode: how much of the source is re-rendered (0 keeps it, 1 fully regenerates). Clamped to 0.05 minimum engine-side.",
             "0.5", Min: 0, Max: 1, Step: 0.05,
             Toggleable: true,
-            Group: MusicParamGroup,
+            Group: AceStepEditingGroup,
             FeatureFlag: "hartsyinference,hartsy_acestep",
             OrderPriority: 5,
-            ViewType: ParamViewType.SLIDER));
+            ViewType: ParamViewType.SLIDER,
+            DependNonDefault: AceStepSourceAudioParam.Type.ID));
 
         AceStepLmPlannerParam = T2IParamTypes.Register<string>(new(
             "ACE-Step LM Planner",
@@ -444,7 +479,7 @@ public class SwarmUIHartsyInference : Extension
             "none",
             Toggleable: true,
             IgnoreIf: "none",
-            Group: MusicParamGroup,
+            Group: AceStepPlannerGroup,
             FeatureFlag: "hartsyinference,hartsy_acestep",
             OrderPriority: 10,
             GetValues: _ => new List<string> { "none", "0.6b", "4b" }));
@@ -454,61 +489,67 @@ public class SwarmUIHartsyInference : Extension
             "Planner thinking mode (also selects the matching guidance scalers).",
             "true",
             Toggleable: true,
-            Group: MusicParamGroup,
+            Group: AceStepPlannerGroup,
             FeatureFlag: "hartsyinference,hartsy_acestep",
             OrderPriority: 11,
-            IsAdvanced: true));
+            IsAdvanced: true,
+            DependNonDefault: AceStepLmPlannerParam.Type.ID));
 
         AceStepLmTemperatureParam = T2IParamTypes.Register<double>(new(
             "ACE-Step LM Temperature",
             "Planner sampling temperature.",
             "0.85", Min: 0, Max: 2, Step: 0.05,
             Toggleable: true,
-            Group: MusicParamGroup,
+            Group: AceStepPlannerGroup,
             FeatureFlag: "hartsyinference,hartsy_acestep",
             OrderPriority: 12,
-            IsAdvanced: true));
+            IsAdvanced: true,
+            DependNonDefault: AceStepLmPlannerParam.Type.ID));
 
         AceStepLmCfgParam = T2IParamTypes.Register<double>(new(
             "ACE-Step LM CFG Scale",
             "Planner guidance scale.",
             "2", Min: 1, Max: 10, Step: 0.5,
             Toggleable: true,
-            Group: MusicParamGroup,
+            Group: AceStepPlannerGroup,
             FeatureFlag: "hartsyinference,hartsy_acestep",
             OrderPriority: 13,
-            IsAdvanced: true));
+            IsAdvanced: true,
+            DependNonDefault: AceStepLmPlannerParam.Type.ID));
 
         AceStepLmTopKParam = T2IParamTypes.Register<int>(new(
             "ACE-Step LM Top K",
             "Planner top-k sampling cutoff (0 = disabled).",
             "0", Min: 0, Max: 500, Step: 10,
             Toggleable: true,
-            Group: MusicParamGroup,
+            Group: AceStepPlannerGroup,
             FeatureFlag: "hartsyinference,hartsy_acestep",
             OrderPriority: 14,
-            IsAdvanced: true));
+            IsAdvanced: true,
+            DependNonDefault: AceStepLmPlannerParam.Type.ID));
 
         AceStepLmTopPParam = T2IParamTypes.Register<double>(new(
             "ACE-Step LM Top P",
             "Planner nucleus sampling cutoff.",
             "0.9", Min: 0, Max: 1, Step: 0.05,
             Toggleable: true,
-            Group: MusicParamGroup,
+            Group: AceStepPlannerGroup,
             FeatureFlag: "hartsyinference,hartsy_acestep",
             OrderPriority: 15,
-            IsAdvanced: true));
+            IsAdvanced: true,
+            DependNonDefault: AceStepLmPlannerParam.Type.ID));
 
         AceStepLmNegativePromptParam = T2IParamTypes.Register<string>(new(
             "ACE-Step LM Negative Prompt",
             "Planner negative prompt.",
             "",
             Toggleable: true,
-            Group: MusicParamGroup,
+            Group: AceStepPlannerGroup,
             FeatureFlag: "hartsyinference,hartsy_acestep",
             OrderPriority: 16,
             IsAdvanced: true,
-            ViewType: ParamViewType.PROMPT));
+            ViewType: ParamViewType.PROMPT,
+            DependNonDefault: AceStepLmPlannerParam.Type.ID));
 
         AceStepSolverParam = T2IParamTypes.Register<string>(new(
             "ACE-Step Solver",
@@ -516,7 +557,7 @@ public class SwarmUIHartsyInference : Extension
             "ode",
             Toggleable: true,
             IgnoreIf: "ode",
-            Group: MusicParamGroup,
+            Group: AceStepGuidanceGroup,
             FeatureFlag: "hartsyinference,hartsy_acestep",
             OrderPriority: 20,
             IsAdvanced: true,
@@ -527,7 +568,7 @@ public class SwarmUIHartsyInference : Extension
             "ACE-Step: use ADG guidance instead of the default APG blend (only matters when CFG > 1 on non-turbo checkpoints).",
             "false",
             Toggleable: true,
-            Group: MusicParamGroup,
+            Group: AceStepGuidanceGroup,
             FeatureFlag: "hartsyinference,hartsy_acestep",
             OrderPriority: 21,
             IsAdvanced: true));
@@ -537,7 +578,7 @@ public class SwarmUIHartsyInference : Extension
             "ACE-Step: CFG applies only while sigma is inside this 0..1 interval.",
             "0", Min: 0, Max: 1, Step: 0.05,
             Toggleable: true,
-            Group: MusicParamGroup,
+            Group: AceStepGuidanceGroup,
             FeatureFlag: "hartsyinference,hartsy_acestep",
             OrderPriority: 22,
             IsAdvanced: true));
@@ -547,7 +588,7 @@ public class SwarmUIHartsyInference : Extension
             "ACE-Step: upper edge of the CFG sigma interval.",
             "1", Min: 0, Max: 1, Step: 0.05,
             Toggleable: true,
-            Group: MusicParamGroup,
+            Group: AceStepGuidanceGroup,
             FeatureFlag: "hartsyinference,hartsy_acestep",
             OrderPriority: 23,
             IsAdvanced: true));
@@ -557,7 +598,7 @@ public class SwarmUIHartsyInference : Extension
             "YuE sampling temperature (ACE-Step and MusicGen ignore this).",
             "1", Min: 0, Max: 2, Step: 0.05,
             Toggleable: true,
-            Group: MusicParamGroup,
+            Group: YueParamGroup,
             FeatureFlag: "hartsyinference,hartsy_yue",
             OrderPriority: 30,
             IsAdvanced: true));
@@ -567,7 +608,7 @@ public class SwarmUIHartsyInference : Extension
             "YuE top-k sampling cutoff.",
             "50", Min: 0, Max: 500, Step: 10,
             Toggleable: true,
-            Group: MusicParamGroup,
+            Group: YueParamGroup,
             FeatureFlag: "hartsyinference,hartsy_yue",
             OrderPriority: 31,
             IsAdvanced: true));
@@ -577,7 +618,7 @@ public class SwarmUIHartsyInference : Extension
             "YuE nucleus sampling cutoff.",
             "0.93", Min: 0, Max: 1, Step: 0.01,
             Toggleable: true,
-            Group: MusicParamGroup,
+            Group: YueParamGroup,
             FeatureFlag: "hartsyinference,hartsy_yue",
             OrderPriority: 32,
             IsAdvanced: true));
@@ -587,7 +628,7 @@ public class SwarmUIHartsyInference : Extension
             "YuE repetition penalty (floored at 1 engine-side).",
             "1.1", Min: 1, Max: 2, Step: 0.05,
             Toggleable: true,
-            Group: MusicParamGroup,
+            Group: YueParamGroup,
             FeatureFlag: "hartsyinference,hartsy_yue",
             OrderPriority: 33,
             IsAdvanced: true));
@@ -666,13 +707,17 @@ public class SwarmUIHartsyInference : Extension
     /// advertise. <c>T2IEngine</c> drops a backend whose SupportedFeatures don't cover a job's required flags, so
     /// such a param makes every generation that touches it refuse — with a message that names no param and no flag.
     /// Flags in <c>T2IEngine.DisregardedFeatureFlags</c> are UI-visibility-only and never gate a backend, so they
-    /// are exempt (that is how core's own "text2video"/"text2audio" tags work without any backend declaring them).</summary>
+    /// are exempt (that is how core's own "text2video"/"text2audio" tags work without any backend declaring them).
+    /// <para>Checks every registered param rather than one group's: our params live in core groups now, and the
+    /// group filter this used to apply covered only 9 of them. Any flag beginning "hartsy" is ours to declare no
+    /// matter who registered the param.</para></summary>
     private static void WarnOnUndeclaredFeatureFlags()
     {
         HashSet<string> covered = [.. Backends.HartsyInferenceBackend.DeclaredFeatures, .. T2IEngine.DisregardedFeatureFlags];
         foreach (T2IParamType type in T2IParamTypes.Types.Values)
         {
-            if (type.Group != HartsyInferenceParamGroup || string.IsNullOrEmpty(type.FeatureFlag))
+            if (string.IsNullOrEmpty(type.FeatureFlag)
+                || !type.FeatureFlag.Split(',').Any(f => f.StartsWith("hartsy", StringComparison.Ordinal)))
             {
                 continue;
             }
