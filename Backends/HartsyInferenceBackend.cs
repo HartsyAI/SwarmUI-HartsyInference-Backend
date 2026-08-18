@@ -144,6 +144,12 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         "variation_seed", // per-family; gated by ImageFeatures.VariationSeed
         "seamless",       // SeamlessTileable (shared core param, own flag); per-family, gated by ImageFeatures.SeamlessTiling
         "video",          // Wan (T2V/I2V + VACE / Animate / S2V) + LTX-Video + LTX-2 + Lance Video + MiniMax-H3
+        // Model-scoped UI flags. Granted/removed per selected model by Assets/hartsy-params.js; declared here
+        // because a param's flag is a hard requirement at backend-selection time (T2IEngine), so a flag the UI
+        // can set but we don't advertise refuses the generation with a message naming no param.
+        "hartsy_ideogram4",
+        "hartsy_acestep",
+        "hartsy_yue",
     ];
 
     public override IEnumerable<string> SupportedFeatures => DeclaredFeatures;

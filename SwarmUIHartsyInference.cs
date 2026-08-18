@@ -171,6 +171,10 @@ public class SwarmUIHartsyInference : Extension
     {
         Logs.Init("HartsyInference extension init");
 
+        // Model-aware param visibility. "hartsyinference" only means "our backend is running", so without
+        // this every param below shows under every model. See Assets/hartsy-params.js.
+        ScriptFiles.Add("Assets/hartsy-params.js");
+
         // The Comfy extension's Use IP-Adapter dropdown normally populates from a live ComfyUI
         // backend's object_info. When only HartsyInference backends run, populate it from the
         // ipadapter model folder directly (the same folder-listing approach the style-model
@@ -313,7 +317,7 @@ public class SwarmUIHartsyInference : Extension
             // and refusing the Comfy backend (which lacks the flag) — see [[backend feature flags]].
             Toggleable: true,
             Group: Ideogram4ParamGroup,
-            FeatureFlag: "hartsyinference"));
+            FeatureFlag: "hartsyinference,hartsy_ideogram4"));
 
         Ideogram4MagicPromptModelParam = T2IParamTypes.Register<string>(new(
             "Ideogram 4 Magic Prompt LLM",
@@ -321,7 +325,7 @@ public class SwarmUIHartsyInference : Extension
             "",
             Toggleable: true,
             Group: Ideogram4ParamGroup,
-            FeatureFlag: "hartsyinference"));
+            FeatureFlag: "hartsyinference,hartsy_ideogram4"));
 
         // Video Restore (SeedVR2): optional one-step restoration/upscale pass over the generated frames
         // before muxing. The target is an AREA (aspect preserved by the model's bicubic area-resize) —
@@ -392,7 +396,7 @@ public class SwarmUIHartsyInference : Extension
             null,
             Toggleable: true,
             Group: MusicParamGroup,
-            FeatureFlag: "hartsyinference",
+            FeatureFlag: "hartsyinference,hartsy_acestep",
             OrderPriority: 1,
             ChangeWeight: 2));
 
@@ -402,7 +406,7 @@ public class SwarmUIHartsyInference : Extension
             "continuation",
             Toggleable: true,
             Group: MusicParamGroup,
-            FeatureFlag: "hartsyinference",
+            FeatureFlag: "hartsyinference,hartsy_acestep",
             OrderPriority: 2,
             GetValues: _ => new List<string> { "continuation", "repaint", "cover" }));
 
@@ -412,7 +416,7 @@ public class SwarmUIHartsyInference : Extension
             "0", Min: 0, Max: 600, Step: 0.5,
             Toggleable: true,
             Group: MusicParamGroup,
-            FeatureFlag: "hartsyinference",
+            FeatureFlag: "hartsyinference,hartsy_acestep",
             OrderPriority: 3));
 
         MusicRepaintEndParam = T2IParamTypes.Register<double>(new(
@@ -421,7 +425,7 @@ public class SwarmUIHartsyInference : Extension
             "0", Min: 0, Max: 600, Step: 0.5,
             Toggleable: true,
             Group: MusicParamGroup,
-            FeatureFlag: "hartsyinference",
+            FeatureFlag: "hartsyinference,hartsy_acestep",
             OrderPriority: 4));
 
         MusicCoverStrengthParam = T2IParamTypes.Register<double>(new(
@@ -430,7 +434,7 @@ public class SwarmUIHartsyInference : Extension
             "0.5", Min: 0, Max: 1, Step: 0.05,
             Toggleable: true,
             Group: MusicParamGroup,
-            FeatureFlag: "hartsyinference",
+            FeatureFlag: "hartsyinference,hartsy_acestep",
             OrderPriority: 5,
             ViewType: ParamViewType.SLIDER));
 
@@ -441,7 +445,7 @@ public class SwarmUIHartsyInference : Extension
             Toggleable: true,
             IgnoreIf: "none",
             Group: MusicParamGroup,
-            FeatureFlag: "hartsyinference",
+            FeatureFlag: "hartsyinference,hartsy_acestep",
             OrderPriority: 10,
             GetValues: _ => new List<string> { "none", "0.6b", "4b" }));
 
@@ -451,7 +455,7 @@ public class SwarmUIHartsyInference : Extension
             "true",
             Toggleable: true,
             Group: MusicParamGroup,
-            FeatureFlag: "hartsyinference",
+            FeatureFlag: "hartsyinference,hartsy_acestep",
             OrderPriority: 11,
             IsAdvanced: true));
 
@@ -461,7 +465,7 @@ public class SwarmUIHartsyInference : Extension
             "0.85", Min: 0, Max: 2, Step: 0.05,
             Toggleable: true,
             Group: MusicParamGroup,
-            FeatureFlag: "hartsyinference",
+            FeatureFlag: "hartsyinference,hartsy_acestep",
             OrderPriority: 12,
             IsAdvanced: true));
 
@@ -471,7 +475,7 @@ public class SwarmUIHartsyInference : Extension
             "2", Min: 1, Max: 10, Step: 0.5,
             Toggleable: true,
             Group: MusicParamGroup,
-            FeatureFlag: "hartsyinference",
+            FeatureFlag: "hartsyinference,hartsy_acestep",
             OrderPriority: 13,
             IsAdvanced: true));
 
@@ -481,7 +485,7 @@ public class SwarmUIHartsyInference : Extension
             "0", Min: 0, Max: 500, Step: 10,
             Toggleable: true,
             Group: MusicParamGroup,
-            FeatureFlag: "hartsyinference",
+            FeatureFlag: "hartsyinference,hartsy_acestep",
             OrderPriority: 14,
             IsAdvanced: true));
 
@@ -491,7 +495,7 @@ public class SwarmUIHartsyInference : Extension
             "0.9", Min: 0, Max: 1, Step: 0.05,
             Toggleable: true,
             Group: MusicParamGroup,
-            FeatureFlag: "hartsyinference",
+            FeatureFlag: "hartsyinference,hartsy_acestep",
             OrderPriority: 15,
             IsAdvanced: true));
 
@@ -501,7 +505,7 @@ public class SwarmUIHartsyInference : Extension
             "",
             Toggleable: true,
             Group: MusicParamGroup,
-            FeatureFlag: "hartsyinference",
+            FeatureFlag: "hartsyinference,hartsy_acestep",
             OrderPriority: 16,
             IsAdvanced: true,
             ViewType: ParamViewType.PROMPT));
@@ -513,7 +517,7 @@ public class SwarmUIHartsyInference : Extension
             Toggleable: true,
             IgnoreIf: "ode",
             Group: MusicParamGroup,
-            FeatureFlag: "hartsyinference",
+            FeatureFlag: "hartsyinference,hartsy_acestep",
             OrderPriority: 20,
             IsAdvanced: true,
             GetValues: _ => new List<string> { "ode", "sde" }));
@@ -524,7 +528,7 @@ public class SwarmUIHartsyInference : Extension
             "false",
             Toggleable: true,
             Group: MusicParamGroup,
-            FeatureFlag: "hartsyinference",
+            FeatureFlag: "hartsyinference,hartsy_acestep",
             OrderPriority: 21,
             IsAdvanced: true));
 
@@ -534,7 +538,7 @@ public class SwarmUIHartsyInference : Extension
             "0", Min: 0, Max: 1, Step: 0.05,
             Toggleable: true,
             Group: MusicParamGroup,
-            FeatureFlag: "hartsyinference",
+            FeatureFlag: "hartsyinference,hartsy_acestep",
             OrderPriority: 22,
             IsAdvanced: true));
 
@@ -544,7 +548,7 @@ public class SwarmUIHartsyInference : Extension
             "1", Min: 0, Max: 1, Step: 0.05,
             Toggleable: true,
             Group: MusicParamGroup,
-            FeatureFlag: "hartsyinference",
+            FeatureFlag: "hartsyinference,hartsy_acestep",
             OrderPriority: 23,
             IsAdvanced: true));
 
@@ -554,7 +558,7 @@ public class SwarmUIHartsyInference : Extension
             "1", Min: 0, Max: 2, Step: 0.05,
             Toggleable: true,
             Group: MusicParamGroup,
-            FeatureFlag: "hartsyinference",
+            FeatureFlag: "hartsyinference,hartsy_yue",
             OrderPriority: 30,
             IsAdvanced: true));
 
@@ -564,7 +568,7 @@ public class SwarmUIHartsyInference : Extension
             "50", Min: 0, Max: 500, Step: 10,
             Toggleable: true,
             Group: MusicParamGroup,
-            FeatureFlag: "hartsyinference",
+            FeatureFlag: "hartsyinference,hartsy_yue",
             OrderPriority: 31,
             IsAdvanced: true));
 
@@ -574,7 +578,7 @@ public class SwarmUIHartsyInference : Extension
             "0.93", Min: 0, Max: 1, Step: 0.01,
             Toggleable: true,
             Group: MusicParamGroup,
-            FeatureFlag: "hartsyinference",
+            FeatureFlag: "hartsyinference,hartsy_yue",
             OrderPriority: 32,
             IsAdvanced: true));
 
@@ -584,7 +588,7 @@ public class SwarmUIHartsyInference : Extension
             "1.1", Min: 1, Max: 2, Step: 0.05,
             Toggleable: true,
             Group: MusicParamGroup,
-            FeatureFlag: "hartsyinference",
+            FeatureFlag: "hartsyinference,hartsy_yue",
             OrderPriority: 33,
             IsAdvanced: true));
 
