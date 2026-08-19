@@ -59,7 +59,9 @@ public static class ModelClassRegistrations
             CompatClass = T2IModelClassSorter.CompatAceStep15,
             Name = "ACE-Step v1",
             IsThisModelOfClass = (model, header) =>
-                header.ContainsKey("lyric_embs.weight") || header.ContainsKey("model.lyric_embs.weight"),
+                header.ContainsKey("lyric_embs.weight") || header.ContainsKey("model.lyric_embs.weight")
+                // The artifact that actually ships: Comfy-Org/ACE-Step_ComfyUI_repackaged all_in_one.
+                || header.ContainsKey("model.diffusion_model.lyric_embs.weight"),
         });
     }
 
