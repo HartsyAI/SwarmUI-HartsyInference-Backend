@@ -1505,6 +1505,18 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         {
             request = request with { GuidanceType = guidanceType };
         }
+        if (input.TryGet(SwarmUIHartsyInference.AceStepErgTagParam, out bool ergTag))
+        {
+            request = request with { UseErgTag = ergTag };
+        }
+        if (input.TryGet(SwarmUIHartsyInference.AceStepErgLyricParam, out bool ergLyric))
+        {
+            request = request with { UseErgLyric = ergLyric };
+        }
+        if (input.TryGet(SwarmUIHartsyInference.AceStepErgDiffusionParam, out bool ergDiffusion))
+        {
+            request = request with { UseErgDiffusion = ergDiffusion };
+        }
         if (input.TryGet(SwarmUIHartsyInference.AceStepCfgIntervalStartParam, out double cfgStart))
         {
             request = request with { CfgIntervalStart = cfgStart };

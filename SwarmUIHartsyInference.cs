@@ -107,6 +107,7 @@ public class SwarmUIHartsyInference : Extension
     public static T2IRegisteredParam<string> AceStepLmNegativePromptParam;
     public static T2IRegisteredParam<string> AceStepSolverParam;
     public static T2IRegisteredParam<string> AceStepGuidanceTypeParam;
+    public static T2IRegisteredParam<bool> AceStepErgTagParam, AceStepErgLyricParam, AceStepErgDiffusionParam;
     public static T2IRegisteredParam<double> AceStepCfgIntervalStartParam;
     public static T2IRegisteredParam<double> AceStepCfgIntervalEndParam;
     public static T2IRegisteredParam<string> MiniMaxMusicLmPrecisionParam;
@@ -578,6 +579,36 @@ public class SwarmUIHartsyInference : Extension
             Group: AceStepGuidanceGroup,
             FeatureFlag: "hartsyinference,hartsy_acestep",
             OrderPriority: 21,
+            IsAdvanced: true));
+
+        AceStepErgTagParam = T2IParamTypes.Register<bool>(new(
+            "ACE-Step V1 ERG Tag",
+            "ACE-Step v1: entropy-rectifying guidance on the tag branch — the unconditional pass sees a weakened (not zeroed) text encoding. Upstream default is on. v1 checkpoints only.",
+            "true",
+            Toggleable: true,
+            Group: AceStepGuidanceGroup,
+            FeatureFlag: "hartsyinference,hartsy_acestep",
+            OrderPriority: 25,
+            IsAdvanced: true));
+
+        AceStepErgLyricParam = T2IParamTypes.Register<bool>(new(
+            "ACE-Step V1 ERG Lyric",
+            "ACE-Step v1: the unconditional pass keeps the lyrics with a weakened lyric encoder instead of dropping them. Upstream default is on. v1 checkpoints only.",
+            "true",
+            Toggleable: true,
+            Group: AceStepGuidanceGroup,
+            FeatureFlag: "hartsyinference,hartsy_acestep",
+            OrderPriority: 26,
+            IsAdvanced: true));
+
+        AceStepErgDiffusionParam = T2IParamTypes.Register<bool>(new(
+            "ACE-Step V1 ERG Diffusion",
+            "ACE-Step v1: the unconditional diffusion forwards run with weakened attention queries in the middle blocks. Upstream default is on. v1 checkpoints only.",
+            "true",
+            Toggleable: true,
+            Group: AceStepGuidanceGroup,
+            FeatureFlag: "hartsyinference,hartsy_acestep",
+            OrderPriority: 27,
             IsAdvanced: true));
 
         AceStepCfgIntervalStartParam = T2IParamTypes.Register<double>(new(
