@@ -149,7 +149,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         // can set but we don't advertise refuses the generation with a message naming no param.
         "hartsy_ideogram4",
         "hartsy_acestep",
-        "hartsy_yue",
+        "hartsy_minimaxmusic",
         "hartsy_wan_animate",
         "hartsy_audio_ref",
         "hartsy_refedit_choice",
@@ -1501,9 +1501,9 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         {
             request = request with { InferMethod = inferMethod };
         }
-        if (input.TryGet(SwarmUIHartsyInference.AceStepUseAdgParam, out bool useAdg))
+        if (input.TryGet(SwarmUIHartsyInference.AceStepGuidanceTypeParam, out string guidanceType))
         {
-            request = request with { UseAdg = useAdg };
+            request = request with { GuidanceType = guidanceType };
         }
         if (input.TryGet(SwarmUIHartsyInference.AceStepCfgIntervalStartParam, out double cfgStart))
         {
@@ -1512,22 +1512,6 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         if (input.TryGet(SwarmUIHartsyInference.AceStepCfgIntervalEndParam, out double cfgEnd))
         {
             request = request with { CfgIntervalEnd = cfgEnd };
-        }
-        if (input.TryGet(SwarmUIHartsyInference.YueTemperatureParam, out double temperature))
-        {
-            request = request with { Temperature = temperature };
-        }
-        if (input.TryGet(SwarmUIHartsyInference.YueTopKParam, out int topK))
-        {
-            request = request with { TopK = topK };
-        }
-        if (input.TryGet(SwarmUIHartsyInference.YueTopPParam, out double topP))
-        {
-            request = request with { TopP = topP };
-        }
-        if (input.TryGet(SwarmUIHartsyInference.YueRepetitionPenaltyParam, out double repetitionPenalty))
-        {
-            request = request with { RepetitionPenalty = repetitionPenalty };
         }
         return request;
     }
@@ -1756,7 +1740,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
 
     /// <summary>Music models: refuse the image-only knobs that make no sense for an audio output, plus any music
     /// param the selected family would silently ignore. Music has no per-family feature model (no MusicFeatures
-    /// enum), so these are hard-coded per family id — reachable families today: acestep, musicgen, yue.</summary>
+    /// enum), so these are hard-coded per family id — reachable families today: acestep, minimaxmusic3
+    /// (YuE and MusicGen belong to AudioLab, which routes them through its own providers).</summary>
     private static bool ValidateMusic(T2IParamInput input, ModelSupport.Family family)
     {
         if (input.Get(T2IParamTypes.InitImage) is not null)
@@ -1805,7 +1790,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             [
                 (input.TryGet(SwarmUIHartsyInference.AceStepLmPlannerParam, out string lm) && lm != "none", "ACE-Step LM Planner"),
                 (input.TryGet(SwarmUIHartsyInference.AceStepSolverParam, out string im) && im != "ode", "ACE-Step Solver"),
-                (input.TryGet(SwarmUIHartsyInference.AceStepUseAdgParam, out bool adg) && adg, "ACE-Step Use ADG"),
+                (input.TryGet(SwarmUIHartsyInference.AceStepGuidanceTypeParam, out string gt) && gt != "apg", "ACE-Step Guidance Type"),
                 (input.TryGet(SwarmUIHartsyInference.AceStepCfgIntervalStartParam, out double cis) && cis > 0, "ACE-Step CFG Interval Start"),
                 (input.TryGet(SwarmUIHartsyInference.AceStepCfgIntervalEndParam, out double cie) && cie < 1, "ACE-Step CFG Interval End"),
             ];
@@ -1819,24 +1804,12 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 }
             }
         }
-        if (family.Id != "yue")
+        if (family.Id != "minimaxmusic3"
+            && input.TryGet(SwarmUIHartsyInference.MiniMaxMusicLmPrecisionParam, out string precision) && precision != "bf16")
         {
-            (bool Set, string Name)[] yueOnly =
-            [
-                (input.TryGet(SwarmUIHartsyInference.YueTemperatureParam, out double _), "YuE Stage-1 Temperature"),
-                (input.TryGet(SwarmUIHartsyInference.YueTopKParam, out int _), "YuE Stage-1 Top K"),
-                (input.TryGet(SwarmUIHartsyInference.YueTopPParam, out double _), "YuE Stage-1 Top P"),
-                (input.TryGet(SwarmUIHartsyInference.YueRepetitionPenaltyParam, out double _), "YuE Stage-1 Repetition Penalty"),
-            ];
-            foreach ((bool set, string name) in yueOnly)
-            {
-                if (set)
-                {
-                    input.RefusalReasons.Add(
-                        $"HartsyInference: {name} is a YuE sampling knob; '{family.Id}' would silently ignore it. Unset it or pick a YuE model.");
-                    return false;
-                }
-            }
+            input.RefusalReasons.Add(
+                $"HartsyInference: MiniMax Music LM Precision is MiniMax Music 3 only; '{family.Id}' would silently ignore it. Unset it or pick a MiniMax Music 3 model.");
+            return false;
         }
         return true;
     }

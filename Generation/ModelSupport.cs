@@ -99,9 +99,12 @@ public static class ModelSupport
         [T2IModelClassSorter.CompatMiniMaxH3.ID] = new("minimax-h3", Kind.Video),
 
         // ── Music (Engine MusicCatalog descriptor ids) ──
+        // SwarmUI-native music only: core registers ace-step-1_5 and minimax-music-3 as IsAudioModel compat
+        // classes. Every other music family (YuE, MusicGen, …) is AudioLab's domain — its providers drive the
+        // same Engine catalog through their own virtual model classes, so a backend-extension mapping here
+        // would just double-register the family with a poorer param surface.
         ["ace-step-1_5"] = new("acestep", Kind.Music),
-        [ModelClassRegistrations.MusicGenCompatClassId] = new("musicgen", Kind.Music),
-        [ModelClassRegistrations.YueCompatClassId] = new("yue", Kind.Music),
+        [T2IModelClassSorter.CompatMiniMaxMusic3.ID] = new("minimaxmusic3", Kind.Music),
     };
 
     /// <summary>The Engine family for <paramref name="compatClass"/>, or null when this compat class has no mapping
@@ -693,6 +696,14 @@ public static class ModelSupport
             _ => Modality.Image,
         };
         string familyId = Ltx25DistilledFamilyOr(model, family.Id);
+        // MiniMax Music 3: the LM-precision param rides as the selector variant ("minimaxmusic3:q8") — the
+        // engine's descriptor maps it to its GGUF-quantized language-model path.
+        if (familyId == "minimaxmusic3" && input is not null
+            && input.TryGet(SwarmUIHartsyInference.MiniMaxMusicLmPrecisionParam, out string lmPrecision)
+            && lmPrecision is "q8" or "q4")
+        {
+            familyId = $"minimaxmusic3:{lmPrecision}";
+        }
         string localPath = model.RawFilePath;
         if (IsLtx25(model))
         {

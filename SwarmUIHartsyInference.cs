@@ -92,7 +92,7 @@ public class SwarmUIHartsyInference : Extension
     // "Cover Strength"/"LM Top K"/"YuE Temperature" spellings, and a cleaned-name collision in
     // T2IParamTypes.Register crashes SwarmUI at init. "YuE Stage-1" because these drive the Stage-1 LM only.
     // Real nested groups (T2IParamGroup.Parent), the way core nests Video Obscure Options under Advanced Video.
-    public static T2IParamGroup AceStepParamGroup, AceStepEditingGroup, AceStepPlannerGroup, AceStepGuidanceGroup, YueParamGroup;
+    public static T2IParamGroup AceStepParamGroup, AceStepEditingGroup, AceStepPlannerGroup, AceStepGuidanceGroup, MiniMaxMusicGroup;
     public static T2IRegisteredParam<AudioFile> AceStepSourceAudioParam;
     public static T2IRegisteredParam<string> AceStepEditModeParam;
     public static T2IRegisteredParam<double> AceStepRepaintStartParam;
@@ -106,13 +106,10 @@ public class SwarmUIHartsyInference : Extension
     public static T2IRegisteredParam<double> AceStepLmTopPParam;
     public static T2IRegisteredParam<string> AceStepLmNegativePromptParam;
     public static T2IRegisteredParam<string> AceStepSolverParam;
-    public static T2IRegisteredParam<bool> AceStepUseAdgParam;
+    public static T2IRegisteredParam<string> AceStepGuidanceTypeParam;
     public static T2IRegisteredParam<double> AceStepCfgIntervalStartParam;
     public static T2IRegisteredParam<double> AceStepCfgIntervalEndParam;
-    public static T2IRegisteredParam<double> YueTemperatureParam;
-    public static T2IRegisteredParam<int> YueTopKParam;
-    public static T2IRegisteredParam<double> YueTopPParam;
-    public static T2IRegisteredParam<double> YueRepetitionPenaltyParam;
+    public static T2IRegisteredParam<string> MiniMaxMusicLmPrecisionParam;
 
     public override void OnPreInit()
     {
@@ -426,8 +423,8 @@ public class SwarmUIHartsyInference : Extension
             Description: "The 5 Hz LM planner, which plans the song's structure before diffusion runs.");
         AceStepGuidanceGroup = new("ACE-Step Guidance", Toggles: false, Open: false, OrderPriority: 3, IsAdvanced: true,
             Parent: AceStepParamGroup, Description: "Solver and classifier-free-guidance shaping.");
-        YueParamGroup = new("YuE", Toggles: false, Open: false, IsAdvanced: true,
-            Description: "Sampling controls for YuE's Stage-1 language model.");
+        MiniMaxMusicGroup = new("MiniMax Music", Toggles: false, Open: false, IsAdvanced: true,
+            Description: "MiniMax Music 3 controls.");
 
         AceStepSourceAudioParam = T2IParamTypes.Register<AudioFile>(new(
             "ACE-Step Source Audio",
@@ -570,10 +567,13 @@ public class SwarmUIHartsyInference : Extension
             IsAdvanced: true,
             GetValues: _ => new List<string> { "ode", "sde" }));
 
-        AceStepUseAdgParam = T2IParamTypes.Register<bool>(new(
-            "ACE-Step Use ADG",
-            "ACE-Step: use ADG guidance instead of the default APG blend (only matters when CFG > 1 on non-turbo checkpoints).",
-            "false",
+        // Replaced the old "ACE-Step Use ADG" bool: upstream offers three guidance blends and a bool could
+        // only reach two. No ParameterRemaps entry — a preset's "true"/"false" is not a valid enum value
+        // (same reasoning as the deleted Sampler param).
+        AceStepGuidanceTypeParam = T2IParamTypes.Register<string>(new(
+            "ACE-Step Guidance Type",
+            "ACE-Step: guidance blend when CFG > 1 on non-turbo checkpoints. apg (default, momentum-projected), cfg (plain classifier-free), adg.",
+            "apg", GetValues: _ => ["apg", "cfg", "adg"],
             Toggleable: true,
             Group: AceStepGuidanceGroup,
             FeatureFlag: "hartsyinference,hartsy_acestep",
@@ -600,44 +600,13 @@ public class SwarmUIHartsyInference : Extension
             OrderPriority: 23,
             IsAdvanced: true));
 
-        YueTemperatureParam = T2IParamTypes.Register<double>(new(
-            "YuE Stage-1 Temperature",
-            "YuE sampling temperature (ACE-Step and MusicGen ignore this).",
-            "1", Min: 0, Max: 2, Step: 0.05,
-            Toggleable: true,
-            Group: YueParamGroup,
-            FeatureFlag: "hartsyinference,hartsy_yue",
+        MiniMaxMusicLmPrecisionParam = T2IParamTypes.Register<string>(new(
+            "MiniMax Music LM Precision",
+            "Precision for MiniMax Music 3's 8B language model stage: bf16 (checkpoint precision), q8 or q4 (GGUF-quantized, for smaller cards). The flow DiT always runs the selected checkpoint's weights.",
+            "bf16", GetValues: _ => ["bf16", "q8", "q4"],
+            Group: MiniMaxMusicGroup,
+            FeatureFlag: "hartsyinference,hartsy_minimaxmusic",
             OrderPriority: 30,
-            IsAdvanced: true));
-
-        YueTopKParam = T2IParamTypes.Register<int>(new(
-            "YuE Stage-1 Top K",
-            "YuE top-k sampling cutoff.",
-            "50", Min: 0, Max: 500, Step: 10,
-            Toggleable: true,
-            Group: YueParamGroup,
-            FeatureFlag: "hartsyinference,hartsy_yue",
-            OrderPriority: 31,
-            IsAdvanced: true));
-
-        YueTopPParam = T2IParamTypes.Register<double>(new(
-            "YuE Stage-1 Top P",
-            "YuE nucleus sampling cutoff.",
-            "0.93", Min: 0, Max: 1, Step: 0.01,
-            Toggleable: true,
-            Group: YueParamGroup,
-            FeatureFlag: "hartsyinference,hartsy_yue",
-            OrderPriority: 32,
-            IsAdvanced: true));
-
-        YueRepetitionPenaltyParam = T2IParamTypes.Register<double>(new(
-            "YuE Stage-1 Repetition Penalty",
-            "YuE repetition penalty (floored at 1 engine-side).",
-            "1.1", Min: 1, Max: 2, Step: 0.05,
-            Toggleable: true,
-            Group: YueParamGroup,
-            FeatureFlag: "hartsyinference,hartsy_yue",
-            OrderPriority: 33,
             IsAdvanced: true));
 
         // 2. Register the backend type (single type — no _selfstart vs _api split,
@@ -694,10 +663,6 @@ public class SwarmUIHartsyInference : Extension
             ("hartsymusicuseadg", "acestepuseadg"),
             ("hartsymusiccfgintervalstart", "acestepcfgintervalstart"),
             ("hartsymusiccfgintervalend", "acestepcfgintervalend"),
-            ("hartsymusictemperature", "yuestagetemperature"),
-            ("hartsymusictopk", "yuestagetopk"),
-            ("hartsymusictopp", "yuestagetopp"),
-            ("hartsymusicrepetitionpenalty", "yuestagerepetitionpenalty"),
             // Deleted in favour of Comfy's own param. Safe to point at it: same boolean, same meaning, so an old
             // preset's "true"/"false" carries over unchanged. The deleted Sampler param deliberately has NO entry
             // here — it spelled DPM++ 2M as "dpm++2m" where Comfy's dropdown says "dpmpp_2m", so remapping would

@@ -21,7 +21,7 @@ const HartsyParamConfig = {
     exactCompatFlags: {
         'ideogram-4': 'hartsy_ideogram4',
         'ace-step-1_5': 'hartsy_acestep',
-        'yue': 'hartsy_yue',
+        'minimax-music-3': 'hartsy_minimaxmusic',
         // Only family declaring BOTH Img2Img and RefEdit, so the only one where picking a mode is a real
         // choice. RefEdit-only families (Boogu, Mage-Flow, OmniGen2) have nothing to choose between.
         'qwen-image': 'hartsy_refedit_choice',
@@ -139,10 +139,10 @@ const HartsyCoreGating = {
     /**
      * Our music compat classes. Core does not act on the compat class's IsAudioModel flag in JS at all — only
      * AudioLab's own hide-list does, and that is keyed on ITS virtual model classes (acestep_music, yue_music),
-     * not on a checkpoint file's compat class. So picking an ACE-Step/YuE/MusicGen checkpoint still shows
+     * not on a checkpoint file's compat class. So picking an ACE-Step/MiniMax-Music-3 checkpoint still shows
      * Width, Height, Init Image, ControlNet and the rest of the image-only surface.
      */
-    audioArchs: ['ace-step-1_5', 'yue', 'musicgen'],
+    audioArchs: ['ace-step-1_5', 'minimax-music-3'],
 
     /**
      * Image-only core params to hide for those. Deliberately shorter than AudioLab's equivalent list:

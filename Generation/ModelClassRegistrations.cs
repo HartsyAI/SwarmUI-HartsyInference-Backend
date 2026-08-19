@@ -32,15 +32,6 @@ public static class ModelClassRegistrations
     /// <summary>Lance text-to-video model class ID.</summary>
     public const string LanceT2VClassId = "lance-t2v";
 
-    /// <summary>MusicGen compat + model class ID.</summary>
-    public const string MusicGenCompatClassId = "musicgen";
-
-    /// <summary>YuE compat class ID.</summary>
-    public const string YueCompatClassId = "yue";
-
-    /// <summary>YuE stage-1 model class ID.</summary>
-    public const string YueClassId = "yue-s1";
-
     /// <summary>F-Lite compat + model class ID.</summary>
     public const string FLiteCompatClassId = "f-lite";
 
@@ -51,8 +42,8 @@ public static class ModelClassRegistrations
     {
         RegisterAceStepV1();
         RegisterLance();
-        RegisterMusicGen();
-        RegisterYue();
+        // MusicGen and YuE moved to AudioLab ownership (they are not SwarmUI-native music classes); their
+        // compat/model class registrations left with them. Core itself owns ace-step-1_5 and minimax-music-3.
         RegisterFLite();
         // Mage-Flow: core registers the compat class and model class itself, and its class carries this same
         // compat id, so checkpoints it classifies already land on the ModelSupport row. Nothing to add here.
@@ -99,37 +90,7 @@ public static class ModelClassRegistrations
         });
     }
 
-    /// <summary>MusicGen: gen-tab music model (audio params light up via <c>IsAudioModel</c>).</summary>
-    private static void RegisterMusicGen()
-    {
-        T2IModelCompatClass compat = T2IModelClassSorter.RegisterCompat(new() { ID = MusicGenCompatClassId, ShortCode = "MusicGen", IsAudioModel = true, LorasTargetTextEnc = false });
-        T2IModelClassSorter.Register(new T2IModelClass
-        {
-            ID = MusicGenCompatClassId,
-            CompatClass = compat,
-            Name = "MusicGen",
-            IsThisModelOfClass = (model, header) =>
-                header.ContainsKey("enc_to_dec_proj.weight") && header.ContainsKey("lm_heads.0.weight"),
-        });
-    }
 
-    /// <summary>YuE stage-1: folder checkpoint (7B LLaMA layout) named "…yue…".</summary>
-    private static void RegisterYue()
-    {
-        T2IModelCompatClass compat = T2IModelClassSorter.RegisterCompat(new() { ID = YueCompatClassId, ShortCode = "YuE", IsAudioModel = true, LorasTargetTextEnc = false });
-        T2IModelClassSorter.Register(new T2IModelClass
-        {
-            ID = YueClassId,
-            CompatClass = compat,
-            Name = "YuE Stage-1",
-            IsThisModelOfClass = (model, header) =>
-                model?.RawFilePath is not null
-                && Directory.Exists(model.RawFilePath)
-                && model.RawFilePath.Replace('\\', '/').AfterLast('/').ToLowerInvariant().Contains("yue")
-                && header is not null
-                && header.ContainsKey("model.layers.0.self_attn.q_proj.weight"),
-        });
-    }
 
     /// <summary>F-Lite (Freepik 10B): detected by its cross-attention context projection.</summary>
     private static void RegisterFLite()
