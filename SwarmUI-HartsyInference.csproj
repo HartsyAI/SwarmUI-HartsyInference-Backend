@@ -158,9 +158,9 @@
              DiffusionPipelineBase; ImageFeatures.SeamlessTiling now declared by all 25 image recipes).
              The extension's param gating reads ImageFeatures live from the engine, so the Seamless
              Tileable control stays hidden on non-SDXL families until this pin lands.
-             Restore 404s until the engine's alpha.28 publish completes. alpha.28 = variation seed on every image family (blended in DiffusionPipelineBase.TakeOrCreateNoise at each pipeline's own seed shape) — by design, same as the
+             Restore 404s until the engine's alpha.29 publish completes. alpha.29 = masked inpaint for HunyuanImage/Lens/Lance + the bespoke HunyuanImage 2.1 VAE encoder (also makes plain img2img real there). alpha.28 = variation seed on every image family (blended in DiffusionPipelineBase.TakeOrCreateNoise at each pipeline's own seed shape) — by design, same as the
              alpha.4/.5/.10/.11/.17 precedent above: merge and publish the engine FIRST, then this pin. -->
-        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.28" />
+        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.29" />
     </ItemGroup>
 
     <!-- LOCAL ENGINE: prebuilt DLLs from the HartsyInference Cli bin (its full runtime closure). Referenced
