@@ -1288,6 +1288,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             InitImage = initImage is null || initDrives ? null : ToEngineImage(initImage),
             DrivingVideo = initDrives ? ToVideoClip(initImage) : null,
             DrivingPoseVideo = poseVideo is null ? null : ToVideoClip(poseVideo),
+            DrivingBackgroundVideo = input.Get(SwarmUIHartsyInference.AnimateBackgroundVideoParam) is Image bg ? ToVideoClip(bg) : null,
+            DrivingMaskVideo = input.Get(SwarmUIHartsyInference.AnimateMaskVideoParam) is Image maskVid ? ToVideoClip(maskVid) : null,
             DrivingFaceVideo = faceVideo is null ? null : ToVideoClip(faceVideo),
             DrivingAutoPreprocess = input.Get(SwarmUIHartsyInference.AnimateAutoPreprocessParam, true),
             VideoModel = ModelPath(input.Get(T2IParamTypes.VideoModel)),

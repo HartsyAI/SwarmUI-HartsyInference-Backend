@@ -59,6 +59,8 @@ public class SwarmUIHartsyInference : Extension
     public static T2IRegisteredParam<bool> AnimateAutoPreprocessParam;
     public static T2IRegisteredParam<Image> AnimatePoseVideoParam;
     public static T2IRegisteredParam<Image> AnimateFaceVideoParam;
+    public static T2IRegisteredParam<Image> AnimateBackgroundVideoParam;
+    public static T2IRegisteredParam<Image> AnimateMaskVideoParam;
 
     // CFG-Rescale is registered here rather than reading Comfy's "Rescale CFG Multiplier" because the two
     // compute different things: CfgHelper.ApplyCfgRescale rescales the per-token last-dim L2 norm, Comfy's
@@ -249,6 +251,26 @@ public class SwarmUIHartsyInference : Extension
         AnimateFaceVideoParam = T2IParamTypes.Register<Image>(new(
             "Animate Face Video",
             "Wan-Animate: an already-cropped, face-centered driving video (square, ~512px) for the facial-motion branch.\nOverrides auto-preprocessing for the face branch.",
+            null,
+            Toggleable: true,
+            Group: WanAnimateParamGroup,
+            FeatureFlag: "hartsyinference,hartsy_wan_animate",
+            ChangeWeight: 2,
+            DependNonDefault: AnimateReferenceImageParam.Type.ID));
+
+        AnimateBackgroundVideoParam = T2IParamTypes.Register<Image>(new(
+            "Animate Background Video",
+            "Wan-Animate replacement mode: the background video the character is composited into.\nThe conditioning carries these frames instead of the mid-gray placeholder, so unmasked regions keep this background.",
+            null,
+            Toggleable: true,
+            Group: WanAnimateParamGroup,
+            FeatureFlag: "hartsyinference,hartsy_wan_animate",
+            ChangeWeight: 2,
+            DependNonDefault: AnimateReferenceImageParam.Type.ID));
+
+        AnimateMaskVideoParam = T2IParamTypes.Register<Image>(new(
+            "Animate Character Mask",
+            "Wan-Animate replacement mode: per-frame mask video (white = generate the character there, black = keep the background).\nA single image repeats across all frames.",
             null,
             Toggleable: true,
             Group: WanAnimateParamGroup,
