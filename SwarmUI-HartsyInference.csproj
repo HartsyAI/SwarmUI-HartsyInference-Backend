@@ -152,13 +152,15 @@
                  skipped with a named warning instead of being handed to backend.Add.
              Restore 404s until the engine's alpha.17 publish lands — by design (alpha.4/.5/.10/.11 precedent):
              merge the engine bump FIRST, then this pin. -->
-        <!-- 2.0.0-alpha.26 = seamless tiling on every image family (BeginSeamlessTiling on
+        <!-- 2.0.0-alpha.26 shipped the seamless-tiling rollout but 18 of 25 families dropped the flag in
+             their hand-built inner requests (silent no-op); 2.0.0-alpha.27 forwards it everywhere and is the
+             version verified end-to-end (Flux wrap-ratio 3.78 -> 1.24). Original note: seamless tiling on every image family (BeginSeamlessTiling on
              DiffusionPipelineBase; ImageFeatures.SeamlessTiling now declared by all 25 image recipes).
              The extension's param gating reads ImageFeatures live from the engine, so the Seamless
              Tileable control stays hidden on non-SDXL families until this pin lands.
-             Restore 404s until the engine's alpha.26 publish completes — by design, same as the
+             Restore 404s until the engine's alpha.27 publish completes — by design, same as the
              alpha.4/.5/.10/.11/.17 precedent above: merge and publish the engine FIRST, then this pin. -->
-        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.26" />
+        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.27" />
     </ItemGroup>
 
     <!-- LOCAL ENGINE: prebuilt DLLs from the HartsyInference Cli bin (its full runtime closure). Referenced
