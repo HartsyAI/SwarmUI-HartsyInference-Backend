@@ -1095,6 +1095,9 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         return new Refiner
         {
             Model = refinerModel.RawFilePath,
+            // Swarm knows every model's family from its compat class; the engine's own header sniff only covers
+            // the classic single-file architectures. This is what lets ANY model act as a refiner generically.
+            FamilyId = ModelSupport.Resolve(refinerModel.ModelClass?.CompatClass?.ID)?.Id,
             Vae = ModelPath(input.Get(T2IParamTypes.RefinerVAE)),
             Method = input.Get(T2IParamTypes.RefinerMethod, null),
             Control = input.TryGet(T2IParamTypes.RefinerControl, out double control) ? control : null,
@@ -1919,6 +1922,31 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         if (!ValidateSamplerChoice(input, family))
         {
             return false;
+        }
+        // A refiner MODEL must come from a family whose recipe can consume an init image — that is the PostApply
+        // hand-off. Refusing here names the model; the engine-side check would surface as a mid-generation error.
+        if (input.Get(T2IParamTypes.RefinerModel) is T2IModel refModel && refModel is not null)
+        {
+            ModelSupport.Family refFamily = ModelSupport.Resolve(refModel.ModelClass?.CompatClass?.ID);
+            // The classic SDXL refiner checkpoint is the internal pair; it has no Img2Img bit but is fully handled.
+            bool isSdxlRefinerClass = refModel.ModelClass?.CompatClass?.ID == "stable-diffusion-xl-v1-refiner";
+            if (!isSdxlRefinerClass)
+            {
+                if (refFamily is null || refFamily.Kind != ModelSupport.Kind.Image)
+                {
+                    input.RefusalReasons.Add(
+                        $"HartsyInference: refiner model '{refModel.Name}' has no image-family mapping, so it can't run a refine pass.");
+                    return false;
+                }
+                ImageFeatures refFeatures = ModelSupport.SupportedFeatures(refModel.ModelClass?.CompatClass?.ID);
+                if ((refFeatures & (ImageFeatures.Img2Img | ImageFeatures.RefEdit)) == 0)
+                {
+                    input.RefusalReasons.Add(
+                        $"HartsyInference: '{refModel.Name}' ({refFamily.Id}) can't be a refiner — its recipe has no "
+                        + "img2img path to consume the base image with. Pick a model whose family supports Init Image.");
+                    return false;
+                }
+            }
         }
         ImageFeatures supported = ModelSupport.SupportedFeatures(compat);
         List<(ImageFeatures Feature, string Name, bool Requested)> checks =
