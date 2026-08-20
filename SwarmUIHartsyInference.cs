@@ -58,6 +58,8 @@ public class SwarmUIHartsyInference : Extension
     public static T2IRegisteredParam<SwarmUI.Media.AudioFile> VideoAudioReferenceParam;
     public static T2IRegisteredParam<bool> AnimateAutoPreprocessParam;
     public static T2IRegisteredParam<Image> AnimatePoseVideoParam;
+    public static T2IRegisteredParam<int> AnimateTotalFramesParam;
+    public static T2IRegisteredParam<int> AnimateMotionContextFramesParam;
     public static T2IRegisteredParam<Image> AnimateFaceVideoParam;
     public static T2IRegisteredParam<Image> AnimateBackgroundVideoParam;
     public static T2IRegisteredParam<Image> AnimateMaskVideoParam;
@@ -272,6 +274,29 @@ public class SwarmUIHartsyInference : Extension
             "Animate Character Mask",
             "Wan-Animate replacement mode: per-frame mask video (white = generate the character there, black = keep the background).\nA single image repeats across all frames.",
             null,
+            Toggleable: true,
+            Group: WanAnimateParamGroup,
+            FeatureFlag: "hartsyinference,hartsy_wan_animate",
+            ChangeWeight: 2,
+            DependNonDefault: AnimateReferenceImageParam.Type.ID));
+
+        // Chunked extension (ComfyUI WanAnimateToVideo continue_motion): the video is generated as successive
+        // Video Frames-long chunks, each conditioned on the tail of the one before it. Total Frames is the only
+        // control a user needs; the context length is the fidelity/cost knob and stays at the reference default.
+        AnimateTotalFramesParam = T2IParamTypes.Register<int>(new(
+            "Animate Total Frames",
+            "Wan-Animate: total length of the finished video, generated as back-to-back chunks of 'Video Frames' each.\nLeave off (or at or below Video Frames) for a single chunk. Every chunk after the first re-renders and discards a short motion-context prefix, so the driving video must be at least this long — a shorter one freezes on its last frame.",
+            "0", Min: 0, Max: 2048, Step: 4,
+            Toggleable: true,
+            Group: WanAnimateParamGroup,
+            FeatureFlag: "hartsyinference,hartsy_wan_animate",
+            ChangeWeight: 2,
+            DependNonDefault: AnimateReferenceImageParam.Type.ID));
+
+        AnimateMotionContextFramesParam = T2IParamTypes.Register<int>(new(
+            "Animate Motion Context Frames",
+            "Wan-Animate: how many frames of the previous chunk each new chunk sees as motion context, which is what keeps the seams continuous.\n5 (default) is the reference value. Higher holds continuity better and costs that many re-rendered frames per chunk; values are snapped down onto the 4n+1 grid (1, 5, 9, 13, ...).",
+            "5", Min: 1, Max: 61, Step: 4,
             Toggleable: true,
             Group: WanAnimateParamGroup,
             FeatureFlag: "hartsyinference,hartsy_wan_animate",

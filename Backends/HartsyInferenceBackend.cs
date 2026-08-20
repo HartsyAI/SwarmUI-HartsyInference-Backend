@@ -1292,6 +1292,11 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             DrivingMaskVideo = input.Get(SwarmUIHartsyInference.AnimateMaskVideoParam) is Image maskVid ? ToVideoClip(maskVid) : null,
             DrivingFaceVideo = faceVideo is null ? null : ToVideoClip(faceVideo),
             DrivingAutoPreprocess = input.Get(SwarmUIHartsyInference.AnimateAutoPreprocessParam, true),
+            // 0 / unset / at-or-below the chunk length all mean "one chunk" — the engine floors the total at the
+            // resolved chunk length, so this can only ever add chunks, never truncate a normal generation.
+            AnimateTotalFrames = input.TryGet(SwarmUIHartsyInference.AnimateTotalFramesParam, out int animateTotal)
+                && animateTotal > 0 ? animateTotal : null,
+            AnimateContinueMotionFrames = input.Get(SwarmUIHartsyInference.AnimateMotionContextFramesParam, 5),
             VideoModel = ModelPath(input.Get(T2IParamTypes.VideoModel)),
             VideoSwapModel = ModelPath(input.Get(T2IParamTypes.VideoSwapModel)),
             // Untouched slider = auto: Swarm sends group params whenever the group is open, so the 0.5 default must
