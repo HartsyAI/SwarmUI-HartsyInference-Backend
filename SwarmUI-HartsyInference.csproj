@@ -160,7 +160,10 @@
              Tileable control stays hidden on non-SDXL families until this pin lands.
              Restore 404s until the engine's alpha.32 publish completes. alpha.32 = Qwen-Image ControlNet (InstantX ControlNet-Union; canny/depth/pose/soft-edge via one union checkpoint). alpha.31 = LoRA on ten more image families (loud zero-match refusal, kohya/bare + ComfyBflDit formats, fused-QKV slice fallback, GGUF merge refusal). alpha.30 = the generic refiner stage (any image model refines any base via pixel hand-off; Refiner.FamilyId carries Swarm's compat-class knowledge). alpha.29 = masked inpaint for HunyuanImage/Lens/Lance + the bespoke HunyuanImage 2.1 VAE encoder (also makes plain img2img real there). alpha.28 = variation seed on every image family (blended in DiffusionPipelineBase.TakeOrCreateNoise at each pipeline's own seed shape) — by design, same as the
              alpha.4/.5/.10/.11/.17 precedent above: merge and publish the engine FIRST, then this pin. -->
-        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.32" />
+        <!-- 2.0.0-alpha.33 = the sampler/scheduler pass (Add schedulers, "more scheduler work", "even more
+             sampler work") plus the Wan VAE streamed encode and the Wan-Animate-2 driving-cache reservation
+             that makes 480x800x41f fit on a single card. -->
+        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.33" />
     </ItemGroup>
 
     <!-- LOCAL ENGINE: prebuilt DLLs from the HartsyInference Cli bin (its full runtime closure). Referenced
