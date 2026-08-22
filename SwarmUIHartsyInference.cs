@@ -60,6 +60,7 @@ public class SwarmUIHartsyInference : Extension
     public static T2IRegisteredParam<Image> AnimatePoseVideoParam;
     public static T2IRegisteredParam<int> AnimateTotalFramesParam;
     public static T2IRegisteredParam<int> AnimateMotionContextFramesParam;
+    public static T2IRegisteredParam<double> AnimateColorCorrectionParam;
     public static T2IRegisteredParam<Image> AnimateFaceVideoParam;
     public static T2IRegisteredParam<Image> AnimateBackgroundVideoParam;
     public static T2IRegisteredParam<Image> AnimateMaskVideoParam;
@@ -297,6 +298,16 @@ public class SwarmUIHartsyInference : Extension
             "Animate Motion Context Frames",
             "Wan-Animate: how many frames of the previous chunk each new chunk sees as motion context, which is what keeps the seams continuous.\n5 (default) is the reference value. Higher holds continuity better and costs that many re-rendered frames per chunk; values are snapped down onto the 4n+1 grid (1, 5, 9, 13, ...).",
             "5", Min: 1, Max: 61, Step: 4,
+            Toggleable: true,
+            Group: WanAnimateParamGroup,
+            FeatureFlag: "hartsyinference,hartsy_wan_animate",
+            ChangeWeight: 2,
+            DependNonDefault: AnimateReferenceImageParam.Type.ID));
+
+        AnimateColorCorrectionParam = T2IParamTypes.Register<double>(new(
+            "Animate Color Correction",
+            "Wan-Animate chunked generation: strength of the per-chunk color correction. Each chunk after the first is color-matched (Lab mean/std) to the reference image, so color drift cannot compound across chunks.\n1 (default) = fully matched, 0 = off. Only multi-chunk (Total Frames) generations are affected — the first chunk is never touched.",
+            "1", Min: 0, Max: 1, Step: 0.05,
             Toggleable: true,
             Group: WanAnimateParamGroup,
             FeatureFlag: "hartsyinference,hartsy_wan_animate",

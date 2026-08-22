@@ -1297,6 +1297,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             AnimateTotalFrames = input.TryGet(SwarmUIHartsyInference.AnimateTotalFramesParam, out int animateTotal)
                 && animateTotal > 0 ? animateTotal : null,
             AnimateContinueMotionFrames = input.Get(SwarmUIHartsyInference.AnimateMotionContextFramesParam, 5),
+            AnimateColorCorrection = input.TryGet(SwarmUIHartsyInference.AnimateColorCorrectionParam, out double animateColorFix)
+                ? animateColorFix : null,
             VideoModel = ModelPath(input.Get(T2IParamTypes.VideoModel)),
             VideoSwapModel = ModelPath(input.Get(T2IParamTypes.VideoSwapModel)),
             // Untouched slider = auto: Swarm sends group params whenever the group is open, so the 0.5 default must
