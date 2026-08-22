@@ -61,6 +61,8 @@ public class SwarmUIHartsyInference : Extension
     public static T2IRegisteredParam<int> AnimateTotalFramesParam;
     public static T2IRegisteredParam<int> AnimateMotionContextFramesParam;
     public static T2IRegisteredParam<double> AnimateColorCorrectionParam;
+    public static T2IRegisteredParam<double> AnimatePoseStrengthParam;
+    public static T2IRegisteredParam<double> AnimateReferenceStrengthParam;
     public static T2IRegisteredParam<Image> AnimateFaceVideoParam;
     public static T2IRegisteredParam<Image> AnimateBackgroundVideoParam;
     public static T2IRegisteredParam<Image> AnimateMaskVideoParam;
@@ -308,6 +310,26 @@ public class SwarmUIHartsyInference : Extension
             "Animate Color Correction",
             "Wan-Animate chunked generation: strength of the per-chunk color correction. Each chunk after the first is color-matched (Lab mean/std) to the reference image, so color drift cannot compound across chunks.\n1 (default) = fully matched, 0 = off. Only multi-chunk (Total Frames) generations are affected — the first chunk is never touched.",
             "1", Min: 0, Max: 1, Step: 0.05,
+            Toggleable: true,
+            Group: WanAnimateParamGroup,
+            FeatureFlag: "hartsyinference,hartsy_wan_animate",
+            ChangeWeight: 2,
+            DependNonDefault: AnimateReferenceImageParam.Type.ID));
+
+        AnimatePoseStrengthParam = T2IParamTypes.Register<double>(new(
+            "Animate Pose Strength",
+            "Wan-Animate-2: how strongly the driving video's motion steers the generation (ComfyUI pose_strength) — above 1 over-drives the motion, below 1 under-drives it, and 0 does not fully mute the driving branch.\n1 (default) is the trained behaviour. This is a deliberate stylization knob, NOT a fix for washed-out or hazy output — that comes from running a checkpoint at the wrong steps/CFG, not from strength.\nAnimate-2 checkpoints only; Wan-Animate V1 refuses a non-default value.",
+            "1", Min: 0, Max: 2, Step: 0.05,
+            Toggleable: true,
+            Group: WanAnimateParamGroup,
+            FeatureFlag: "hartsyinference,hartsy_wan_animate",
+            ChangeWeight: 2,
+            DependNonDefault: AnimateReferenceImageParam.Type.ID));
+
+        AnimateReferenceStrengthParam = T2IParamTypes.Register<double>(new(
+            "Animate Reference Strength",
+            "Wan-Animate-2: how strongly the character reference image is attended (ComfyUI reference_image_strength) — above 1 weights identity harder, below 1 loosens it.\n1 (default) is the trained behaviour. This is a deliberate stylization knob, NOT a fix for washed-out or hazy output — that comes from running a checkpoint at the wrong steps/CFG, not from strength.\nAnimate-2 checkpoints only; Wan-Animate V1 refuses a non-default value.",
+            "1", Min: 0, Max: 2, Step: 0.05,
             Toggleable: true,
             Group: WanAnimateParamGroup,
             FeatureFlag: "hartsyinference,hartsy_wan_animate",
