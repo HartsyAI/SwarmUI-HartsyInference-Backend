@@ -52,9 +52,9 @@ The honest pattern is therefore a **two-layer** one:
    refuses — and cleanly routes to a Comfy backend — any comfyui-tagged param actually set that we
    can't service. The guard iterates the params present on the request, and refuses any
    `"comfyui"`-flagged one that isn't in a small allow-list of params we genuinely honor
-   (`HonoredComfyParams`): Sampler, Scheduler, Refiner Sampler/Scheduler, Refiner Upscale
-   Method, the FLUX.1 Redux style-model strengths (merge/multiply/apply-start), and the
-   IP-Adapter scheduling knobs (weight/start/end/weight-type) — mapped onto the engine's
+   (`HonoredComfyParams`): Sampler, Scheduler, Use TCFG, the FLUX.1 Redux style-model
+   strengths (merge/multiply/apply-start), and the IP-Adapter scheduling knobs
+   (weight/start/end/weight-type) — mapped onto the engine's
    `redux.*` / `ipadapter.*` Extra keys respectively. Custom-workflow IR (`comfyworkflowraw` /
    `comfyuicustomworkflow`) is refused explicitly. So advertising `"comfyui"` does **not**
    mean "we silently serve everything Comfy-tagged."
@@ -241,7 +241,7 @@ How a request routes when both backends exist:
 | Plain gen, model only HartsyInference has (e.g. nvfp4 Ideogram) | HartsyInference (model-availability filter) |
 | Plain gen, model both backends have | Either — load-balanced. Pin one with the **Backend Type** or **Exact Backend ID** advanced params |
 | Custom ComfyUI workflow, or any comfyui-only param we can't run | Comfy (our `IsValidForThisBackend` guard refuses and routes there) |
-| Sampler / Scheduler / Refiner sampler set, Redux style-model strengths, IP-Adapter scheduling knobs | Either — we honor these (`HonoredComfyParams` allow-list) |
+| Sampler / Scheduler set, Redux style-model strengths, IP-Adapter scheduling knobs | Either — we honor these (`HonoredComfyParams` allow-list). A sampler or schedule the selected family cannot run is refused by `ValidateSamplingChoice` and routes to Comfy |
 
 Two invariants make this work:
 

@@ -163,7 +163,14 @@
         <!-- 2.0.0-alpha.33 = the sampler/scheduler pass (Add schedulers, "more scheduler work", "even more
              sampler work") plus the Wan VAE streamed encode and the Wan-Animate-2 driving-cache reservation
              that makes 480x800x41f fit on a single card. -->
-        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.33" />
+        <!-- 2.0.0-alpha.34 = the sampler selection actually REACHING the pipelines. alpha.33 shipped the seam but
+             22 of 26 image recipe pipelines never assigned Scheduler on their inner request, so every flow-match
+             family silently ran Euler and the refuse-by-name guards (Wan/LTX/Ideogram 4) never saw the string.
+             Also adds SamplingCapabilities (the per-family sampler/schedule table this extension queries in
+             ValidateSamplingChoice and serves to the gen-page script) and VideoRequest.Scheduler.
+             Restore 404s until the engine's alpha.34 publish completes — by design, same precedent as above:
+             merge and publish the engine FIRST, then this pin. -->
+        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.34" />
     </ItemGroup>
 
     <!-- LOCAL ENGINE: prebuilt DLLs from the HartsyInference Cli bin (its full runtime closure). Referenced

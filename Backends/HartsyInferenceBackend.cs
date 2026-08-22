@@ -586,6 +586,14 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             {
                 throw new SwarmReadableErrorException(DescribeVramFailure(only, family));
             }
+            catch (NotSupportedException unsupported)
+            {
+                // Backstop for a sampler/schedule refusal ValidateSamplingChoice did not pre-empt. Three families
+                // accept a selection on text-to-image but not on a secondary path (Boogu's reference-edit loop,
+                // OmniGen 2's edit loop, Flux.1's non-drain-free path), which is a per-REQUEST property the
+                // capability table cannot express. Surfacing the Engine's own message beats an unhandled throw.
+                throw new SwarmUserErrorException($"HartsyInference: {unsupported.Message}");
+            }
 
             long totalMs = Environment.TickCount64 - startMs;
             int idx = 0;
@@ -904,11 +912,12 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             SeamlessTiling = input.TryGet(T2IParamTypes.SeamlessTileable, out string seamless) ? seamless : null,
             Seed = input.Get(T2IParamTypes.Seed, -1L),
             ClipSkip = NullableInt(input, T2IParamTypes.ClipStopAtLayer),
-            // Comfy's shared Sampler param. Only SD 1.5 / SDXL read it (Sd15/SdxlRecipePipeline); the flow-match
-            // families use their canonical schedule. ValidateSamplerChoice refuses a value the engine can't map,
-            // rather than letting SamplingParamResolver silently fall back to Euler.
+            // Comfy's shared Sampler and Scheduler params, read as the two orthogonal selections they are — the
+            // Engine combines them (dpmpp_2m + karras => dpmpp_2m_karras) and every seam-carrying family honors both.
+            // ValidateSamplingChoice refuses a value this backend cannot run BEFORE generation, so Swarm can route
+            // that request to a Comfy backend instead of failing it.
             Sampler = input.Get(ComfyUIBackendExtension.SamplerParam, null),
-            Scheduler = null, // the Engine resolves the family's canonical schedule; Comfy's Scheduler param has no analogue
+            Scheduler = input.Get(ComfyUIBackendExtension.SchedulerParam, null),
             SigmaShift = input.TryGet(T2IParamTypes.SigmaShift, out double shift) ? shift : null,
             EndStepsEarly = input.TryGet(T2IParamTypes.EndStepsEarly, out double endEarly) ? endEarly : null,
             InstructPix2PixCfg = input.TryGet(T2IParamTypes.IP2PCFG2, out double ip2p) ? ip2p : null,
@@ -1285,6 +1294,10 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             CfgScale = input.TryGet(T2IParamTypes.VideoCFG, out double videoCfg) ? (float)videoCfg
                 : input.TryGet(T2IParamTypes.CFGScale, out double baseCfg) ? (float)baseCfg : null,
             Seed = input.Get(T2IParamTypes.Seed, -1L),
+            // Same two orthogonal selections as the image path. The video families that cannot honor them refuse by
+            // name in the Engine; ValidateSamplingChoice catches that here first so the request can route instead.
+            Sampler = input.Get(ComfyUIBackendExtension.SamplerParam, null),
+            Scheduler = input.Get(ComfyUIBackendExtension.SchedulerParam, null),
             InitImage = initImage is null || initDrives ? null : ToEngineImage(initImage),
             DrivingVideo = initDrives ? ToVideoClip(initImage) : null,
             DrivingPoseVideo = poseVideo is null ? null : ToVideoClip(poseVideo),
@@ -1655,35 +1668,70 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     /// read any of them — StepSwap shares the base loop's scheduler by construction (no independent refiner
     /// sampler/scheduler exists to honor), and upscale-method has no consumer until hires-fix ships. Re-add
     /// <c>refinerupscalemethod</c> only once a real consumer exists.</summary>
-    /// <summary>The sampler names <c>SamplingParamResolver.MapSamplerName</c> can actually map. Comfy's Sampler
-    /// dropdown offers roughly thirty; everything outside this set resolves to Euler with only a Verbose log, so a
-    /// user who picks "dpmpp_3m_sde" would silently get Euler. Refuse instead — and route to a Comfy backend, which
-    /// can service the choice.</summary>
-    private static readonly HashSet<string> MappableSamplers =
-        ["euler", "ddim", "dpm++2m", "dpmpp_2m", "dpmpp2m", "lcm", "tcd"];
-
-    /// <summary>Refuses a sampler this engine cannot honor, but only for the two families that read one at all —
-    /// SD 1.5 and SDXL (<c>Sd15RecipePipeline</c> / <c>SdxlRecipePipeline</c> are its only consumers). The
-    /// flow-matching families use their canonical schedule and ignore the param, so refusing there would block a
-    /// perfectly valid Flux generation over a setting that has no effect on it.</summary>
-    private static bool ValidateSamplerChoice(T2IParamInput input, ModelSupport.Family family)
+    /// <summary>Refuses a sampler or sigma schedule the selected family cannot run, for EVERY family rather than the
+    /// SD pair this used to cover.
+    ///
+    /// <para>The allow-list this replaces was a hard-coded five names checked only on sd15/sdxl/sdxl-refiner, on the
+    /// reasoning that the flow-match families ignored the param anyway. They no longer do: the Engine's sampler seam
+    /// spans 25 pipelines, and the families that still cannot honor a selection (Wan's UniPC, LTX, Ideogram 4,
+    /// Lumina2, Lance image) now throw <see cref="NotSupportedException"/> from inside the pipeline. Catching that
+    /// mid-generation would be strictly worse than what came before, because a Comfy backend CAN serve those values —
+    /// so this refuses before generation and lets Swarm route the request there instead.</para>
+    ///
+    /// <para>Asked of the Engine rather than hard-coded, the same way <see cref="ModelSupport.SupportedFeatures"/>
+    /// asks the recipe registry, so the answer cannot drift from the pipeline that will actually run.</para></summary>
+    private static bool ValidateSamplingChoice(T2IParamInput input, ModelSupport.Family family)
     {
-        if (family.Id is not ("sd15" or "sdxl" or "sdxl-refiner"))
+        input.TryGet(ComfyUIBackendExtension.SamplerParam, out string sampler);
+        input.TryGet(ComfyUIBackendExtension.SchedulerParam, out string schedule);
+        bool wantsSampler = !string.IsNullOrWhiteSpace(sampler);
+        // "normal" is the identity schedule — the Engine treats it as no selection, so neither should this.
+        bool wantsSchedule = !string.IsNullOrWhiteSpace(schedule)
+            && !string.Equals(schedule, "normal", StringComparison.OrdinalIgnoreCase);
+        if (!wantsSampler && !wantsSchedule)
         {
             return true;
         }
-        if (!input.TryGet(ComfyUIBackendExtension.SamplerParam, out string sampler) || string.IsNullOrWhiteSpace(sampler))
+
+        SamplingCapabilities.SamplingSupport support = family.Kind == ModelSupport.Kind.Video
+            ? SamplingCapabilities.ForVideo(family.Id)
+            : SamplingCapabilities.ForImage(family.Id);
+        if (support.Samplers.Count == 0 && support.Schedules.Count == 0)
         {
-            return true;
+            input.RefusalReasons.Add(
+                $"HartsyInference: {family.Id} samples with its own solver and takes no sampler or scheduler "
+                + "selection. Leave both unset, or use a ComfyUI backend for this generation.");
+            return false;
         }
-        if (MappableSamplers.Contains(sampler.ToLowerInvariant()))
+        if (wantsSampler && !support.Samplers.Contains(sampler, StringComparer.OrdinalIgnoreCase))
         {
-            return true;
+            input.RefusalReasons.Add(
+                $"HartsyInference: the '{sampler}' sampler isn't available on {family.Id} (it has "
+                + $"{string.Join(", ", support.Samplers)}). Pick one of those, or use a ComfyUI backend.");
+            return false;
         }
-        input.RefusalReasons.Add(
-            $"HartsyInference: the '{sampler}' sampler isn't implemented by this backend (it has euler, ddim, "
-            + "dpm++2m, lcm and tcd). Pick one of those, or use a ComfyUI backend for this generation.");
-        return false;
+        if (wantsSchedule && !support.Schedules.Contains(schedule, StringComparer.OrdinalIgnoreCase))
+        {
+            string available = support.Schedules.Count == 0
+                ? $"{family.Id} owns its own sigma spacing"
+                : $"it has {string.Join(", ", support.Schedules)}";
+            input.RefusalReasons.Add(
+                $"HartsyInference: the '{schedule}' scheduler isn't available on {family.Id} ({available}). "
+                + "Use a ComfyUI backend for this generation.");
+            return false;
+        }
+        // A re-spaced schedule cannot be combined with img2img or inpaint on any family: the init latent is noised at
+        // the family's own sigma[startStep], so the sampler would start from a noise level the latent does not carry.
+        // The Engine refuses this too; refusing here keeps it routable rather than a mid-generation throw.
+        if (wantsSchedule && (input.Get(T2IParamTypes.InitImage) is not null || input.Get(T2IParamTypes.MaskImage) is not null))
+        {
+            input.RefusalReasons.Add(
+                $"HartsyInference: the '{schedule}' scheduler can't be combined with an init image or mask — the init "
+                + "latent is noised at the model's own sigma, so a re-spaced schedule would start from the wrong "
+                + "noise level. Drop the scheduler, or use a ComfyUI backend.");
+            return false;
+        }
+        return true;
     }
 
     private static readonly HashSet<string> HonoredComfyParams =
@@ -1843,6 +1891,10 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     /// VideoService rejects a LoRA stack outright), and a refiner over an encoded clip is meaningless.</summary>
     private static bool ValidateVideo(T2IParamInput input, string compat, ModelSupport.Family family)
     {
+        if (!ValidateSamplingChoice(input, family))
+        {
+            return false;
+        }
         // Init/end-frame conditioning is per-family. Without this check the Engine used to accept the image and
         // silently generate text-to-video, which looks like a working generation and is not. Checkpoint-aware:
         // Wan's Animate/VACE/S2V variants share the family compat classes (header-sniffed engine-side).
@@ -1917,7 +1969,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     /// <see cref="IArchitectureRecipe.Supports"/>, so it can never claim more than the Engine will really apply.</summary>
     private static bool ValidateImageFeatures(T2IParamInput input, string compat, ModelSupport.Family family)
     {
-        if (!ValidateSamplerChoice(input, family))
+        if (!ValidateSamplingChoice(input, family))
         {
             return false;
         }

@@ -31,17 +31,20 @@ upstream (waiting on HartsyInference.Core).
 
 ## Production push (active order)
 
-- [x] **P1 — Sampler + clip skip.** `SamplerParam` (now Comfy's shared "Sampler" param:
-  euler/ddim/dpm++2m/lcm) routes through `SchedulerFactory` for SD 1.5 / SDXL;
-  flow-match architectures (Flux, SD3, Z-Image, …) ignore it by design. Clip
-  skip reads Swarm's `T2IParamTypes.ClipStopAtLayer` straight into
-  `ImageRequest.ClipSkip` — no separate upstream param was needed. Scheduler
-  *type* selection (karras / exponential / …) was never in scope: the request
-  builder sends `Scheduler = null` with the comment "the Engine resolves the
-  family's canonical schedule; Comfy's Scheduler param has no analogue" — this
-  stays a real, permanent gap, not a TODO. Batch size > 1 is the same kind of
-  gap: `Batch = 1` always, with "Swarm drives batching itself: one Generate
-  call per image" — there is no latent-batched generation path.
+- [x] **P1 — Sampler + scheduler + clip skip.** Comfy's shared `Sampler` AND
+  `Scheduler` params are both read and sent, as the two orthogonal selections
+  they are; the Engine combines them (`dpmpp_2m` + `karras` →
+  `dpmpp_2m_karras`). 9 samplers × 9 sigma schedules across every seam-carrying
+  family. Clip skip reads Swarm's `T2IParamTypes.ClipStopAtLayer` straight into
+  `ImageRequest.ClipSkip` — no separate upstream param was needed.
+  **Retracted (2026-08-22):** this entry previously called scheduler-type
+  selection "a real, permanent gap, not a TODO", on the strength of the
+  `Scheduler = null` comment at the request-builder call site. That was wrong —
+  it described a wiring omission, not a limit. Engine alpha.34 threads the
+  selection to every recipe and `SamplingCapabilities` reports per family what
+  is accepted. Batch size > 1 IS still a genuine gap: `Batch = 1` always, with
+  "Swarm drives batching itself: one Generate call per image" — there is no
+  latent-batched generation path.
 - [ ] **P2 — Hires fix / 2-pass upscale (`RefinerUpscale != 1`).** The value
   is read (`Refiner.Upscale`) and passed through, but `SdxlRecipePipeline`
   logs a warning and ignores it — StepSwap keeps the base latent resolution.
@@ -148,14 +151,18 @@ upstream (waiting on HartsyInference.Core).
 
 ## Tier 2 — Sampling / quality
 
-- [!] **Scheduler-type selection (karras / exponential / …) and batch-size >
-  1** — both are permanent gaps stated at the request-builder call site, not
-  TODOs: the Engine resolves each family's own canonical schedule (no
-  Comfy-Scheduler analogue), and Swarm drives batching itself with one
-  `Generate` call per image (no latent-batched path). See P1.
-- [ ] **Per-arch sampler & scheduler defaults registry** — declare allowed
-  (sampler, scheduler) pairs per arch in `ModelSupport.cs` so Swarm's UI
-  surfaces the right options.
+- [x] **Scheduler-type selection (karras / exponential / …)** — done in engine
+  alpha.34. The "permanent gap" claim here was a misreading of a wiring
+  omission; see the retraction in P1.
+- [!] **Batch size > 1** — still a real gap, and unlike the above it is a
+  missing capability rather than missing wiring: there is no latent-batched
+  generation path, so `Batch = 1` always.
+- [x] **Per-arch sampler & scheduler registry** — `SamplingCapabilities` in the
+  Engine (not `ModelSupport.cs`: the answer has to come from the same place the
+  pipelines live or it drifts from them). `ValidateSamplingChoice` refuses an
+  unrunnable pick pre-generation so Swarm routes it to Comfy, and
+  `HartsyInferenceGetSupportedArchs` serves the per-arch lists to the gen-page
+  script, which hides both controls on the families that take no selection.
 - [ ] **CFG Rescaling / RenormCFG / CFGZeroStar / TCFG** — guidance-math
   variants, each a small loop tweak.
   ([Comfy ref: `WorkflowGeneratorSteps.cs:177-210`](../../../BuiltinExtensions/ComfyUIBackend/WorkflowGeneratorSteps.cs#L177-L210))

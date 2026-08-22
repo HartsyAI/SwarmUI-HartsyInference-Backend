@@ -6,6 +6,7 @@ using SwarmUI.Text2Image;
 using SwarmUI.Utils;
 using SwarmUI.WebAPI;
 using Hartsy.Extensions.HartsyInferenceBackend.Generation;
+using HartsyInference.Engine.Recipes;
 // The class name collides with the trailing namespace segment, so alias it explicitly.
 using SiBackend = Hartsy.Extensions.HartsyInferenceBackend.Backends.HartsyInferenceBackend;
 
@@ -56,10 +57,12 @@ public static class HartsyInferenceWebAPI
         await Task.CompletedTask;
         JArray supported = [];
         JObject features = [];
+        JObject sampling = [];
         foreach (string arch in ModelSupport.SupportedArchitectures)
         {
             supported.Add(arch);
             features[arch] = DescribeFeatures(arch);
+            sampling[arch] = DescribeSampling(arch);
         }
         JObject pending = [];
         foreach (KeyValuePair<string, string> kv in ModelSupport.PendingArchitectures)
@@ -72,7 +75,34 @@ public static class HartsyInferenceWebAPI
             ["supported"] = supported,
             ["pending"] = pending,
             ["features"] = features,
+            ["sampling"] = sampling,
         };
+    }
+
+    /// <summary>The sampler and sigma-schedule names one architecture accepts, as
+    /// <c>{ "samplers": [...], "schedulers": [...] }</c>. Empty arrays mean the family samples with its own solver
+    /// and takes no selection — which is what the gen-page script hides the Sampler/Scheduler controls on, so a user
+    /// on Wan or LTX is not offered a dropdown whose every value would be refused.</summary>
+    private static JObject DescribeSampling(string arch)
+    {
+        ModelSupport.Family family = ModelSupport.Resolve(arch);
+        SamplingCapabilities.SamplingSupport support = family?.Kind switch
+        {
+            ModelSupport.Kind.Video => SamplingCapabilities.ForVideo(family.Id),
+            ModelSupport.Kind.Image => SamplingCapabilities.ForImage(family.Id),
+            _ => SamplingCapabilities.Unknown,
+        };
+        JArray samplers = [];
+        foreach (string name in support.Samplers)
+        {
+            samplers.Add(name);
+        }
+        JArray schedulers = [];
+        foreach (string name in support.Schedules)
+        {
+            schedulers.Add(name);
+        }
+        return new JObject { ["samplers"] = samplers, ["schedulers"] = schedulers };
     }
 
     /// <summary>The declared feature names for one compat class as a lowercase array. Video families are described

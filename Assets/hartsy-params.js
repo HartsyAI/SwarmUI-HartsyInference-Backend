@@ -137,6 +137,13 @@ const HartsyCoreGating = {
     featuresByArch: null,
 
     /**
+     * compat class -> { samplers: [...], schedulers: [...] }. Populated from the backend alongside featuresByArch.
+     * Empty arrays mean the family samples with its own solver and refuses any selection (Wan's UniPC, LTX,
+     * Ideogram 4, Lumina2, Lance image), so offering the dropdown would offer only values that get refused.
+     */
+    samplingByArch: null,
+
+    /**
      * Our music compat classes. Core does not act on the compat class's IsAudioModel flag in JS at all — only
      * AudioLab's own hide-list does, and that is keyed on ITS virtual model classes (acestep_music, yue_music),
      * not on a checkpoint file's compat class. So picking an ACE-Step/MiniMax-Music-3 checkpoint still shows
@@ -178,6 +185,21 @@ const HartsyCoreGating = {
         return !map[compatClass].includes(feature);
     },
 
+    /**
+     * True when this arch takes no sampler/scheduler selection at all. Unknown arch => don't touch anything, same
+     * rule as lacks(). Only the "takes nothing" case hides: a family with a RESTRICTED list (Wan-Animate's unipc)
+     * keeps the control visible, because the server-side refusal names the value it does accept, which is more
+     * useful than a missing control.
+     */
+    takesNoSampler(compatClass) {
+        let map = this.samplingByArch;
+        if (!map || !compatClass || !(compatClass in map)) {
+            return false;
+        }
+        let entry = map[compatClass];
+        return entry.samplers.length == 0 && entry.schedulers.length == 0;
+    },
+
     /** True when this param sits in (or under) one of the groups hidden for audio models. */
     inHiddenGroup(param) {
         for (let group = param.group; group; group = group.parent) {
@@ -204,6 +226,9 @@ const HartsyCoreGating = {
         }
         if (!hartsyIsOnlyOption) {
             return false;
+        }
+        if (param.id == 'sampler' || param.id == 'scheduler') {
+            return this.takesNoSampler(compatClass);
         }
         let needed = this.requires[param.id];
         return needed ? this.lacks(compatClass, needed) : false;
@@ -256,6 +281,7 @@ const HartsyCoreGating = {
                 return;
             }
             this.featuresByArch = data.features;
+            this.samplingByArch = data.sampling || null;
             reviseBackendFeatureSet();
         }, 0, () => { /* backend not up yet; the next backends-revised callback retries */ });
     },
