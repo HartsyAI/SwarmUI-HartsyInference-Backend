@@ -110,7 +110,8 @@ HTTP API (`/v1/native/restore`); an AudioLab-style tab for it here is TODO.
 
 ### Cross-cutting features
 
-Working: prompt/negative/CFG/steps/seed, sampler selection (SD1.5/SDXL) + clip
+Working: prompt/negative/CFG/steps/seed, sampler + scheduler selection (every
+seam-carrying family; solver-owned families refuse by name) + clip
 skip (SD1.5), EndStepsEarly, img2img creativity (incl. Flux.2), inpaint masks
 (+grow/blur), variation seed (SD1.5/SDXL/Flux), **`<segment:yolo->` auto-refinement
 (SDXL/Flux/SD3, pure-C# YOLO)**, multi-LoRA with strengths, SDXL refiner (PostApply
@@ -344,7 +345,12 @@ inference engine. What's implemented today:
 - **Backends:** `IBackend` (eager execution) implemented for **CPU** (AVX/SIMD), **CUDA** (PTX via Driver API P/Invoke), and **Vulkan** (FP16 compute shaders)
 - **Diffusion pipelines:** SD 1.5, SDXL (+ inpaint, + refiner), SD3, Flux, Flux.2, AuraFlow, Chroma, Z-Image, Anima, HiDream, Qwen-Image, HunyuanImage, ErnieImage, F-Lite, Lumina 2, OmniGen 2, Lens, Kandinsky 5, **Ideogram 4** (dual-DiT asymmetric CFG)
 - **Video pipelines:** Wan 2.2 TI2V-5B, LTX-Video
-- **Schedulers:** Euler, DDIM, DPM++ 2M, LCM, FlowMatch Euler/DMD/UniPC, logit-normal (Ideogram 4)
+- **Samplers:** euler, euler_ancestral, heun, dpm_2, dpm_2_ancestral, lms, dpmpp_2s_ancestral, dpmpp_2m,
+  dpmpp_2m_sde — plus the legacy DDIM / LCM / TCD paths on the SD family
+- **Sigma schedules:** normal, karras, exponential, sgm_uniform, simple, ddim_uniform, beta, kl_optimal,
+  linear_quadratic. Combined with the sampler (`dpmpp_2m` + `karras`), exactly as ComfyUI spells it
+- **Solver-owned families** (no selection accepted): Wan (UniPC), LTX-1/2, Ideogram 4 (logit-normal),
+  Lumina2 and Lance image (fused CFG combines), MiniMax-H3
 - **Text encoders:** CLIP-L/G, CLIP-Vision (IPA), T5-XXL, LlamaStyle (Qwen3 / Qwen3-VL-8B / Mistral / Llama 3.1), GPT-OSS
 - **Tokenizers:** CLIP, T5, Whisper, Qwen3
 - **Adapters:** LoRA stack with per-component application, ControlNet (SDXL + SD1.5 + union-type ProMax + FLUX-DiT), IP-Adapter standard/Plus/Plus-Face/FaceID/FaceID-Plus/FaceID-PlusV2
