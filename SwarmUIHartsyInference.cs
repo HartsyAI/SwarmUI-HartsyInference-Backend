@@ -214,11 +214,12 @@ public class SwarmUIHartsyInference : Extension
         //    Everything either lives in the matching core group or in a group named for the model family.
         WanAnimateParamGroup = new("Wan Animate", Toggles: true, Open: false,
             Description: "Wan-Animate conditioning: the character image to animate, plus optional pre-rendered "
-                + "pose/face driving clips. The Init Image slot carries the driving video.");
+                + "pose/face driving clips. The Init Image slot carries the driving video. The character image can "
+                + "also just be attached to the prompt box (the same carrier core uses for Wan reference images).");
 
         AnimateReferenceImageParam = T2IParamTypes.Register<Image>(new(
             "Animate Reference Image",
-            "Wan-Animate: the character/identity image to animate.\nThe Init Image slot carries the driving (pose/motion) video; this image is who performs that motion.\nRequired for Wan-Animate generations on the HartsyInference backend.",
+            "Wan-Animate: the character/identity image to animate.\nThe Init Image slot carries the driving (pose/motion) video; this image is who performs that motion.\nAn image attached to the prompt box works too, matching how core's ComfyUI backend carries Wan reference images; this param wins if both are set.\nRequired (one way or the other) for Wan-Animate generations on the HartsyInference backend.",
             null,
             Toggleable: true,
             Group: WanAnimateParamGroup,

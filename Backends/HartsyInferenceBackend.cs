@@ -1272,6 +1272,28 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         RefuseIncompatibleH3Conditioning(input, initImage, endFrame);
         Dictionary<string, object> extra = new(StringComparer.Ordinal);
         Image reference = input.Get(SwarmUIHartsyInference.AnimateReferenceImageParam);
+        // Comfy-backend parity: core's carrier for a Wan character/subject reference is the prompt-attached image
+        // list (WorkflowGenerator feeds PromptImages to WanPhantomSubjectToVideo), so an image dropped on the
+        // prompt box is the Animate character reference here too. The explicit param wins when both are given.
+        bool isAnimate = IsWanAnimate(input);
+        if (isAnimate && input.TryGet(T2IParamTypes.PromptImages, out List<Image> animateRefs) && animateRefs is { Count: > 0 })
+        {
+            if (animateRefs.Count > 1)
+            {
+                throw new SwarmUserErrorException(
+                    $"Wan-Animate takes a single character reference image, but {animateRefs.Count} images are "
+                    + "attached to the prompt. Remove the extras (or use the Animate Reference Image param).");
+            }
+            if (reference is null)
+            {
+                reference = animateRefs[0];
+            }
+            else
+            {
+                Logs.Warning("[HartsyInference] Both the Animate Reference Image param and a prompt-attached image "
+                    + "are set; the param wins and the prompt-attached image is ignored.");
+            }
+        }
         if (reference is not null)
         {
             extra[HartsyInference.Engine.Recipes.Video.WanAnimateRecipePipeline.ReferenceImageKey] = ToEngineImage(reference);
@@ -1335,7 +1357,9 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             VideoEndFrame = endFrame is null ? null : ToEngineImage(endFrame),
             VideoAudioInput = ToAudioClip(input.Get(T2IParamTypes.VideoAudioInput)),
             VideoAudioReference = ToAudioClip(input.Get(SwarmUIHartsyInference.VideoAudioReferenceParam)),
-            ReferenceImages = BuildReferenceImages(input),
+            // On Animate checkpoints the prompt-attached image was consumed above as the character reference;
+            // passing it through here too would trip the engine's feature gate (Wan claims no ReferenceImages).
+            ReferenceImages = isAnimate ? null : BuildReferenceImages(input),
             ReferenceVideos = BuildReferenceVideos(input),
             ReferenceAudios = BuildReferenceAudios(input),
             Frames = frames,
@@ -1410,6 +1434,17 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     /// <summary>Whether the selected model is any LTX-2.x (2, 2.3 or 2.5 — they share core's compat class).</summary>
     private static bool IsLtxVideo2(T2IParamInput input) =>
         input.Get(T2IParamTypes.Model)?.ModelClass?.CompatClass?.ID == T2IModelClassSorter.CompatLtxv2.ID;
+
+    /// <summary>Whether the selected checkpoint is Wan-Animate or Wan-Animate-2. Animate shares Wan's compat
+    /// classes, so this goes through the engine's header-sniffed variant detection — only the Animate variants
+    /// claim <see cref="VideoFeatures.DrivingVideo"/>.</summary>
+    private static bool IsWanAnimate(T2IParamInput input)
+    {
+        T2IModel model = input.Get(T2IParamTypes.Model);
+        string compat = model?.ModelClass?.CompatClass?.ID;
+        return compat is not null && compat.StartsWith("wan-2", StringComparison.Ordinal)
+            && (ModelSupport.SupportedVideoFeatures(compat, model.RawFilePath) & VideoFeatures.DrivingVideo) != 0;
+    }
 
     /// <summary>Reference media caps the model was trained under, mirroring what the reference node accepts.</summary>
     private const int MaxRefImages = 9, MaxRefAudios = 3, MaxRefVideos = 3;
@@ -1914,18 +1949,22 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         bool hasRefImages = input.TryGet(T2IParamTypes.PromptImages, out List<Image> refImgs) && refImgs is { Count: > 0 };
         bool hasRefAudios = input.TryGet(T2IParamTypes.PromptAudios, out List<AudioFile> refAuds) && refAuds is { Count: > 0 };
         bool hasRefVideos = input.TryGet(T2IParamTypes.PromptVideos, out List<VideoFile> refVids) && refVids is { Count: > 0 };
+        // On an Animate checkpoint a prompt-attached image is the character reference (BuildVideoRequest consumes
+        // it as such, mirroring core's PromptImages-as-Wan-reference convention), not a ReferenceImages request.
+        bool animateCheckpoint = compat.StartsWith("wan-2", StringComparison.Ordinal) && (videoSupported & VideoFeatures.DrivingVideo) != 0;
         (VideoFeatures Feature, string Name, bool Requested)[] videoChecks =
         [
             (VideoFeatures.InitImage, "image-to-video (Init Image)", input.Get(T2IParamTypes.InitImage) is not null),
             (VideoFeatures.EndFrame, "end-frame conditioning (Video End Image)", GetVideoEndImage(input) is not null),
-            (VideoFeatures.ReferenceImages, "reference images (attached to the prompt)", hasRefImages),
+            (VideoFeatures.ReferenceImages, "reference images (attached to the prompt)", hasRefImages && !animateCheckpoint),
             (VideoFeatures.ReferenceVideos, "reference videos (attached to the prompt)", hasRefVideos),
             (VideoFeatures.ReferenceAudios, "reference audio (attached to the prompt, or Video Audio Reference)",
                 hasRefAudios || input.Get(SwarmUIHartsyInference.VideoAudioReferenceParam) is not null),
             (VideoFeatures.DrivingVideo, "Wan-Animate driving (Animate Reference Image / Pose Video / Face Video)",
                 input.Get(SwarmUIHartsyInference.AnimateReferenceImageParam) is not null
                 || input.Get(SwarmUIHartsyInference.AnimatePoseVideoParam) is not null
-                || input.Get(SwarmUIHartsyInference.AnimateFaceVideoParam) is not null),
+                || input.Get(SwarmUIHartsyInference.AnimateFaceVideoParam) is not null
+                || (animateCheckpoint && hasRefImages)),
         ];
         foreach ((VideoFeatures feature, string name, bool requested) in videoChecks)
         {
