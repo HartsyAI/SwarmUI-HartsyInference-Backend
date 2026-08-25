@@ -1,415 +1,261 @@
-# SwarmUI HartsyInference Backend
-
-> **Status:** Working beta, broadly verified. The model fleet has been verified
-> end-to-end with real weights (57 architectures across image/video/audio via
-> coordinated verification passes), and a sustained performance campaign now has
-> **three image models generating faster than ComfyUI on the same GPU** (RTX 4090,
-> identical request through the SwarmUI API): Z-Image-Turbo 2.95s vs 3.1s,
-> Krea2-Turbo 4.50s vs 6.5s, Qwen-Image 40.9s vs 54.8s. Video is live in production
-> (Wan 2.x T2V/I2V/VACE/Animate/S2V, LTX incl. LTX-2 with audio, HunyuanVideo,
-> Kandinsky-5). Img2img, inpaint, LoRA, refiner (verified live), ControlNet
-> (SDXL + SD1.5 + union-type + FLUX-DiT, full in-engine preprocessor set incl.
-> segmentation), IP-Adapter (standard/Plus/Plus-Face/FaceID/FaceID-PlusV2),
-> FLUX.1 Kontext/Fill/Canny/Depth/Redux, GGUF checkpoints, live previews, and
-> cancellation all work. Remaining gaps are tracked in [Known limitations](#known-limitations), the
-> [parity punchlist](./docs/11-Comfy-Parity-Punchlist.md), and the engine's
-> [benchmark log](https://github.com/HartsyAI/HartsyInference/blob/main/benchmarks/results/).
-
-## What this is
-
-A SwarmUI backend extension that runs Stable Diffusion / FLUX / SDXL / etc. inference
-**entirely in C#** through the [HartsyInference](#hartsyinference) library — no Python,
-no ComfyUI, no external process required.
-
-The long-term goal is to **replace ComfyUI as the default SwarmUI backend** while
-preserving full feature parity (see [`docs/11-Comfy-Parity-Punchlist.md`](./docs/11-Comfy-Parity-Punchlist.md)).
-
-## Why
-
-ComfyUI is excellent, but the way it's wired into Swarm has costs:
-
-- **Python runtime + venv:** large install, slow startup, version drift on `torch` / `xformers` / CUDA.
-- **Two processes:** Swarm (C#) talks HTTP/WebSocket to a separate Comfy process; every generation round-trips JSON + image bytes across that boundary.
-- **Workflow JSON as IR:** Swarm builds a Comfy workflow graph, ships it across, Comfy interprets it. Translation overhead and a fragile contract (a Comfy node rename can break Swarm).
-- **Custom-node sprawl:** users have to install `ComfyUI_IPAdapter_plus`, `was-node-suite-comfyui`, etc. piecemeal.
-
-A pure-C# backend in-process means: one binary, one model loader, one cache, no IPC,
-and direct access to Swarm's image/parameter/cache types.
-
-## What works today
-
-### Architectures
-
-All benchmark times are end-to-end wall clock through the SwarmUI API — the identical
-request routed to the ComfyUI backend, then this backend, on the same GPU. Warm median
-of 3 runs, randomized seeds, outputs visually verified. "—" = no same-configuration
-ComfyUI baseline recorded yet.
-
-#### Image models (1024×1024)
-
-| Model | Compat IDs | Status | Steps | Hartsy | ComfyUI | GPU |
-|---|---|---|---:|---:|---:|---|
-| Z-Image (Turbo, Base) | `z-image` | ✅ Verified | 8 | **2.95 s** | 3.1 s | RTX 4090 |
-| Krea 2 (Turbo, Base) | `krea-2` | ✅ Verified | 8 | **4.50 s** | 6.5 s | RTX 4090 |
-| Flux.1 Schnell | `flux-1` | ✅ Verified | 4 | 10.5 s | — | RTX 4090 |
-| Flux.2 Klein 4B | `flux-2-klein-4b` | ✅ Verified | 10 | 15.1 s | — | RTX 4090 |
-| Ideogram 4 (9.3B dual-DiT) | `ideogram-4` | ✅ Verified (≥22 GB VRAM; non-commercial license) | 20 | 19.5 s | 17.0 s | RTX 4090 |
-| Flux.1 Dev / Krea / Canny / Kontext | `flux-1` | ✅ Verified (grind ongoing — was 72.4 s) | 20 | 31.0 s | 12.5 s | RTX 4090 |
-| AuraFlow v0.2/v0.3 | `auraflow-v1` | ✅ e2e; perf round queued | 20 | 31.4 s | 14.0 s | RTX 4090 |
-| SDXL + official Refiner | `stable-diffusion-xl-v1` | ✅ Verified incl. live refiner (scheduler-op work queued) | 20 | 33.0 s | 3.7 s | RTX 4090 |
-| Qwen-Image (20B, GGUF) | `qwen-image` | ✅ Verified | 20 | **40.9 s** | 54.8 s | RTX 4090 |
-| ERNIE-Image (8B fp8) | `ernie-image` | ✅ Verified (grind queued) | 20 | 50.6 s | 24.0 s | RTX 4090 |
-| Chroma V1 | `chroma` | ✅ Verified (grind ongoing — was 550 s) | 20 | 63.2 s | 16.6 s | RTX 4090 |
-| SD 1.5 / SD 3 / 3.5 | `stable-diffusion-v1`, `-v3*` | ✅ Verified (fleet pass) | — | not benched | — | — |
-| Boogu (Base/Turbo/Edit) | `boogu` | ✅ e2e (needs current Swarm core for detection) | — | not benched | — | — |
-| Flux.2 Dev (32B, Q4 GGUF) | `flux-2` | 🔧 Loader GGUF branch in progress | — | — | — | — |
-| HiDream-I1 | `hidream-i1` | 🔧 Correctness debug in progress | — | — | — | — |
-| Chroma Radiance / Zeta, F-Lite, Anima, OmniGen2, Lumina2 | various | ✅ e2e (fleet pass) / 🔧 detection pending (OmniGen2, Lumina2) | — | not benched | — | — |
-
-#### Video models
-
-| Model | Compat IDs | Status | Hartsy | ComfyUI | GPU |
-|---|---|---|---:|---:|---|
-| Wan 2.1 T2V 14B | `wan-21-14b` | ✅ Verified in production | **37 s** | ~30.6 s (1.2×) | RTX 4090 |
-| Wan 2.2 TI2V-5B | `wan-22-5b` | ✅ Verified in production | 22 s | — | RTX 4090 |
-| Wan 2.1 T2V 1.3B | `wan-2_1-*` | ✅ Verified in production | 17 s | — | RTX 4090 |
-| Wan VACE / Animate / S2V / I2V | `wan-*` | ✅ Verified (control-video, driving-video, speech→video) | — | — | RTX 4090 |
-| LTX-2.3 (with audio) | LTX-2 | ✅ Verified in production | 57–105 s | — | RTX 4090 |
-| LTX-2.5 (with audio) | LTX-2 | ⚠️ Wired, awaiting first real generation | — | — | RTX 4090 |
-| LTX-Video 0.9 | `lightricks-ltx-video` | ✅ Verified | — | — | RTX 4090 |
-| HunyuanVideo 13B | `hunyuan-video` | ✅ Verified (1.29 s/step) | — | — | RTX 4090 |
-| Kandinsky-5 T2V | `kandinsky-5` | ✅ Verified (0.83 s/step) | — | — | RTX 4090 |
-
-Per-architecture features (LoRA, img2img, inpaint, IP-Adapter, ControlNet, Kontext
-reference images, FPS/format/boomerang/trim for video) are listed in
-[Cross-cutting features](#cross-cutting-features) and the
-[parity punchlist](./docs/11-Comfy-Parity-Punchlist.md).
-
-Every published number is reproducible: methodology, request parameters, and the
-living scoreboard are in the engine's
-[Performance Guide](https://github.com/HartsyAI/HartsyInference/blob/main/docs/PERFORMANCE.md);
-per-round narratives live in `benchmarks/results/`. The numbers require no
-configuration — the engine's standard performance profile is default-on
-(see [Performance out of the box](#performance-out-of-the-box)).
-
-### Video Restore (SeedVR2) — new in alpha.6
-
-The **Video Restore** param group (advanced, feature-flagged `hartsyinference`) runs ByteDance's
-SeedVR2 one-step restoration over generated video frames before muxing — upscale, deartifact,
-denoise in a single extra DiT pass, in-process (no container round-trip). Toggle **Video Restore
-Model** on (`seedvr2-3b` default; `seedvr2-7b` registered) and optionally set Target Width/Height
-(an AREA — aspect is preserved by the model's bicubic area-resize; there is no scale factor),
-Clip Frames / Overlap (VRAM chunking; fp32 720p-area needs ~5 on 24 GB), and Strength (<1 keeps
-the input's low-frequency band — the oversharpening guard for lightly-degraded input). The engine
-port is parity-verified against the Python reference at SSIM 0.9995; ground-truth behavior is the
-paper's generative profile (repaints detail: LPIPS improves 26–28% while pixel-metrics prefer
-bicubic). Generate small, restore up. Engine-side docs: `docs/Research/SEEDVR2_ARCHITECTURE.md`
-and `docs/Checklists/MODEL_STATUS_VIDEO.md` in the HartsyInference repo. Standalone
-restore-an-existing-file (outside a generation) ships in the engine CLI (`hartsy restore`) and
-HTTP API (`/v1/native/restore`); an AudioLab-style tab for it here is TODO.
-
-### Cross-cutting features
-
-Working: prompt/negative/CFG/steps/seed, sampler + scheduler selection (every
-seam-carrying family; solver-owned families refuse by name) + clip
-skip (SD1.5), EndStepsEarly, img2img creativity (incl. Flux.2), inpaint masks
-(+grow/blur), variation seed (SD1.5/SDXL/Flux), **`<segment:yolo->` auto-refinement
-(SDXL/Flux/SD3, pure-C# YOLO)**, multi-LoRA with strengths, SDXL refiner (PostApply
-any base, StepSwap SDXL), IP-Adapter standard/Plus/Plus-Face **+ FaceID + FaceID-Plus/PlusV2**
-with weight types + step gating (SDXL + SD1.5, real-weight verified 07-16/17), ControlNet
-stacking + start/end windows (SDXL + SD1.5; Canny / Depth-Anything-V2 / OpenPose / HED-softedge /
-scribble / lineart / normal / **segmentation** preprocessors, LDM + diffusers checkpoint layouts),
-**union-type SDXL ControlNet** (xinsir controlnet-union ProMax, per-slot control-type dropdown) and
-**FLUX DiT ControlNet** (union + single-mode, contour-locked live-verified 07-17), FLUX.1 Kontext /
-Fill / Canny / Depth / Redux (all verified e2e 07-16/17), **GGUF Flux transformers**,
-Wan/LTX video with FPS/format/boomerang/trim, **Wan VACE control-video** (pose/depth/edge
-clip → guided video), **Wan Animate** (driving video → character animation), **Wan S2V**
-(speech audio → talking video), ACE-Step music, TAESD or latent2rgb
-live previews, mid-gen cancel, FreeMemory, **multi-GPU** (one backend per GPU for parallel
-generations, PLUS single-model sharding/placement across cards — see
-[Multi-GPU: sharding & placement](#multi-gpu-sharding--placement)),
-**admin WebAPI** (probe-model / list-pipelines / device-info / clear-cache).
-
-Not yet — needs upstream HartsyInference engine work first (Category B): hires-fix
-2-pass upscale + ESRGAN (tiled VaeEncoder + upscaler), guidance variants
-(FreeU/SAG/PAG/NAG/RescaleCFG/CFGZero★), LoRA on SD3/Z-Image/Flux.2, SAM2
-segment targets, seamless tiling, batch>1, variation seed on SD3,
-FP4 (Flux.2 Klein 9B / Ideogram nf4), union-type segment/tile/repaint control types
-(raw-map pass-through wired; dedicated preprocessing pending). (Since shipped — see the
-architecture table: CLIP-Seg text segments, Wan 14B, the lineart/softedge/normal/**segmentation**
-ControlNet preprocessors, **Flux-DiT ControlNet**, union-type SDXL ControlNet, **IP-Adapter
-FaceID + FaceID-Plus/PlusV2**, and Qwen-Image-Edit.)
-
-Not planned for v1: workflow editor, textual-inversion embeddings, full InstantID
-pipeline (IP-Adapter FaceID covers the identity-transfer case), rembg, face restore,
-TensorRT. TTS/STT (engine has Whisper/Bark/
-Kokoro/F5/CosyVoice/etc) is deferred pending a Swarm UI surface for voice/
-reference inputs — the current audio params are music-only.
-
-## Performance out of the box
-
-The engine's **standard performance profile** (cuDNN fused flash attention, fp8 tensor-core GEMM on
-Ada+, F16 DiT activations, resident DiT weights, warm activation pool) is **default-on inside the
-engine** — the extension configures nothing, and every install reproduces the published benchmark
-times (several flagship image models faster than ComfyUI on the same GPU). Features degrade
-gracefully on hardware that can't run them and each has a `HARTSY_<FEATURE>=0` kill-switch. The
-authoritative specification — feature table, cuDNN/cuBLAS requirements and resolution order,
-verification log lines, benchmark methodology — is the engine's
-[Performance Guide](https://github.com/HartsyAI/HartsyInference/blob/main/docs/PERFORMANCE.md);
-see also [docs/07-Parameters-And-Feature-Flags.md](docs/07-Parameters-And-Feature-Flags.md).
-
-## How memory management works (current architecture)
-
-The default backend runs Flux fp8 (~11.3 GB of weights) on a 12 GB GPU through a
-combination of three techniques. All of these auto-engage based on detected VRAM —
-the user never touches a flag.
-
-1. **Per-block streaming** of transformer weights (`BlockStreamingController`).
-   Only `prefetchAhead+1` blocks live on GPU at any moment; the rest stay on host RAM
-   and are uploaded just-in-time on a side stream while the main stream computes.
-   Resident weight footprint during denoising: ~600 MB instead of 11.3 GB.
-
-2. **F16 GEMM path** for fp8 weights (`ResolveGemmDtype(input, weight)` resolves to
-   F16 whenever fp8 is in play). Halves the per-Linear cast workspace and runs the
-   GEMM on Ampere Tensor Cores. Critical fix vs the original F32 path which
-   exploded the cast buffer to 151 MB per Linear.
-
-3. **Tiled VAE decode** (`VaeDecoder.DecodeTiled`). Slices the latent into
-   64-latent / 512-RGB tiles with 64-pixel RGB blend overlap. Decodes each tile
-   independently, then blends overlapping regions with a tent-function weight mask.
-   Caps the worst-case `im2col` workspace at ~2.4 GB per tile (F32) regardless of
-   final resolution. Without this, Flux's VAE at 1024² needed a single 9.7 GB conv
-   workspace.
-
-The OOM-retry path in `CudaMemory.Allocate` provides self-healing: if a sync alloc
-fails, drain both streams + trim the device mempool, then retry. You may see
-`[Warning] [CudaMemory] OOM on first attempt` lines in the log during VAE decode —
-that's normal under tight memory and the retry is recovering.
-
-## Running on multiple GPUs
-
-Setup mirrors the ComfyUI backend exactly: **one backend instance per GPU**, added
-manually (neither backend auto-spawns per GPU). In `Server` → `Backends`, click
-`HartsyInference (Pure C# Inference)` once per GPU and set each instance's `GPU_ID`
-to a distinct ordinal (`0`, `1`, …). Swarm's scheduler then load-balances generations
-across the instances — it routes each request to the least-used instance that already
-has (or can load) the model, and different instances generate fully in parallel.
-
-Unlike ComfyUI (which isolates each GPU in a separate Python process via
-`CUDA_VISIBLE_DEVICES`), HartsyInference runs all instances **in one process**, so each
-instance's engine state must be per-device-isolated. It is: the engine binds its CUDA
-context per calling thread and keys every stream / memory pool / kernel module / cuBLAS
-handle by device, so two backends on two GPUs share no mutable state. (The one remaining
-cross-backend hazard — a process-global tensor-finalizer cleanup queue that let one
-backend's thread run another's cleanup — was fixed by partitioning that queue per CUDA
-context; requires engine ≥ the build noted in the extension bump.)
-
-A `GPU_ID` list like `0,1` is accepted but only the first ordinal is used as the PRIMARY —
-one backend instance per GPU is still the way to run parallel independent generations.
-To make **one model span two GPUs** (VRAM pooled) or place its components across cards,
-use the per-backend placement settings below instead of a second instance.
-
-### Multi-GPU: sharding & placement
-
-One backend can drive a second GPU for a single model. All values are CUDA ordinals
-(fastest-first, like `GPU_ID`). Everything is opt-in; empty = single-GPU behavior.
-
-| Setting | What it does | Win |
-|---|---|---|
-| `DitShardGpuId` | Splits the denoiser's block loop across `GPU_ID` + this card — weights **pooled**, for DiTs that don't fit one card (verified: Krea 2, Qwen-Image 20B, Flux.1 plain, MiniMax-H3 fp8; Chroma/HunyuanImage wired). Also feeds the LLM/audio-LM shard list. | VRAM |
-| `LmShardGpuId` | Layer-splits large LANGUAGE models only (LLMAssistant text models; AudioLab's YuE 7B Stage-1, which then runs **un-quantized bf16** pooled instead of Q4_K — override with `HARTSY_AUDIO_LM_QUANT=q4k\|q8\|off`). Redundant if `DitShardGpuId` is set. | VRAM → quality |
-| `TextEncoderGpuId` | CLIP / T5 / umT5 on this card — the biggest win on video models (Wan TI2V-5B measured 43.7 s → 32.7 s). | VRAM + speed |
-| `VaeGpuId` | VAE encode/decode on this card. | VRAM |
-| `CfgParallelGpuId` | Negative CFG branch runs **concurrently** on this card (weights REPLICATED — needs the model to fit both; falls back to sequential observably via the `[CfgParallel]` log line). Mutually exclusive with `DitShardGpuId`. | Speed (~1.8-1.9×/step) |
-
-Honest framing: sharding **pools VRAM, it does not add speed** (sequential pipeline split —
-per-step time is the same or a few % slower from the boundary copies; step-graphs are disabled
-for the sharded model). Works over plain PCIe — no NVLink/P2P needed. Full guide with mechanics
-and limits: the engine repo's
-[`docs/MULTI_GPU.md`](https://github.com/HartsyAI/HartsyInference/blob/main/docs/MULTI_GPU.md).
-
-**Requires engine ≥ `2.0.0-alpha.5`.** Before that version the engine always built its device on ordinal 0
-and `GPU_ID` was logged and ignored, so every instance silently shared one GPU no matter what you set here.
-
-**The ordinal is CUDA's, not `nvidia-smi`'s.** CUDA enumerates fastest-first by default, so on a mixed-GPU
-machine `GPU_ID=0` is the *fastest* card, which need not be `nvidia-smi`'s index 0 (measured on a
-4090 + 3060 box: ordinal 0 is the 4090, while `nvidia-smi` index 0 is the 3060). To confirm which physical
-card an instance got, watch `nvidia-smi` memory while it generates rather than trusting the number.
-
-## Known limitations
-
-- **VAE decode is slow** when memory is tight (tens of seconds for 1024²) because of
-  the OOM-retry pressure. Each retry costs a stream sync. See [TODO](#todo) for the
-  pre-flight memory budget plan that will eliminate most retries.
-- **F16 VAE produces black output on Flux Schnell** — pipeline runs without error but
-  values come out NaN/saturated. F32 VAE works fine. See [TODO](#todo).
-- **No T5 caching across generations.** T5-XXL (~5 GB) is uploaded fresh each gen
-  because keeping it resident through transformer streaming would OOM a 12 GB card.
-  Should auto-cache on cards with >18 GB total. See [TODO](#todo).
-- **No SDXL/SD3 end-to-end verification** since the May 2026 memory overhaul.
-- **Single-batch only.** Batch > 1 not validated; the streaming controller assumes
-  B=1 in places.
-
-> **Resolved 2026-05-06:** Z-Image black-output bug. Root cause was a F16 cuBLAS GEMM
-> overflow in SwiGLU's `w2` Linear when an FP8 weight met an F32 activation — the F32→F16
-> cast of `gated = silu(w1(x)) * w3(x)` produced +Inf for some positions starting at step 1.
-> Fixed by routing FP8 + F32 GEMMs through BF16 instead of F16 (BF16 has F32's full dynamic
-> range). See [PHASE_3_DEVIATIONS.md #36](../../../../HartsyInference/docs/Checklists/PHASE_3_DEVIATIONS.md)
-> for the full troubleshooting journey.
-
-## TODO
-
-Tracked as `// TODO: ...` comments in the code where applicable.
-
-### Memory + performance
-- [ ] **F16 VAE precision**. Black output at F16 on Flux Schnell — debug whether the
-  F16 GroupNorm kernel accumulates in F32 internally, and whether the F16 softmax
-  subtracts max-before-exp. If both are clean, the issue is somewhere in the
-  ResNetBlock / VaeAttention chain. F16 VAE is needed for 2K+ resolutions where even
-  tiled F32 won't fit.
-- [ ] **Pre-flight memory check before each VAE tile**. Currently we allocate
-  optimistically and recover via OOM retry, which costs ~600 ms per retry. A
-  pre-flight `cuMemGetInfo` + mempool trim would catch the tight cases and drain
-  the pool before the alloc is even attempted, eliminating most retries.
-- [ ] **`VramStrategy` foundation** (the auto-tier system discussed in the planning
-  thread). Single source of truth for budget, used by every pipeline phase to plan
-  load/evict decisions.
-- [ ] **T5 caching across generations** when budget permits. Auto-enable on >18 GB
-  cards. Trivial change once `VramStrategy` is in place.
-- [ ] **LRU model eviction** for multi-architecture workflows (SDXL → Flux → SDXL).
-  Currently, switching models leaks the prior one until the GC runs.
-
-### Architecture coverage
-Loaders done — wired into the extension and dispatched from `HartsyInferenceBackend.cs`:
-- [x] ~~**`Flux2Loader.cs`**~~ — Flux.2 Klein 4B (Qwen3-4B + flux2-vae). Klein 9B / Dev are
-  refused at runtime until `LlamaStyleEncoderConfig.Qwen3_8B` / Mistral presets land.
-- [x] ~~**`ChromaLoader.cs`**~~ — Chroma V1 (T5-XXL via `T2IParamTypes.T5XXLModel` + Flux VAE
-  auto-download). Radiance / Zeta variants need additional `ChromaConfig` presets.
-- [x] ~~**`AuraFlowLoader.cs`**~~ — AuraFlow v0.3 (single-file: bundled T5 + SDXL VAE +
-  transformer all in one safetensors).
-- [x] ~~**`FLiteLoader.cs`**~~ — F-Lite v1 (diffusers-folder layout: `dit_model/` +
-  `text_encoder/` + `vae/`; user picks any safetensors inside, loader walks up to find root).
-
-**Refused at the dispatch boundary (with clear messages) — upstream blockers exist:**
-- **Ernie Image** — pipeline + `Ministral3B` encoder preset exist, but there is no real
-  Ernie tokenizer in `HartsyInference.Tokenizers`. Refused until upstream ships one.
-- **HunyuanImage 2.1** — upstream pipeline substitutes T5-XXL for the real Qwen2.5-VL
-  MLLM encoder (and drops the byT5 glyph stream); output wouldn't be faithful. Refused
-  until the real encoder path lands.
-- **Flux.2 Klein 9B / Dev** — refused at runtime: the released encoders are FP4-mixed
-  and HartsyInference has no FP4 GEMM. Klein 4B works via the `Qwen3_4B` preset.
-- **Ideogram 4** — upstream pipeline/converter/tests are in place; the extension loader,
-  model-class detection, and a dual-9.3B-DiT VRAM gate are punchlist P7. fp8 variant
-  only until FP4 GEMM lands. Non-commercial license.
-
-Each refused architecture has a one-line entry in `ModelSupport._pendingArchs` with the
-human-readable reason; the user gets a clear explanation in the UI when they pick one.
-
-Existing wiring polish:
-- [ ] **End-to-end verification** of SDXL, SD 1.5, SD3 on the new streaming + tiling path.
-  Code paths exist; haven't been run since the May 2026 memory overhaul.
-- [x] ~~**Tiled VAE for non-Flux pipelines.**~~ Done — every pipeline routes through
-  `DecodeTiled`. The fast-path skips tiling at small resolutions, so this is a free win.
-- [ ] **Img2img with `VaeEncoder`** on the tiled path. Encoder has the same im2col
-  problem; needs a sibling `EncodeTiled`.
-
-### Z-Image — fixed 2026-05-06
-- [x] ~~**Open bug** — Z-Image generates without errors but RGB output is uniformly black.~~
-  Fixed via BF16 GEMM dtype for FP8 + F32 operand pairs. See
-  [PHASE_3_DEVIATIONS.md #36](../../../../HartsyInference/docs/Checklists/PHASE_3_DEVIATIONS.md)
-  for the full troubleshooting journey (8+ trace iterations to localize, then a 30-line
-  fix in `CudaBackend.ResolveGemmDtype`).
-
-### Quality / correctness
-- [ ] **Tile seam visibility audit.** 64-pixel RGB overlap with tent blending should
-  be smooth, but worth a side-by-side vs an un-tiled F32 reference at a few
-  resolutions to confirm.
-- [ ] **Numerical comparison against ComfyUI** for the same prompt + seed at the
-  same model. Identifies any silent precision drift in the F16 transformer path.
-
-### Long-term (defer)
-- [ ] **cuDNN wrapper** to replace the hand-rolled im2col + cuBLAS Conv2D path. Would
-  give us Winograd, implicit-GEMM, and FFT algorithms with auto-selected heuristics
-  — eliminates the workspace cliff that necessitated tiling in the first place.
-  Estimated ~200 lines of P/Invoke + a Conv2D-strategy switch.
-- [ ] **CPU-offloaded activations** for >24 GB models. Currently we only offload
-  weights; activations always stay on GPU. Real "lowvram" mode would page activation
-  tensors out too.
-
-## HartsyInference
-
-[HartsyInference](https://github.com/Hartsy/HartsyInference) is a sister project
-(`/home/kalebbroo/Desktop/Projects/HartsyInference` locally) — a pure C# / .NET 10
-inference engine. What's implemented today:
-
-- **Backends:** `IBackend` (eager execution) implemented for **CPU** (AVX/SIMD), **CUDA** (PTX via Driver API P/Invoke), and **Vulkan** (FP16 compute shaders)
-- **Diffusion pipelines:** SD 1.5, SDXL (+ inpaint, + refiner), SD3, Flux, Flux.2, AuraFlow, Chroma, Z-Image, Anima, HiDream, Qwen-Image, HunyuanImage, ErnieImage, F-Lite, Lumina 2, OmniGen 2, Lens, Kandinsky 5, **Ideogram 4** (dual-DiT asymmetric CFG)
-- **Video pipelines:** Wan 2.2 TI2V-5B, LTX-Video
-- **Samplers:** euler, euler_ancestral, heun, dpm_2, dpm_2_ancestral, lms, dpmpp_2s_ancestral, dpmpp_2m,
-  dpmpp_2m_sde — plus the legacy DDIM / LCM / TCD paths on the SD family
-- **Sigma schedules:** normal, karras, exponential, sgm_uniform, simple, ddim_uniform, beta, kl_optimal,
-  linear_quadratic. Combined with the sampler (`dpmpp_2m` + `karras`), exactly as ComfyUI spells it
-- **Solver-owned families** (no selection accepted): Wan (UniPC), LTX-1/2, Ideogram 4 (logit-normal),
-  Lumina2 and Lance image (fused CFG combines), MiniMax-H3
-- **Text encoders:** CLIP-L/G, CLIP-Vision (IPA), T5-XXL, LlamaStyle (Qwen3 / Qwen3-VL-8B / Mistral / Llama 3.1), GPT-OSS
-- **Tokenizers:** CLIP, T5, Whisper, Qwen3
-- **Adapters:** LoRA stack with per-component application, ControlNet (SDXL + SD1.5 + union-type ProMax + FLUX-DiT), IP-Adapter standard/Plus/Plus-Face/FaceID/FaceID-Plus/FaceID-PlusV2
-- **Prompting:** structured-prompt subsystem (JSON dialects, bounding boxes, regions — built for Ideogram 4)
-- **Memory mgmt:** `BlockStreamingController` (per-layer streaming), `CudaStreamingWeightCache` (async upload on side stream), tiled VAE decode
-- **Cancellation:** `CancellationToken` threaded through pipeline loops
-
-What's **planned but not yet implemented** in HartsyInference:
-
-- ❌ Tiled `VaeEncoder` (blocks high-res img2img / hires-fix — punchlist P2)
-- ❌ Upscaler model loaders (ESRGAN family)
-- ❌ FP4/NF4 GEMM (blocks Flux.2 Klein 9B/Dev + Ideogram 4 nf4 variant)
-- ❌ Configurable CLIP stop-layer (clip skip — punchlist P1)
-- ❌ Segmentation models (YOLO / SAM2)
-- ❌ `ModelRegistry.LoadAsync()` HuggingFace auto-loader / `PipelineFactory.Create()` façade
-- ❌ `HartsyInference.Server` OpenAI-compatible REST endpoints
-
-> **Compatibility note:** HartsyInference targets `net10.0`; SwarmUI extensions target
-> `net8.0`. Currently resolved via HartsyInference multi-targeting both.
-
-## Documentation
-
-The [`docs/`](./docs/) folder is the source of truth for the build plan:
-
-| # | Document | Purpose |
-|---|----------|---------|
-| 00 | [Overview](./docs/00-Overview.md) | Vision, scope, non-goals |
-| 01 | [Architecture](./docs/01-Architecture.md) | Component diagram, layers, data flow |
-| 04 | [HartsyInference Integration](./docs/04-HartsyInference-Integration.md) | The contract between this extension and the upstream HartsyInference library |
-| 06 | [Backend Lifecycle](./docs/06-Backend-Lifecycle.md) | Init / Generate / Shutdown contract |
-| 07 | [Parameters & Feature Flags](./docs/07-Parameters-And-Feature-Flags.md) | What params we own, what flags we advertise |
-| 08 | [Web API Routes](./docs/08-Web-API-Routes.md) | Extra HTTP routes the extension adds |
-| 11 | [Comfy Parity Punchlist](./docs/11-Comfy-Parity-Punchlist.md) | Canonical "what's left to ship" list |
-| 13 | [Video Models Plan](./docs/13-Video-Models-Plan.md) | Wan / LTX-Video support plan and behavior |
-| 14 | [Known Issues & TODO](./docs/14-Known-Issues-And-TODO.md) | What's currently broken or unverified, and what's queued to fix it |
-| 15 | [Two-GPU Setups](./docs/15-Two-GPU-Setups.md) | Which multi-GPU knob to use for which problem |
-
-## Logging conventions
-
-The extension forwards HartsyInference's internal log calls to SwarmUI's logger. Levels
-are mapped 1:1 (`Verbose → Verbose`, `Debug → Debug`, `Info → Info`, `Warning →
-Warning`, `Error → Error`) by `EnsureLoggerWired()` in `HartsyInferenceBackend.cs`.
-
-What goes where:
-
-- **Info** — major milestones only: model loaded, generation started, generation
-  complete, image saved. One or two lines per generation.
-- **Verbose** — phase-level detail: text encoding done, denoising step N/M, VAE tile
-  N/M, OOM retry recovered, tensor stats. Useful when debugging a specific generation.
-- **Debug** — per-block / per-tile internals: which block streamed when, individual
-  tensor allocation sizes, cuBLAS workspace decisions. Heavy; only enable when
-  hunting a specific bug.
-- **Warning** — non-fatal anomalies that the user should know about: OOM on first
-  attempt (recovered), tile seam mismatch, F16 precision fallback.
-- **Error** — only on actual generation failure.
-
-Almost no `Logs.Info` in the inference hot paths — those are reserved for SwarmUI's
-own UI-visible status. Developers chasing bugs should run with `--log-level Verbose`.
+# HartsyInference for SwarmUI
+
+Generate images, videos, and music locally without managing Python, virtual environments, workflow servers, or a pile of separate add-ons.
+
+HartsyInference is a fast, all-in-one generation backend that runs inside [SwarmUI](https://github.com/mcmonkeyprojects/SwarmUI). You keep the familiar model picker, prompt box, history, previews, and generation controls. HartsyInference handles loading the model and creating the result in the same application.
+
+![A Dany fantasy portrait generated locally with Krea 2 and HartsyInference](Assets/readme/dany-hero.png)
+
+## Why HartsyInference feels easier
+
+A **backend** is the part of SwarmUI that loads a model and turns your prompt into an image, video, or song. HartsyInference gives SwarmUI a local backend built in C#, so there is less to install, start, update, and troubleshoot.
+
+| What you get | Why it matters |
+| --- | --- |
+| **One application to start** | The generation engine runs inside SwarmUI. There is no second server to launch or keep connected. |
+| **No Python environment** | No virtual environment, package conflicts, or Python version to manage. |
+| **Useful features included** | Editing, inpainting, LoRAs, guided generation, previews, cancellation, and memory handling are available without collecting separate add-ons. |
+| **Automatic memory handling** | Models can use memory-saving behavior when they do not fit normally. Cards with enough room keep the faster path. |
+| **Images, video, and music together** | Use the same Generate tab and output history across supported model types. |
+| **Real multi-GPU support** | Run separate jobs in parallel or split one supported model across two cards. |
+
+## Proof, not promises
+
+| Example | Result |
+| --- | --- |
+| Krea 2 Turbo | 1024 x 1024 in **4.50 seconds** on an RTX 4090 |
+| Qwen-Image 20B | 1024 x 1024 in **40.9 seconds** on an RTX 4090 |
+| Two-GPU generation | One Krea 2 job split across an RTX 4090 and RTX 3060 |
+| Model coverage | Image, video, editing, restoration, and music families in one backend |
+
+The benchmark table and testing notes are available [below](#benchmarks).
+
+## What you need
+
+- A working SwarmUI installation on Windows or Linux.
+- An NVIDIA GPU with a current driver for practical image and video generation.
+- An internet connection for the first build and for model downloads.
+- Free drive space for the models you choose. Individual model downloads can range from a few GB to dozens of GB.
+
+### A practical hardware guide
+
+Model requirements vary, but these are useful starting points:
+
+| Hardware | What to expect |
+| --- | --- |
+| **12 GB VRAM** | A good starting point for smaller image models and memory-saving versions of larger models. Large models will be slower when weights must move between system memory and the GPU. |
+| **24 GB VRAM** | A much wider choice of image and video models, with more room for full-speed operation. |
+| **Two NVIDIA GPUs** | Optional. Use both for parallel jobs, place parts of a model on different cards, or split a supported large model across them. |
+
+System memory and storage matter too. Larger models need more of both. If you are unsure, start with a smaller or quantized checkpoint and a 1024 x 1024 image.
+
+HartsyInference ships as a package dependency of this extension. You do not install the engine separately.
+
+> **Current status:** HartsyInference is in beta. Many model families and advanced tools work today, but exact feature support varies by model.
+
+## Installation
+
+### From SwarmUI
+
+Use this method when **SwarmUI-HartsyInference-Backend** appears in SwarmUI's extension list:
+
+1. Open **Server** > **Extensions**.
+2. Find **SwarmUI-HartsyInference-Backend**.
+3. Select **Install**.
+4. Let SwarmUI rebuild, then restart when prompted.
+
+### Manual installation
+
+Close SwarmUI, open a terminal in its extension folder, and clone the repository:
+
+```bash
+cd /path/to/SwarmUI/src/Extensions/
+git clone https://github.com/HartsyAI/SwarmUI-HartsyInference-Backend.git
+```
+
+Extensions are compiled, so restarting by itself is not enough. Rebuild SwarmUI:
+
+- On Windows, run `update-windows.bat` from the main SwarmUI folder.
+- On Linux, run `update-linuxmac.sh` from the main SwarmUI folder.
+
+Start SwarmUI after the build finishes.
+
+## Your first generation
+
+This is the complete path from an installed extension to a finished image.
+
+### 1. Add the backend
+
+1. Open **Server** > **Backends**.
+2. Turn on **Show Advanced**.
+3. Select **HartsyInference (Pure C# Inference)**.
+4. Keep `ComputeBackend`, `GPU_ID`, and `LowVram` at their defaults.
+5. Save and wait for the card to say **running backend**.
+
+For a normal one-GPU setup, leave all fields ending in `GpuId` empty.
+
+### 2. Add or choose a model
+
+HartsyInference uses SwarmUI's normal model folders and model picker. If you already have a compatible local checkpoint, refresh the model list and select it.
+
+For a straightforward first image, use a supported turbo or schnell image checkpoint that fits your GPU. Krea 2 Turbo and Z-Image Turbo are fast choices on higher-memory NVIDIA cards. Model licenses and hardware needs differ, so check the model page before downloading.
+
+Your model root is shown under **Server** > **Server Configuration** > **Paths** > **ModelRoot**. Place the checkpoint in the matching model folder, then refresh SwarmUI's model list.
+
+Some model families need companion files such as a text encoder or VAE. HartsyInference downloads known companion files when possible. If something cannot be prepared automatically, SwarmUI shows what is missing.
+
+### 3. Generate
+
+1. Open **Generate**.
+2. Pick your model.
+3. Enter a prompt.
+4. Select **Generate**.
+
+This example uses Krea 2 Turbo, eight steps, and a 1024 x 1024 canvas:
+
+![Krea 2 generating a Dany fantasy portrait through HartsyInference](Assets/readme/dany-generating.png)
+
+The finished result appears in the normal SwarmUI history. Select it to view the full image, prompt, settings, seed, and generation details.
+
+![The finished Dany fantasy portrait in SwarmUI's image preview](Assets/readme/dany-preview.png)
+
+## What you can create
+
+### Create images from a prompt
+
+Generate with families such as Stable Diffusion 1.5, SDXL, SD3, SD3.5, FLUX.1, FLUX.2, Qwen-Image, Z-Image, Krea 2, Chroma, AuraFlow, Anima, F-Lite, Ideogram 4, HunyuanImage, ERNIE-Image, and Boogu.
+
+### Edit and repair images
+
+- Start from an existing image and control how much it changes.
+- Paint a mask over an area to replace or repair it.
+- Refine one model's result with another supported image model.
+- Make seamless images for repeating textures and backgrounds.
+- Use supported reference-image models for instruction-based edits.
+
+### Guide the composition
+
+- Use pose, depth, edges, line art, soft edges, scribbles, normals, or segmentation maps to guide the result.
+- Use IP-Adapter variants to carry visual style, facial features, or identity from a reference image.
+- Stack supported ControlNets and LoRAs with individual strengths.
+
+These controls use names such as **ControlNet**, **IP-Adapter**, and **LoRA** in SwarmUI. They appear only when the selected model can use them.
+
+### Create and restore video
+
+Supported families include Wan 2.x, Wan VACE, Wan Animate, Wan speech-to-video, LTX-Video, LTX-2, HunyuanVideo, Kandinsky 5, and MiniMax H3.
+
+Depending on the model, SwarmUI can show controls for frame count, frame rate, format, image-to-video, reference media, trimming, boomerang playback, audio, and SeedVR2 restoration.
+
+### Create music
+
+ACE-Step checkpoints generate music from the normal Generate tab. Music controls appear after you choose a compatible model.
+
+### Stay in control
+
+HartsyInference supports live previews, cancellation, variation seeds, early step stopping, and readable errors. If a model cannot use a requested feature, the backend explains the problem instead of quietly ignoring the setting.
+
+## Backend settings
+
+Most users only need the defaults:
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `ComputeBackend` | `auto` | Chooses the best available compute option. |
+| `GPU_ID` | `0` | Chooses the main GPU. |
+| `LowVram` | `auto` | Saves memory only when the model would not otherwise fit. |
+| `OverQueue` | `1` | Lets one request wait behind the active generation. |
+| `Previews` | on | Shows progress previews while generating. |
+| `AutoUpdate` | `false` | Keeps engine updates manual. |
+
+## Use more than one GPU
+
+### Run separate jobs at the same time
+
+Add one HartsyInference backend for each GPU. Give each backend a different `GPU_ID`. SwarmUI can then send different generations to different cards.
+
+### Split one model across two GPUs
+
+One backend can use a second GPU for the same generation:
+
+| Setting | Use it for |
+| --- | --- |
+| `TextEncoderGpuId` | Move prompt processing to a second GPU. |
+| `VaeGpuId` | Move image or video encoding and decoding to a second GPU. |
+| `DitShardGpuId` | Split a supported image or video model across two GPUs to combine their available memory. |
+| `LmShardGpuId` | Split a supported language or audio model across two GPUs. |
+| `CfgParallelGpuId` | Run two guidance passes at once when both cards can hold the model. |
+
+This backend used GPU 1 as the denoiser shard for a Krea 2 generation:
+
+![HartsyInference configured to shard a model onto a second GPU](Assets/readme/hartsy-backend-sharding.png)
+
+During that same job, SwarmUI showed both GPUs holding model data:
+
+![An RTX 4090 and RTX 3060 sharing one HartsyInference generation](Assets/readme/two-gpu-sharding.png)
+
+Sharding is mainly a way to gain memory. It does not always improve speed. See the [two-GPU guide](docs/15-Two-GPU-Setups.md) for examples and limits.
+
+## Benchmarks
+
+These results use the same request through the SwarmUI API on an RTX 4090. Each number is the warm median of three runs.
+
+| Model | Size | Steps | HartsyInference | ComfyUI |
+| --- | ---: | ---: | ---: | ---: |
+| Z-Image Turbo | 1024 x 1024 | 8 | **2.95 s** | 3.1 s |
+| Krea 2 Turbo | 1024 x 1024 | 8 | **4.50 s** | 6.5 s |
+| Qwen-Image 20B GGUF | 1024 x 1024 | 20 | **40.9 s** | 54.8 s |
+
+Hardware, checkpoint format, available memory, drivers, and generation settings can change performance. Full test settings and newer results are in the [HartsyInference performance guide](https://github.com/HartsyAI/HartsyInference/blob/main/docs/PERFORMANCE.md) and [benchmark results](https://github.com/HartsyAI/HartsyInference/tree/main/benchmarks/results).
+
+## Troubleshooting
+
+### The backend type is missing
+
+Turn on **Show Advanced** under **Server** > **Backends**. If it is still missing, rebuild SwarmUI and check **Server** > **Logs** for extension build errors.
+
+### The backend does not start
+
+- Update your NVIDIA driver.
+- Keep `ComputeBackend` set to `auto`.
+- Confirm `GPU_ID` points to a real GPU.
+- Open **Server** > **Logs** and search for `HartsyInference`.
+- Rebuild SwarmUI after updating the extension or engine package.
+
+### A model is missing
+
+- Confirm the checkpoint is under the configured SwarmUI model root.
+- Put it in the correct model folder.
+- Refresh the model list.
+- Make sure you selected the main checkpoint rather than a companion VAE or text encoder.
+
+### The model runs out of memory
+
+- Keep `LowVram` set to `auto`.
+- Close other programs using the GPU.
+- Try a smaller resolution, fewer video frames, or a smaller model version.
+- Use a second GPU for placement or sharding when available.
+
+### A control does not appear
+
+Choose the model first. SwarmUI shows controls based on what the selected model supports.
+
+### Report a problem
+
+Open an issue in this repository with your operating system, GPU, model name, generation settings, and the related HartsyInference lines from **Server** > **Logs**. Do not post private prompts, images, access tokens, or API keys.
+
+## More documentation
+
+The README covers installation and everyday use. Deeper references are available in [`docs/`](docs/):
+
+- [Backend lifecycle](docs/06-Backend-Lifecycle.md)
+- [Parameters and feature flags](docs/07-Parameters-And-Feature-Flags.md)
+- [Web API routes](docs/08-Web-API-Routes.md)
+- [Known issues](docs/14-Known-Issues-And-TODO.md)
+- [Two-GPU setups](docs/15-Two-GPU-Setups.md)
 
 ## License
 
-MIT — see [`LICENSE`](./LICENSE).
+This project is licensed under the [MIT License](LICENSE).
+
+Model files keep their own licenses. Check each model's terms before using it, especially for commercial work.
