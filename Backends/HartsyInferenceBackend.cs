@@ -53,8 +53,11 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         [ConfigComment("Which GPU to use, if multiple are available.\nShould be a single number, like '0' (first GPU), '1' (second GPU), etc.\nIgnored for the CPU compute backend.\nThis is a CUDA device ordinal, which is NOT necessarily the same order nvidia-smi shows: CUDA enumerates fastest-first by default, so on a mixed-GPU machine '0' is the fastest card. To confirm which physical GPU you got, watch nvidia-smi memory while a generation runs.\nRun one backend per GPU to use several cards at once.")]
         public string GPU_ID = "0";
 
-        [ConfigComment("How to handle models that do not fit in VRAM.\n'auto' (default): measure free VRAM and stream weights from system RAM only when the model would not otherwise fit. Cards with headroom keep the full-speed resident path, so this costs nothing when it isn't needed.\n'on': always stream, even when the model would fit. Useful when sharing the GPU with another program (e.g. a second backend), or to test the streamed path.\n'off': never stream and never auto-evict — load everything and let an oversized model fail with an out-of-VRAM error. For operators who size their own workloads and want a hard failure rather than a slow generation.\nStreaming is typically 5-8x slower than a fully-resident model, but it is what lets large models run on a 12GB card at all.")]
-        public string LowVram = "auto";
+        [ConfigComment("How hard the engine should work to fit a model in VRAM.\n\n'Auto' (default) reads your card's size to pick a starting posture, then measures free VRAM before each phase and streams only when the model would not otherwise fit. Cards with headroom keep the full-speed resident path, so this costs nothing when it isn't needed. Leave it here unless you have a reason not to.\n\n'Performance' never streams and never auto-evicts: everything loads and an oversized model fails with an out-of-VRAM error instead of running slowly. For operators who size their own workloads and want a hard failure.\n\n'Balanced' releases each phase's weights at its boundary so the next phase gets the space, and streams only when the measurement says it must.\n\n'Aggressive' always streams, halves the precision of cross-step caches, and shrinks chunk/tile sizes. Useful when sharing the GPU with another program, or to test the streamed path.\n\n'Maximum' adds activation offload, quantized compute and freeing after every generation, and will spill onto a second GPU when one is configured and idle. Last resort — every one of those costs speed, and some change numerics.\n\nStreaming is typically 5-8x slower than a fully-resident model, but it is what lets large models run on a 12GB card at all. Individual levers can be overridden per-generation under the 'VRAM & Memory' parameter group.\nThe older 'auto'/'on'/'off' values still load: 'on' becomes Aggressive and 'off' becomes Performance.")]
+        [ManualSettingsOptions(Impl = null, Vals = ["Auto", "Performance", "Balanced", "Aggressive", "Maximum"],
+            ManualNames = ["Auto (recommended)", "Performance (never stream, fail instead)", "Balanced (unload between phases)",
+                "Aggressive (always stream, half-precision caches)", "Maximum (every lever, may spill to a 2nd GPU)"])]
+        public string LowVram = "Auto";
 
         [ConfigComment("GPU for the text encoders (CLIP / T5 / umT5), separate from the main GPU_ID.\nEmpty (default) = same GPU as everything else.\nSet to another CUDA ordinal (e.g. '1') to keep the multi-GB text encoders off the main card — the biggest VRAM win on video models (Wan's umT5 is T5-XXL-class) and Flux.\nMiniMax-H3 honours this too (its Qwen3-VL encoder is ~15 GB), and because the placement is deliberate the encoder's weights STAY RESIDENT between generations instead of being freed for the DiT — the second card has nothing else competing for the space.\nHeads up on mixed cards: the encoder produces slightly different embeddings on a different GPU architecture, so moving it changes the output for a given seed. It is deterministic run-to-run, just not identical to the same seed on the main card.\nThe number is a CUDA ordinal like GPU_ID (fastest-first, not nvidia-smi order).")]
         public string TextEncoderGpuId = "";
@@ -203,7 +206,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         {
             string requested = Settings?.ComputeBackend?.ToLowerInvariant() ?? "auto";
             int? deviceOrdinal = ParseGpuId(Settings?.GPU_ID);
-            LowVramMode? lowVram = ParseLowVramSetting(Settings?.LowVram);
+            VramPolicy? vramPolicy = ParseVramSetting(Settings?.LowVram);
 
             // Kernels ship in our extension's own output dir, NOT Swarm's main runtime dir. The Engine's
             // BackendFactory already resolves relative to the engine assemblies (which live beside us), so
@@ -323,7 +326,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             }
 
             AddLoadStatus($"Constructing HartsyInference.Engine (compute='{requested}', device={deviceOrdinal?.ToString() ?? "auto"})...");
-            EngineOptions engineOptions = new EngineOptions { LowVram = lowVram, Placement = placement };
+            EngineOptions engineOptions = new EngineOptions { VramPolicy = vramPolicy, Placement = placement };
             _engine = deviceOrdinal.HasValue
                 ? new InferenceEngine(requested, deviceOrdinal.Value, engineOptions)
                 : new InferenceEngine(requested, engineOptions);
@@ -454,27 +457,34 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         return ordinal;
     }
 
-    /// <summary>Maps the backend's low-VRAM setting to the engine's per-engine policy override. Per-engine (not the
-    /// old <c>HARTSY_LOWVRAM</c> env var, which was process-wide last-writer-wins) so two backends on different-size
-    /// cards keep their own policies. Null = auto (engine measures free VRAM per phase).</summary>
-    private static LowVramMode? ParseLowVramSetting(string mode)
+    /// <summary>Maps the backend's VRAM setting to the engine's per-backend policy. Per-backend (not the old
+    /// <c>HARTSY_LOWVRAM</c> env var, which was process-wide last-writer-wins) so two backends on different-size
+    /// cards keep their own policies.</summary>
+    /// <remarks>The legacy <c>auto</c>/<c>on</c>/<c>off</c> spellings are still accepted so a saved
+    /// <c>Backends.fds</c> keeps working: <c>on</c> was "always stream", which is Aggressive, and <c>off</c> was
+    /// "never stream, fail instead", which is Performance. Returns null for Auto rather than an explicit Auto policy
+    /// — that leaves the backend inheriting the environment, which is what a host that configures nothing expects.</remarks>
+    private static VramPolicy? ParseVramSetting(string mode)
     {
         string normalized = string.IsNullOrWhiteSpace(mode) ? "auto" : mode.Trim().ToLowerInvariant();
-        LowVramMode? parsed = normalized switch
+        VramTier? tier = normalized switch
         {
             "auto" => null,
-            "on" or "1" or "true" => LowVramMode.ForceOn,
-            "off" or "0" or "false" => LowVramMode.ForceOff,
+            "performance" or "off" or "0" or "false" => VramTier.Performance,
+            "balanced" => VramTier.Balanced,
+            "aggressive" or "on" or "1" or "true" => VramTier.Aggressive,
+            "maximum" or "max" => VramTier.Maximum,
             _ => null,
         };
-        if (parsed is null && normalized != "auto")
+        if (tier is null && normalized != "auto")
         {
-            Logs.Warning($"[HartsyInference] LowVram='{mode}' is not recognized; using 'auto'. Valid: auto, on, off.");
+            Logs.Warning($"[HartsyInference] LowVram='{mode}' is not recognized; using Auto. "
+                + "Valid: Auto, Performance, Balanced, Aggressive, Maximum.");
             normalized = "auto";
         }
-        Logs.Info($"[HartsyInference] Low-VRAM handling: {normalized}"
-            + (parsed == LowVramMode.ForceOff ? " (models larger than VRAM will fail rather than stream)." : "."));
-        return parsed;
+        Logs.Info($"[HartsyInference] VRAM mode: {(tier?.ToString() ?? "Auto")}"
+            + (tier == VramTier.Performance ? " (models larger than VRAM will fail rather than stream)." : "."));
+        return tier is VramTier resolved ? VramPolicy.For(resolved) : null;
     }
 
     // ─────────────────────────────── 2. Load ───────────────────────────────
@@ -948,6 +958,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             Regional = BuildRegional(input, prompt),
             VariationSeed = BuildVariationSeed(input),
             Extra = BuildImageExtra(input, family, initImage, unionTypes),
+            Vram = MapVramOverrides(input),
         };
     }
 
@@ -1368,6 +1379,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             Components = BuildComponents(input),
             Loras = BuildLoras(input),
             Extra = extra,
+            Vram = MapVramOverrides(input),
         };
     }
 
@@ -1521,6 +1533,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             Prompt = input.Get(T2IParamTypes.Prompt) ?? "",
             Genre = input.Get(T2IParamTypes.Text2AudioStyle, "") ?? "",
             Duration = input.Get(T2IParamTypes.Text2AudioDuration, 10d),
+            Vram = MapVramOverrides(input),
             Seed = seed < 0 ? Random.Shared.Next() : (int)(seed & 0x7FFFFFFF),
             InferSteps = NullableInt(input, T2IParamTypes.Steps),
             CfgScale = input.TryGet(T2IParamTypes.CFGScale, out double cfg) ? cfg : null,
@@ -1594,6 +1607,64 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     /// <summary>An int param's value, or null when the request didn't set it (so the Engine's family default wins).</summary>
     private static int? NullableInt(T2IParamInput input, T2IRegisteredParam<int> param) =>
         input.TryGet(param, out int value) && value > 0 ? value : null;
+
+    /// <summary>The per-generation VRAM lever overrides, or null when the request pinned none.</summary>
+    /// <remarks>Returning null for an untouched group matters: the Engine treats null as "follow the backend's
+    /// policy", so an empty override object would still be a decision and would defeat
+    /// <c>VramOverrides.IsEmpty</c>'s short-circuit. Only the runtime-scoped levers appear here — quantized compute
+    /// and multi-GPU spill bake into a constructed pipeline and stay backend settings.</remarks>
+    private static VramOverrides MapVramOverrides(T2IParamInput input)
+    {
+        VramOverrides overrides = new VramOverrides
+        {
+            Tier = ParseTierOverride(input, SwarmUIHartsyInference.VramModeParam),
+            WeightStreaming = ParseLever(input, SwarmUIHartsyInference.VramWeightStreamingParam),
+            KeepResident = ParseLever(input, SwarmUIHartsyInference.VramKeepResidentParam),
+            PhaseUnload = ParseLever(input, SwarmUIHartsyInference.VramPhaseUnloadParam),
+            ActivationOffload = ParseLever(input, SwarmUIHartsyInference.VramActivationOffloadParam),
+            FreeAfterGeneration = ParseLever(input, SwarmUIHartsyInference.VramFreeAfterGenerationParam),
+            Caches = ParseCachePrecision(input, SwarmUIHartsyInference.VramCachePrecisionParam),
+            ChunkScale = input.TryGet(SwarmUIHartsyInference.VramChunkScaleParam, out double scale) && scale > 0
+                ? (float)scale : null,
+        };
+        return overrides.IsEmpty ? null : overrides;
+    }
+
+    /// <summary>"Backend default" (and anything unrecognized) leaves the lever unset so the backend's policy stands.</summary>
+    private static LeverState? ParseLever(T2IParamInput input, T2IRegisteredParam<string> param)
+        => input.TryGet(param, out string value)
+            ? value?.Trim().ToLowerInvariant() switch
+            {
+                "auto" => LeverState.Auto,
+                "on" => LeverState.On,
+                "off" => LeverState.Off,
+                _ => null,
+            }
+            : null;
+
+    private static VramTier? ParseTierOverride(T2IParamInput input, T2IRegisteredParam<string> param)
+        => input.TryGet(param, out string value)
+            ? value?.Trim().ToLowerInvariant() switch
+            {
+                "performance" => VramTier.Performance,
+                "auto" => VramTier.Auto,
+                "balanced" => VramTier.Balanced,
+                "aggressive" => VramTier.Aggressive,
+                "maximum" => VramTier.Maximum,
+                _ => null,
+            }
+            : null;
+
+    private static CachePrecision? ParseCachePrecision(T2IParamInput input, T2IRegisteredParam<string> param)
+        => input.TryGet(param, out string value)
+            ? value?.Trim().ToLowerInvariant() switch
+            {
+                "auto" => CachePrecision.Auto,
+                "full" => CachePrecision.Full,
+                "half" => CachePrecision.Half,
+                _ => null,
+            }
+            : null;
 
     /// <summary>Parses the i-th entry of a Swarm parallel string list as a double.</summary>
     private static double ParseAt(List<string> list, int index, double fallback)

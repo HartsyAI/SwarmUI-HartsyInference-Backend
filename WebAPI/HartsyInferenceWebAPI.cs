@@ -182,6 +182,8 @@ public static class HartsyInferenceWebAPI
                 ["vae_gpu_id"] = backend.Settings?.VaeGpuId ?? "",
                 ["cfg_parallel_gpu_id"] = backend.Settings?.CfgParallelGpuId ?? "",
                 ["dit_shard_gpu_id"] = backend.Settings?.DitShardGpuId ?? "",
+                ["lm_shard_gpu_id"] = backend.Settings?.LmShardGpuId ?? "",
+                ["vram_mode"] = backend.Settings?.LowVram ?? "Auto",
                 ["usages"] = data.Usages,
             });
         }
@@ -206,6 +208,8 @@ public static class HartsyInferenceWebAPI
                 ["vae_gpu_id"] = backend.Settings?.VaeGpuId ?? "",
                 ["cfg_parallel_gpu_id"] = backend.Settings?.CfgParallelGpuId ?? "",
                 ["dit_shard_gpu_id"] = backend.Settings?.DitShardGpuId ?? "",
+                ["lm_shard_gpu_id"] = backend.Settings?.LmShardGpuId ?? "",
+                ["vram_mode"] = backend.Settings?.LowVram ?? "Auto",
                 ["status"] = backend.Status.ToString(),
             });
         }

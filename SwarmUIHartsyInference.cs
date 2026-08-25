@@ -86,6 +86,19 @@ public class SwarmUIHartsyInference : Extension
     public static T2IRegisteredParam<bool> Ideogram4MagicPromptParam;
     public static T2IRegisteredParam<string> Ideogram4MagicPromptModelParam;
 
+    // Per-generation overrides of the backend's VRAM posture. Only the levers that bind at generation time are
+    // here: quantized compute and multi-GPU spill are baked into a pipeline when it is constructed and cached, so
+    // varying them per request would force a rebuild and a multi-GB re-upload. Those stay backend settings.
+    public static T2IParamGroup VramParamGroup;
+    public static T2IRegisteredParam<string> VramModeParam;
+    public static T2IRegisteredParam<string> VramWeightStreamingParam;
+    public static T2IRegisteredParam<string> VramKeepResidentParam;
+    public static T2IRegisteredParam<string> VramPhaseUnloadParam;
+    public static T2IRegisteredParam<string> VramCachePrecisionParam;
+    public static T2IRegisteredParam<string> VramActivationOffloadParam;
+    public static T2IRegisteredParam<string> VramFreeAfterGenerationParam;
+    public static T2IRegisteredParam<double> VramChunkScaleParam;
+
     public static T2IParamGroup VideoRestoreParamGroup;
     public static T2IRegisteredParam<string> RestoreModelParam;
     public static T2IRegisteredParam<int> RestoreWidthParam;
@@ -422,6 +435,106 @@ public class SwarmUIHartsyInference : Extension
         // before muxing. The target is an AREA (aspect preserved by the model's bicubic area-resize) —
         // SeedVR2 has no scale factor. Enabled by toggling the model param on; all params are Toggleable
         // for the same feature-flag reason as Ideogram 4 above.
+        // Every lever defaults to "follow the backend", so the easy path stays the one dropdown in backend settings
+        // and this group only matters to someone deliberately overriding a single knob for one generation.
+        VramParamGroup = new("VRAM & Memory", Toggles: false, Open: false, IsAdvanced: true,
+            Description: "Per-generation overrides of this backend's VRAM mode. Every setting here defaults to "
+                + "following the backend, so leave them alone unless you are targeting one specific behaviour.\n"
+                + "Levers that bake into a loaded model (quantized compute, spilling onto a second GPU) are backend "
+                + "settings instead — changing those per generation would reload the model.");
+
+        VramModeParam = T2IParamTypes.Register<string>(new(
+            "VRAM Mode",
+            "Override the backend's VRAM mode for this generation.\nThe individual levers below still win over whatever this picks.",
+            "Backend default",
+            Toggleable: true,
+            Group: VramParamGroup,
+            FeatureFlag: "hartsyinference",
+            OrderPriority: 1,
+            GetValues: _ => ["Backend default", "Performance", "Auto", "Balanced", "Aggressive", "Maximum"]));
+
+        VramWeightStreamingParam = T2IParamTypes.Register<string>(new(
+            "VRAM Weight Streaming",
+            "Stream the denoiser's weights through VRAM a few blocks at a time instead of holding all of them.\n"
+                + "'On' forces it even when everything would fit (typically 5-8x slower, but it is what makes a large model run on a small card).\n"
+                + "'Off' forbids it — an oversized model fails instead.\nOnly models with a block-structured denoiser can honour this.",
+            "Backend default",
+            Toggleable: true,
+            Group: VramParamGroup,
+            FeatureFlag: "hartsyinference",
+            OrderPriority: 2,
+            GetValues: _ => ["Backend default", "Auto", "On", "Off"]));
+
+        VramKeepResidentParam = T2IParamTypes.Register<string>(new(
+            "VRAM Keep Models Resident",
+            "Keep this model's weights on the GPU after the generation finishes, so the next one skips the re-upload.\n"
+                + "'Off' frees them every time — slower back-to-back, but it leaves the card free for other work.",
+            "Backend default",
+            Toggleable: true,
+            Group: VramParamGroup,
+            FeatureFlag: "hartsyinference",
+            OrderPriority: 3,
+            GetValues: _ => ["Backend default", "Auto", "On", "Off"]));
+
+        VramPhaseUnloadParam = T2IParamTypes.Register<string>(new(
+            "VRAM Phase Unload",
+            "Release each stage's weights at its boundary — the text encoder before denoising, the denoiser before "
+                + "the VAE decode — so the next stage gets the space.\nCosts a re-upload per stage; often the difference "
+                + "between fitting and an out-of-VRAM error.",
+            "Backend default",
+            Toggleable: true,
+            Group: VramParamGroup,
+            FeatureFlag: "hartsyinference",
+            OrderPriority: 4,
+            GetValues: _ => ["Backend default", "Auto", "On", "Off"]));
+
+        VramCachePrecisionParam = T2IParamTypes.Register<string>(new(
+            "VRAM Cache Precision",
+            "Storage precision for the caches that persist across steps (KV caches, Wan-Animate's driving cache).\n"
+                + "'Half' roughly halves their size but diverges from the reference maths — it changes the output slightly.\n"
+                + "'Full' keeps exact numerics whatever it costs, which is what a parity comparison needs.",
+            "Backend default",
+            Toggleable: true,
+            Group: VramParamGroup,
+            FeatureFlag: "hartsyinference",
+            OrderPriority: 5,
+            GetValues: _ => ["Backend default", "Auto", "Full", "Half"]));
+
+        VramActivationOffloadParam = T2IParamTypes.Register<string>(new(
+            "VRAM Activation Offload",
+            "Page cross-step activations out to system RAM as they are produced.\nTrades a PCIe round trip per step for "
+                + "their full size on the card. A last resort — it is suppressed automatically while a captured CUDA graph is live.",
+            "Backend default",
+            Toggleable: true,
+            Group: VramParamGroup,
+            FeatureFlag: "hartsyinference",
+            OrderPriority: 6,
+            GetValues: _ => ["Backend default", "Auto", "On", "Off"]));
+
+        VramFreeAfterGenerationParam = T2IParamTypes.Register<string>(new(
+            "VRAM Free After Generation",
+            "Release this model's device memory as soon as the generation finishes, rather than leaving it loaded.\n"
+                + "Use when something else needs the card immediately afterwards.",
+            "Backend default",
+            Toggleable: true,
+            Group: VramParamGroup,
+            FeatureFlag: "hartsyinference",
+            OrderPriority: 7,
+            GetValues: _ => ["Backend default", "Auto", "On", "Off"]));
+
+        VramChunkScaleParam = T2IParamTypes.Register<double>(new(
+            "VRAM Chunk Scale",
+            "Scales the chunk/tile size a model decodes in. 1.0 leaves the model's own default alone; 0.5 halves it.\n"
+                + "This is the lever for work whose peak is activations rather than weights — VAE decodes, vocoders, "
+                + "3D grid decodes — where streaming weights does nothing at all.",
+            "1.0",
+            Min: 0.1, Max: 1.0, Step: 0.05,
+            Toggleable: true,
+            Group: VramParamGroup,
+            FeatureFlag: "hartsyinference",
+            OrderPriority: 8,
+            ViewType: ParamViewType.SLIDER));
+
         // Not "Video Restore": it runs over a still image just as well, and this is the group users toggle to
         // enable the pass at all, so it toggles as one.
         VideoRestoreParamGroup = new("Restore / Upscale", Toggles: true, Open: false, IsAdvanced: true,
