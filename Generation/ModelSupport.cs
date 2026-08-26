@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using System.IO;
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
@@ -319,14 +320,12 @@ public static class ModelSupport
         return picked.RawFilePath;
     }
 
-    /// <summary>Whether the Engine will decode with the diffusion video VAE. Read here as well as in the Engine so the
+    /// <summary>Whether the Engine will decode with the diffusion video VAE. Read through the Engine's own knob so the
     /// staged VAE is the one the recipe will actually ask for — staging both is what corrupts the selection.</summary>
-    private static bool WantDiffusionVae()
-    {
-        string raw = Environment.GetEnvironmentVariable("HARTSY_LTX2_DIFFUSION_VAE");
-        return raw is not null && (raw == "1" || raw.Equals("true", StringComparison.OrdinalIgnoreCase)
-            || raw.Equals("yes", StringComparison.OrdinalIgnoreCase));
-    }
+    /// <remarks>This used to re-implement the parse and accepted "yes", which the Engine never did. A value of "yes"
+    /// therefore made the extension stage the diffusion VAE while the recipe still built the conv decoder — precisely
+    /// the divergence the summary warns about. Sharing the declaration removes the possibility.</remarks>
+    private static bool WantDiffusionVae() => EngineKnobs.Ltx2DiffusionVae.Value;
 
     /// <summary>Matching models in <paramref name="setName"/>, ordered by file name. Ordered because the model set is
     /// a concurrent dictionary: taking its first match would pick a different file run to run whenever a user has
