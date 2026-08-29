@@ -170,7 +170,7 @@
              ValidateSamplingChoice and serves to the gen-page script) and VideoRequest.Scheduler.
              Restore 404s until the engine's alpha.34 publish completes — by design, same precedent as above:
              merge and publish the engine FIRST, then this pin. -->
-        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.40" />
+        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.41" />
     </ItemGroup>
 
     <!-- LOCAL ENGINE: prebuilt DLLs from the HartsyInference Cli bin (its full runtime closure). Referenced
