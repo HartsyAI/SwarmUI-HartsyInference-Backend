@@ -2,13 +2,16 @@
 using System;
 using Newtonsoft.Json.Linq;
 using HartsyInference.Engine.Services;
+using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
 using SixLabors.ImageSharp.Formats.Jpeg;
+using SixLabors.ImageSharp.Formats.Webp;
 using ISImage = SixLabors.ImageSharp.Image;
 
 namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
-/// <summary>Turns the RGB preview the Engine attaches to a <see cref="StepPreview"/> tick into a base64 JPEG data URI
+/// <summary>Turns the RGB preview the Engine attaches to a <see cref="StepPreview"/> tick into a base64 JPEG or
+/// animated WebP data URI
 /// that the SwarmUI frontend renders through its existing <c>gen_progress.preview</c> handler.
 /// <para>Latent decoding (latent2rgb / TAESD) now belongs to the Engine — it owns the latent, and only it knows the
 /// architecture's factor table. This class is pure marshalling: pixels in, wire JSON out.</para>
@@ -43,6 +46,7 @@ public sealed class PreviewEncoder
             return null;
         }
         byte[]? rgb = preview.PreviewRgb;
+        byte[][]? frames = preview.PreviewFramesRgb;
         int w = preview.PreviewWidth;
         int h = preview.PreviewHeight;
         if (rgb is null || w <= 0 || h <= 0 || rgb.Length != w * h * 3)
@@ -55,7 +59,10 @@ public sealed class PreviewEncoder
             return null;
         }
         _lastEmitMs = now;
-        string dataUri = "data:image/jpeg;base64," + Convert.ToBase64String(EncodeJpeg(rgb, w, h));
+        bool animated = frames is { Length: > 1 } && AreValidFrames(frames, w, h);
+        byte[] encoded = animated ? EncodeAnimatedWebp(frames!, w, h) : EncodeJpeg(rgb, w, h);
+        string mime = animated ? "image/webp" : "image/jpeg";
+        string dataUri = $"data:{mime};base64," + Convert.ToBase64String(encoded);
         return new JObject
         {
             ["batch_index"] = batchId,
@@ -73,5 +80,43 @@ public sealed class PreviewEncoder
         using System.IO.MemoryStream ms = new();
         img.Save(ms, new JpegEncoder { Quality = 70 });
         return ms.ToArray();
+    }
+
+    /// <summary>Returns true when every frame is a complete RGB24 image of the declared dimensions.</summary>
+    private static bool AreValidFrames(byte[][] frames, int width, int height)
+    {
+        int expectedLength = width * height * 3;
+        foreach (byte[] frame in frames)
+        {
+            if (frame is null || frame.Length != expectedLength)
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /// <summary>Packages temporal latent previews as a looping animated WebP at six frames per second, matching
+    /// Swarm's Comfy sampler preview cadence. Lossy quality 60 and the fastest encoding method keep this suitable
+    /// for repeated WebSocket updates.</summary>
+    private static byte[] EncodeAnimatedWebp(byte[][] frames, int width, int height)
+    {
+        using SixLabors.ImageSharp.Image<Rgb24> animation = ISImage.LoadPixelData<Rgb24>(frames[0], width, height);
+        animation.Frames.RootFrame.Metadata.GetWebpMetadata().FrameDelay = 167U;
+        for (int i = 1; i < frames.Length; i++)
+        {
+            using SixLabors.ImageSharp.Image<Rgb24> frame = ISImage.LoadPixelData<Rgb24>(frames[i], width, height);
+            frame.Frames.RootFrame.Metadata.GetWebpMetadata().FrameDelay = 167U;
+            animation.Frames.AddFrame(frame.Frames.RootFrame);
+        }
+        animation.Metadata.GetWebpMetadata().RepeatCount = 0;
+        using System.IO.MemoryStream stream = new();
+        animation.Save(stream, new WebpEncoder
+        {
+            FileFormat = WebpFileFormatType.Lossy,
+            Quality = 60,
+            Method = WebpEncodingMethod.Fastest,
+        });
+        return stream.ToArray();
     }
 }
