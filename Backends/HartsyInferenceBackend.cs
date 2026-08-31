@@ -2005,16 +2005,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         // silently generate text-to-video, which looks like a working generation and is not. Checkpoint-aware:
         // Wan's Animate/VACE/S2V variants share the family compat classes (header-sniffed engine-side).
         VideoFeatures videoSupported = ModelSupport.SupportedVideoFeatures(compat, input.Get(T2IParamTypes.Model)?.RawFilePath);
-        // LTX-2.5 ships split across four files and must be handed to the Engine as a folder. Caught here rather than
-        // at load: an incomplete bundle makes the recipe fall back to LTX-2.3's Gemma 3 and 2.3 VAEs and generate a
-        // video with them, so "wrong model, plausible output" is the failure this prevents.
-        if (input.Get(T2IParamTypes.Model) is T2IModel videoModel
-            && videoModel.ModelClass?.ID == ModelSupport.Ltx25ModelClassId
-            && !ModelSupport.TryResolveLtx25Bundle(videoModel, out _, out string bundleProblem))
-        {
-            input.RefusalReasons.Add($"HartsyInference: LTX-2.5 bundle is incomplete — {bundleProblem}");
-            return false;
-        }
+        // LTX-2.5 ships split across four files and must be handed to the Engine as a folder. ModelSupport resolves
+        // those companions through Swarm's normal CommonModels/download path during construction, just as Comfy does.
         // Reference media rides the prompt box (core's internal PromptImages/Audios/Videos carriers), so these read
         // what the user attached there rather than a param control of ours.
         bool hasRefImages = input.TryGet(T2IParamTypes.PromptImages, out List<Image> refImgs) && refImgs is { Count: > 0 };

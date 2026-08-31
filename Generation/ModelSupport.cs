@@ -290,11 +290,11 @@ public static class ModelSupport
     /// <summary>The Gemma-4 tower. Deliberately NOT read from <c>CommonModels</c>: core doesn't register it there —
     /// its ComfyUI backend fetches it inline via <c>RequireClipModel</c> — so the URL and hash are mirrored from that
     /// call (<c>WorkflowGeneratorModelSupport.GetLTX25Gemma4Model</c>) rather than invented here.</summary>
-    private const string Ltx25GemmaFileName = "gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors";
+    private const string Ltx25GemmaFileName = "gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot-v2.safetensors";
 
-    private const string Ltx25GemmaUrl = "https://huggingface.co/mcmonkey/swarm-models/resolve/main/gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors";
+    private const string Ltx25GemmaUrl = "https://huggingface.co/mcmonkey/swarm-models/resolve/main/gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot-v2.safetensors";
 
-    private const string Ltx25GemmaHash = "09a89e084de1a149c3de60cfe9dfd3e5161967eb09eea39e806fcdeffdd568de";
+    private const string Ltx25GemmaHash = "6ce688a0aa98a5fa36a9f1e6c3f42152a498cc2b53ee8c15674c64244f91487f";
 
     /// <summary>Serialises staging so two concurrent generations can't half-build the same link set.</summary>
     private static readonly object _ltx25StageLock = new();
@@ -344,7 +344,7 @@ public static class ModelSupport
     /// <summary>Resolves a core known model to its on-disk path, downloading it into the folder core assigns when it
     /// isn't there. <paramref name="download"/> is false at validation time, where the question is only whether the
     /// registration exists at all — the fetch itself belongs at load, same as the ComfyUI backend.</summary>
-    private static string EnsureKnownModel(string knownId, string setName, bool download, out string problem)
+    private static string EnsureKnownModel(string knownId, string setName, bool download, T2IParamInput input, out string problem)
     {
         problem = null;
         if (!CommonModels.Known.TryGetValue(knownId, out CommonModels.ModelInfo known))
@@ -371,12 +371,11 @@ public static class ModelSupport
         }
         if (!download)
         {
-            // Registered, so it IS resolvable — validation is satisfied without paying for the download.
             return null;
         }
         Logs.Info($"[HartsyInference] LTX-2.5: '{known.DisplayName}' is missing — downloading it to '{path}' through "
             + "SwarmUI's known-model registry.");
-        known.DownloadNow().Wait();
+        known.DownloadNow(session: input?.SourceSession).Wait();
         Program.RefreshAllModelSets();
         if (!File.Exists(path))
         {
@@ -421,7 +420,7 @@ public static class ModelSupport
             return null;
         }
         Logs.Info($"[HartsyInference] LTX-2.5: the Gemma-4 text encoder is missing — downloading it to '{path}'.");
-        Utilities.DownloadFile(Ltx25GemmaUrl, path, null, verifyHash: Ltx25GemmaHash).Wait();
+        Utilities.DownloadFile(Ltx25GemmaUrl, path, null, verifyHash: Ltx25GemmaHash, session: input?.SourceSession).Wait();
         Program.RefreshAllModelSets();
         if (!File.Exists(path))
         {
@@ -454,7 +453,7 @@ public static class ModelSupport
                 + "fetch automatically).";
             return null;
         }
-        return EnsureKnownModel(Ltx25VideoVaeKnownId, "VAE", download, out problem);
+        return EnsureKnownModel(Ltx25VideoVaeKnownId, "VAE", download, input, out problem);
     }
 
     /// <summary>Resolves all four parts. With <paramref name="download"/> false this is the validation-time question
@@ -467,7 +466,7 @@ public static class ModelSupport
         {
             return false;
         }
-        string audioVae = EnsureKnownModel(Ltx25AudioVaeKnownId, "VAE", download, out problem);
+        string audioVae = EnsureKnownModel(Ltx25AudioVaeKnownId, "VAE", download, input, out problem);
         if (problem is not null)
         {
             return false;
@@ -476,11 +475,6 @@ public static class ModelSupport
         if (problem is not null)
         {
             return false;
-        }
-        if (!download)
-        {
-            // Nulls here mean "registered but not downloaded yet", which is fine — nothing left to check.
-            return true;
         }
         List<string> missing = [];
         if (videoVae is null)
