@@ -172,7 +172,9 @@
              merge and publish the engine FIRST, then this pin. -->
         <!-- 2.0.0-alpha.42 = complete latent-preview coverage for every registered image/video family,
              including full temporal video frames for animated WebP previews and direct API/CLI consumers. -->
-        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.42" />
+        <!-- 2.0.0-alpha.44 = side-model download policy change (strict pathing unless user grants consent) + public-side-model
+             selection work for LTX-2.5 (upscaler repack selection and no implicit fetch on missing side models). -->
+        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.44" />
     </ItemGroup>
 
     <!-- LOCAL ENGINE: prebuilt DLLs from the HartsyInference Cli bin (its full runtime closure). Referenced
