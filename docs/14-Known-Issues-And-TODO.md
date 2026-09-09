@@ -18,17 +18,14 @@ not here — they move too fast for a hand-maintained table to stay honest.
 - **Single-batch only.** Batch > 1 not validated; several pipelines are explicitly
   sized for B=1 in their activation buffers.
 - **SeedVR2 restore on a fresh install** (found 2026-09-09 on swarm.hartsy.ai, where the
-  Restore group failed with only "Something went wrong" over HTTP). Two causes, one fixed:
+  Restore group failed with only "Something went wrong" over HTTP). Two causes, both fixed:
   the extension never downloaded the catalog's assets despite the param text promising
-  "fetched on first use", so `RestoreService` threw `FileNotFoundException` for a missing
-  `Models/Video/SeedVr2/` checkpoint and nothing turned that into a readable error — now
-  `ResolveAuxModel` fetches on first use and every restore/upscale/cutout failure is a
-  `SwarmReadableErrorException`. Still open: the catalog's third SeedVR2 asset, the frozen
-  pos/neg embeddings, points at `HartsyAI/SeedVR2-safetensors`, which answers 401 (private
-  or not yet published) and carries no hash. Until that repo is public, the first-use
-  download of `seedvr2_embeddings.safetensors` fails with the HTTP error in the message and
-  the file has to be placed by hand (or `HF_TOKEN` for an account with access set in the
-  SwarmUI environment). Not reproducible on this machine (no GPU); verify on prod.
+  "fetched on first use" (now `ResolveAuxModel`, and every restore/upscale/cutout failure
+  is a `SwarmReadableErrorException`), and the catalog's embeddings asset pointed at a
+  private repo (engine alpha.57 fetches the public `ByteDance-Seed/SeedVR2-3B/pos_emb.pt`).
+  `hartsy pull seedvr2-3b` completes on a fresh box. Still unverified end-to-end: SeedVR2
+  inference needs the CUDA backend (the CPU backend is F32-only and the DiT keeps F16
+  biases), so the restore pass on a still has only been exercised up to weight loading here.
 
 ## TODO
 

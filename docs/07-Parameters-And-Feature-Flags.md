@@ -34,8 +34,13 @@ after `Images.GenerateAsync` (and after the SeedVR2 restore pass, when that is o
   plain shrink. *With* a refiner model the value still goes to the engine's PostApply
   hand-off, untouched here (the hires-fix item, punchlist P2).
 
-Both fetch their weights on first use (`ResolveAuxModel`): RMBG-1.4 is a gated
-HuggingFace repo, so the SwarmUI process needs `HF_TOKEN` for that one.
+Both fetch their weights on first use (`ResolveAuxModel`). `briaai/RMBG-1.4` was gated
+on HuggingFace when this shipped and is not as of 2026-09-09; if it is gated again, set
+`HF_TOKEN` in the SwarmUI environment (or point the engine catalog at one of the
+byte-identical mirrors). Verified end-to-end 2026-09-09 through SwarmUI's own API on a CPU
+backend with SD1.5: Remove Background at creativity 0 returns a colour-type-6 PNG with a
+full-range matte; Refiner Upscale 4 returns 1024 px from a 256 px init image, markedly
+sharper than a bilinear resize; Refiner Upscale 2 on `real-esrgan-x2plus` returns exactly 2×.
 
 ### B. ComfyUI-extension parameters that we want to support
 
