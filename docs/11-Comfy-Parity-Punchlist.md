@@ -45,12 +45,18 @@ upstream (waiting on HartsyInference.Core).
   is accepted. Batch size > 1 IS still a genuine gap: `Batch = 1` always, with
   "Swarm drives batching itself: one Generate call per image" — there is no
   latent-batched generation path.
-- [ ] **P2 — Hires fix / 2-pass upscale (`RefinerUpscale != 1`).** The value
-  is read (`Refiner.Upscale`) and passed through, but `SdxlRecipePipeline`
-  logs a warning and ignores it — StepSwap keeps the base latent resolution.
-  Needs a tiled `VaeEncoder` (`EncodeTiled`) plus a latent-upscale-and-redenoise
-  pass. Pixel-space upscale (Real-ESRGAN / SeedVR2) already ships as a
-  separate feature (Tier 1) but isn't wired into this dropdown.
+- [ ] **P2 — Hires fix / 2-pass upscale (`RefinerUpscale != 1` WITH a refiner
+  model).** The value is read (`Refiner.Upscale`) and passed through, but
+  `SdxlRecipePipeline` logs a warning and ignores it on StepSwap — only the
+  PostApply hand-off resizes. Needs a tiled `VaeEncoder` (`EncodeTiled`) plus a
+  latent-upscale-and-redenoise pass; the `latent-*` upscale methods are refused
+  without a refiner model for the same reason. **Done 2026-09-09, the other
+  half:** `RefinerUpscale` with NO refiner model is honored as a pixel-space
+  pass over the finished image (`UpscaleStill`) — Real-ESRGAN x2plus/x4plus/
+  anime6b through the engine's `VisionMode.Upscale` (fit to width×factor, at
+  most two model passes then a downsize), or SeedVR2 via `engine.Restore` —
+  and `refinerupscalemethod` is back in `HonoredComfyParams` with its own
+  dropdown entries (`real-esrgan-*`, `seedvr2`; see `ResolveUpscaleModel`).
 - [x] **P3 — Graceful refusal of unsupported prompt syntax.** `<object:>`,
   `<clear:>`, `<embed:>`, `<break>` are hard-refused at validation
   (`UnsupportedPromptSyntax` regex) — the Engine has no conditioning contract
@@ -144,10 +150,18 @@ upstream (waiting on HartsyInference.Core).
   refiner phase — their conditioning is sized for the base UNet, not the
   4-level refiner. `StepSwapNoisy` (re-noise at the swap point) stays
   deferred as a minor variant.
-- [~] **Upscaling** — `HartsyInference.Vision/Upscale` (Real-ESRGAN, image)
+- [x] **Upscaling** — `HartsyInference.Vision/Upscale` (Real-ESRGAN, image)
   and SeedVR2 restoration (`engine.Restore`, video+image, wired into this
-  extension's Restore / Upscale group) both ship. The only remaining gap is the
-  image-side "Refiner Upscale Method" dropdown — see P2.
+  extension's Restore / Upscale group) both ship, and since 2026-09-09 the
+  image-side "Refiner Upscale" / "Refiner Upscale Method" pair drives them
+  without a refiner model (see P2). The latent methods remain P2.
+- [x] **Remove Background** (core `removebackground`, "internally uses RemBG")
+  — 2026-09-09: after every other pass, the engine's RMBG-1.4 matte over the
+  finished pixels becomes an RGBA PNG (`RgbToImage.FromHwcRgba`). Runs at Init
+  Image Creativity 0 too, since the engine's init-image short-circuit happens
+  before the post passes. Weights (`briaai/RMBG-1.4`, gated on HF) fetch on
+  first use through `ResolveAuxModel`, which needs `HF_TOKEN` in SwarmUI's
+  environment for that repo.
 
 ## Tier 2 — Sampling / quality
 

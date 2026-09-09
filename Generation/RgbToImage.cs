@@ -1,5 +1,9 @@
+using System.IO;
+using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.Formats.Png;
 using SixLabors.ImageSharp.PixelFormats;
 using SixLabors.ImageSharp.Processing;
+using SwarmUI.Media;
 using ISImage = SixLabors.ImageSharp.Image;
 using Image = SwarmUI.Utils.Image;
 
@@ -30,6 +34,58 @@ public static class RgbToImage
         // ImageSharp's Image<Rgb24>.LoadPixelData expects the same HWC layout.
         using var image = ISImage.LoadPixelData<Rgb24>(rgbData, width, height);
         return new Image(image);
+    }
+
+    /// <summary>Wraps HWC RGB bytes plus a straight 8-bit alpha plane (255 = opaque) as a SwarmUI Image, encoded
+    /// as an RGBA PNG (colour type 6) explicitly — a cutout only exists if the alpha survives the encode, and
+    /// ImageSharp's default colour-type choice is not something to rely on for that.</summary>
+    public static Image FromHwcRgba(byte[] rgbData, byte[] alpha, int width, int height)
+    {
+        if (rgbData is null || rgbData.Length != width * height * 3)
+        {
+            throw new ArgumentException(
+                $"RGB data length {rgbData?.Length ?? 0} does not match expected {width * height * 3} for {width}x{height}.",
+                nameof(rgbData));
+        }
+        if (alpha is null || alpha.Length != width * height)
+        {
+            throw new ArgumentException(
+                $"Alpha length {alpha?.Length ?? 0} does not match expected {width * height} for {width}x{height}.",
+                nameof(alpha));
+        }
+        byte[] rgba = new byte[width * height * 4];
+        for (int p = 0, s = 0, d = 0; p < width * height; p++, s += 3, d += 4)
+        {
+            rgba[d] = rgbData[s];
+            rgba[d + 1] = rgbData[s + 1];
+            rgba[d + 2] = rgbData[s + 2];
+            rgba[d + 3] = alpha[p];
+        }
+        using var image = ISImage.LoadPixelData<Rgba32>(rgba, width, height);
+        using var stream = new MemoryStream();
+        image.SaveAsPng(stream, new PngEncoder { ColorType = PngColorType.RgbWithAlpha, CompressionLevel = PngCompressionLevel.Level1 });
+        return new Image(stream.ToArray(), MediaType.ImagePng);
+    }
+
+    /// <summary>Plain resample of HWC RGB bytes to a new size (ImageSharp's default bicubic). The honest thing to do
+    /// for a Refiner Upscale below 1 — a shrink has nothing to super-resolve.</summary>
+    public static byte[] ResizeHwcRgb(byte[] rgbData, int width, int height, int newWidth, int newHeight)
+    {
+        if (rgbData is null || rgbData.Length != width * height * 3)
+        {
+            throw new ArgumentException(
+                $"RGB data length {rgbData?.Length ?? 0} does not match expected {width * height * 3} for {width}x{height}.",
+                nameof(rgbData));
+        }
+        if (newWidth == width && newHeight == height)
+        {
+            return rgbData;
+        }
+        using var image = ISImage.LoadPixelData<Rgb24>(rgbData, width, height);
+        image.Mutate(x => x.Resize(newWidth, newHeight));
+        byte[] rgb = new byte[newWidth * newHeight * 3];
+        image.CopyPixelDataTo(rgb);
+        return rgb;
     }
 
     /// <summary>Decodes only the image header to get pixel dimensions (no full decode) — used to

@@ -20,6 +20,23 @@ Prompt, negative prompt, width, height, steps, CFG, seed, model, LoRAs. These ar
 registered in Swarm core with no `FeatureFlag` (or with the universal `"text2image"`
 flag). They surface for any backend.
 
+Two of them describe a pass over the *finished* image rather than the denoise, and the
+engine's request contract has no slot for that, so `GenerateImage` runs them itself
+after `Images.GenerateAsync` (and after the SeedVR2 restore pass, when that is on):
+
+- **`removebackground`** ("Remove Background", core says "internally uses RemBG") —
+  the engine's RMBG-1.4 matte (`VisionMode.BackgroundRemoval`, `ImageData.Alpha`)
+  over the original colours, returned as an RGBA PNG. Runs at Init Image Creativity 0
+  as well, because the engine's init-image short-circuit happens before this.
+- **`refinerupscale`** with **no** refiner model — a pixel-space enlargement to
+  `width×factor` by `height×factor`: Real-ESRGAN (x2plus up to 2×, x4plus above)
+  through `VisionMode.Upscale`, or SeedVR2 through `engine.Restore`. Below 1 it is a
+  plain shrink. *With* a refiner model the value still goes to the engine's PostApply
+  hand-off, untouched here (the hires-fix item, punchlist P2).
+
+Both fetch their weights on first use (`ResolveAuxModel`): RMBG-1.4 is a gated
+HuggingFace repo, so the SwarmUI process needs `HF_TOKEN` for that one.
+
 ### B. ComfyUI-extension parameters that we want to support
 
 The ComfyUI backend extension registers ~60 params with `FeatureFlag: "comfyui"`:
@@ -53,9 +70,16 @@ The honest pattern is therefore a **two-layer** one:
    can't service. The guard iterates the params present on the request, and refuses any
    `"comfyui"`-flagged one that isn't in a small allow-list of params we genuinely honor
    (`HonoredComfyParams`): Sampler, Scheduler, Use TCFG, the FLUX.1 Redux style-model
-   strengths (merge/multiply/apply-start), and the IP-Adapter scheduling knobs
+   strengths (merge/multiply/apply-start), the IP-Adapter scheduling knobs
    (weight/start/end/weight-type) — mapped onto the engine's
-   `redux.*` / `ipadapter.*` Extra keys respectively. Custom-workflow IR (`comfyworkflowraw` /
+   `redux.*` / `ipadapter.*` Extra keys respectively — and Refiner Upscale Method, which
+   picks the pixel-space upscaler when Refiner Upscale is set without a refiner model.
+   Our `OnInit` appends four entries to Comfy's dropdown for it (`real-esrgan-x4plus`,
+   `real-esrgan-x2plus`, `real-esrgan-anime6b`, `seedvr2`), since core validates a
+   dropdown value against its list; unset and `pixel-*` map onto Real-ESRGAN by factor,
+   a `model-<file>` from Comfy's upscale_models folder picks the nearest variant by name,
+   and `latent-*` is refused without a refiner model (it needs the refiner's re-denoise).
+   Custom-workflow IR (`comfyworkflowraw` /
    `comfyuicustomworkflow`) is refused explicitly. So advertising `"comfyui"` does **not**
    mean "we silently serve everything Comfy-tagged."
 
@@ -241,7 +265,7 @@ How a request routes when both backends exist:
 | Plain gen, model only HartsyInference has (e.g. nvfp4 Ideogram) | HartsyInference (model-availability filter) |
 | Plain gen, model both backends have | Either — load-balanced. Pin one with the **Backend Type** or **Exact Backend ID** advanced params |
 | Custom ComfyUI workflow, or any comfyui-only param we can't run | Comfy (our `IsValidForThisBackend` guard refuses and routes there) |
-| Sampler / Scheduler set, Redux style-model strengths, IP-Adapter scheduling knobs | Either — we honor these (`HonoredComfyParams` allow-list). A sampler or schedule the selected family cannot run is refused by `ValidateSamplingChoice` and routes to Comfy |
+| Sampler / Scheduler set, Redux style-model strengths, IP-Adapter scheduling knobs, Refiner Upscale Method | Either — we honor these (`HonoredComfyParams` allow-list). A sampler or schedule the selected family cannot run is refused by `ValidateSamplingChoice` and routes to Comfy; a `latent-*` upscale method without a refiner model routes there too |
 
 Two invariants make this work:
 

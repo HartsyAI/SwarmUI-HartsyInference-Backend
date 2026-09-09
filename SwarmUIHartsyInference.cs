@@ -174,6 +174,28 @@ public class SwarmUIHartsyInference : Extension
         }
     }
 
+    /// <summary>Adds this backend's pixel-space upscalers to Comfy's Refiner Upscale Method dropdown. Core validates a
+    /// dropdown value against its list, so without these entries a user could only reach Real-ESRGAN by the
+    /// <c>model-*</c> names of files in Comfy's upscale_models folder. The plain <c>pixel-*</c> values and the
+    /// default map onto Real-ESRGAN by factor; <c>latent-*</c> still needs a refiner model (see
+    /// <c>HartsyInferenceBackend.ValidateImageFeatures</c>).</summary>
+    private static void PopulateUpscaleMethodValues()
+    {
+        try
+        {
+            T2IParamTypes.ConcatDropdownValsClean(
+                ref SwarmUI.Builtin_ComfyUIBackend.ComfyUIBackendExtension.UpscalerModels,
+                ["real-esrgan-x4plus///Real-ESRGAN x4plus (HartsyInference)",
+                 "real-esrgan-x2plus///Real-ESRGAN x2plus (HartsyInference)",
+                 "real-esrgan-anime6b///Real-ESRGAN x4plus anime 6B (HartsyInference)",
+                 "seedvr2///SeedVR2 restore (HartsyInference)"]);
+        }
+        catch (Exception ex)
+        {
+            Logs.Error($"[HartsyInference] Failed to add the Real-ESRGAN / SeedVR2 entries to the Refiner Upscale Method dropdown: {ex.Message}");
+        }
+    }
+
     /// <summary>Lists <c>&lt;ModelRoot&gt;/ipadapter/*.safetensors|*.bin</c> into the Comfy extension's IP-Adapter dropdown values.</summary>
     private static void PopulateIpAdapterModels()
     {
@@ -221,6 +243,7 @@ public class SwarmUIHartsyInference : Extension
         PopulateIpAdapterModels();
         Program.ModelRefreshEvent += PopulateIpAdapterModels;
         PopulateSamplerValues();
+        PopulateUpscaleMethodValues();
 
         // 1. Param groups. There is deliberately no group named after this extension: a group named for the
         //    backend can never be model-scoped, which is what left every param below permanently visible.
