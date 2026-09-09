@@ -130,6 +130,8 @@ Generate with families such as Stable Diffusion 1.5, SDXL, SD3, SD3.5, FLUX.1, F
 - Start from an existing image and control how much it changes.
 - Paint a mask over an area to replace or repair it.
 - Refine one model's result with another supported image model.
+- Enlarge a finished image with Real-ESRGAN or SeedVR2 (**Refiner Upscale** with no refiner model; **Refiner Upscale Method** picks the engine).
+- Cut the subject out as a transparent PNG with **Remove Background**.
 - Make seamless images for repeating textures and backgrounds.
 - Use supported reference-image models for instruction-based edits.
 

@@ -643,23 +643,24 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         ImageResult result = await _engine.Images.GenerateAsync(spec, request, progress, cancel);
         byte[] rgb = result.Rgb;
         int width = result.Width, height = result.Height;
+        // Every pass below runs on whatever the engine returned — including the untouched init image an
+        // Init Image Creativity of 0 short-circuits to — so a tool can ask for "just remove the background" or
+        // "just upscale" without paying for a denoise it does not want.
         // Optional SeedVR2 restore/upscale pass over the still (same param group as the video path). No
         // FreeMemory here: RestoreService frees on pipeline load, and evicting a cached image model every
         // generation would defeat the pipeline cache.
         if (input.TryGet(SwarmUIHartsyInference.RestoreModelParam, out string restoreModel)
             && !string.IsNullOrWhiteSpace(restoreModel))
         {
-            ModelSpec restoreSpec = ModelResolver.Resolve(restoreModel, null, Modality.Restore);
-            RestoreRequest restoreRequest = BuildRestoreKnobs(input) with
-            {
-                Image = new ImageData { Rgb = rgb, Width = width, Height = height },
-            };
-            await foreach (VideoFrame restored in _engine.Restore.RestoreAsync(restoreSpec, restoreRequest, progress, cancel))
-            {
-                rgb = restored.Rgb;
-                width = restored.Width;
-                height = restored.Height;
-            }
+            (rgb, width, height) = await RestoreStill(restoreModel, rgb, width, height, BuildRestoreKnobs(input), progress, cancel);
+        }
+        // Core's Refiner Upscale with no refiner model is a plain enlargement of the finished image (Comfy reads
+        // that combination the same way), so it runs here as a Real-ESRGAN or SeedVR2 pixel-space pass. With a
+        // refiner model the engine's PostApply hand-off owns the resize instead (BuildRefiner passes Upscale through).
+        if (input.Get(T2IParamTypes.RefinerModel) is null
+            && input.TryGet(T2IParamTypes.RefinerUpscale, out double upscaleFactor) && Math.Abs(upscaleFactor - 1.0) > 1e-6)
+        {
+            (rgb, width, height) = await UpscaleStill(input, upscaleFactor, rgb, width, height, progress, cancel);
         }
         // Engine-side metadata (resolved arch/seed/steps) folds into Swarm's saved-image metadata; "arch" in
         // particular is checkpoint-sniffed by the engine and not derivable Swarm-side.
@@ -668,7 +669,190 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             input.ExtraMeta[$"hartsy_{meta.Key}"] = meta.Value;
         }
         input.ExtraMeta["hartsy_engine_seed"] = result.Seed;
+        // Core's Remove Background runs last, at the final resolution, and yields a real RGBA cutout: the engine's
+        // RMBG-1.4 matte over the ORIGINAL colours (its gray composite is for the image→3D preprocessors, not here).
+        if (input.Get(T2IParamTypes.RemoveBackground, false))
+        {
+            byte[] alpha = await RemoveBackground(rgb, width, height, cancel);
+            return RgbToImage.FromHwcRgba(rgb, alpha, width, height);
+        }
         return RgbToImage.FromHwcRgb(rgb, width, height);
+    }
+
+    // ─────────────────────────── Post-generation passes (restore / upscale / cutout) ───────────────────────────
+
+    /// <summary>The Refiner Upscale Method value that routes the pixel-space pass to SeedVR2 instead of Real-ESRGAN.</summary>
+    private const string SeedVr2UpscaleMethod = "seedvr2";
+
+    /// <summary>Resolves a catalog model for an auxiliary pass (SeedVR2, Real-ESRGAN, RMBG) and fetches any asset its
+    /// catalog entry lists that is not on disk yet — the "weights are fetched on first use" the Restore group has
+    /// promised. The engine deliberately never downloads at generate time (its CLI asks first), which is why a
+    /// missing SeedVR2 checkpoint used to surface as T2IEngine's bare "Something went wrong": the
+    /// <see cref="FileNotFoundException"/> it threw was not a readable error. A missing id, a failed download and a
+    /// gated repo without an <c>HF_TOKEN</c> in this process's environment all become one here.</summary>
+    private static async Task<ModelSpec> ResolveAuxModel(string id, Modality modality, CancellationToken cancel)
+    {
+        ModelSpec spec = ModelResolver.Resolve(id, null, modality);
+        if (spec.Catalog is null)
+        {
+            if (spec.LocalPath is not null)
+            {
+                return spec;
+            }
+            throw new SwarmReadableErrorException(
+                $"HartsyInference: '{id}' is neither a catalog model id nor a checkpoint path on this machine.");
+        }
+        IReadOnlyList<ModelAsset> missing = ModelDownloader.MissingAssets(spec.Catalog);
+        if (missing.Count == 0)
+        {
+            return spec;
+        }
+        string files = string.Join(", ", missing.Select(a => $"{a.Repo}/{a.RepoPath}"));
+        Logs.Info($"[HartsyInference] {spec.Catalog.DisplayName}: fetching {missing.Count} file(s) on first use — {files}");
+        try
+        {
+            Dictionary<string, int> lastBucket = new();
+            await ModelDownloader.DownloadAsync(missing, (asset, fraction) =>
+            {
+                int bucket = (int)(fraction * 4);
+                if (bucket > lastBucket.GetValueOrDefault(asset.FileName, -1))
+                {
+                    lastBucket[asset.FileName] = bucket;
+                    Logs.Info($"[HartsyInference] {asset.FileName}: {fraction * 100:0}%");
+                }
+            }, cancel);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            throw new SwarmReadableErrorException(
+                $"HartsyInference: could not fetch {spec.Catalog.DisplayName} ({files}): {ex.Message}\n\n"
+                + $"Place the file(s) under '{Path.Combine(RepoPaths.ModelsRoot(), missing[0].TargetSubdir)}' by hand, "
+                + "or set HF_TOKEN in SwarmUI's environment if the repo is gated or private.");
+        }
+        return ModelResolver.Resolve(id, null, modality);
+    }
+
+    /// <summary>SeedVR2 over one still, with the engine's own failure text kept readable (the HTTP API otherwise
+    /// collapses everything but a SwarmReadableErrorException into "Something went wrong").</summary>
+    private async Task<(byte[] Rgb, int Width, int Height)> RestoreStill(string restoreModel, byte[] rgb, int width, int height,
+        RestoreRequest knobs, IProgress<StepPreview> progress, CancellationToken cancel)
+    {
+        ModelSpec restoreSpec = await ResolveAuxModel(restoreModel, Modality.Restore, cancel);
+        RestoreRequest restoreRequest = knobs with
+        {
+            Image = new EngineImage { Rgb = rgb, Width = width, Height = height },
+        };
+        try
+        {
+            await foreach (VideoFrame restored in _engine.Restore.RestoreAsync(restoreSpec, restoreRequest, progress, cancel))
+            {
+                rgb = restored.Rgb;
+                width = restored.Width;
+                height = restored.Height;
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException and not OutOfVramException and not SwarmReadableErrorException)
+        {
+            throw new SwarmReadableErrorException($"HartsyInference: the SeedVR2 restore pass ({restoreModel}) failed: {ex.Message}");
+        }
+        return (rgb, width, height);
+    }
+
+    /// <summary>Refiner Upscale with no refiner model: enlarge the finished still by <paramref name="factor"/> in pixel
+    /// space. The Refiner Upscale Method value picks the engine (<see cref="ResolveUpscaleModel"/>); the engine fits the
+    /// result to <c>width×factor</c> by <c>height×factor</c> exactly (Real-ESRGAN runs whole model passes then resizes
+    /// down, SeedVR2 treats it as an area target). A factor below 1 is a plain shrink.</summary>
+    private async Task<(byte[] Rgb, int Width, int Height)> UpscaleStill(T2IParamInput input, double factor, byte[] rgb, int width, int height,
+        IProgress<StepPreview> progress, CancellationToken cancel)
+    {
+        int targetWidth = Math.Max(1, (int)Math.Round(width * factor));
+        int targetHeight = Math.Max(1, (int)Math.Round(height * factor));
+        if (factor < 1.0)
+        {
+            return (RgbToImage.ResizeHwcRgb(rgb, width, height, targetWidth, targetHeight), targetWidth, targetHeight);
+        }
+        input.TryGet(ComfyUIBackendExtension.RefinerUpscaleMethod, out string method);
+        string model = ResolveUpscaleModel(method, factor);
+        Logs.Info($"[HartsyInference] Refiner Upscale x{factor}: {width}x{height} → {targetWidth}x{targetHeight} via {model} (method '{method ?? "default"}').");
+        if (model == SeedVr2UpscaleMethod)
+        {
+            string restoreModel = input.TryGet(SwarmUIHartsyInference.RestoreModelParam, out string picked) && !string.IsNullOrWhiteSpace(picked)
+                ? picked
+                : "seedvr2-3b";
+            RestoreRequest knobs = BuildRestoreKnobs(input) with { TargetWidth = targetWidth, TargetHeight = targetHeight };
+            return await RestoreStill(restoreModel, rgb, width, height, knobs, progress, cancel);
+        }
+        ModelSpec spec = await ResolveAuxModel(model, Modality.Vision, cancel);
+        VisionResult result = await RunVision(spec, new VisionRequest
+        {
+            Image = new EngineImage { Rgb = rgb, Width = width, Height = height },
+            Mode = VisionMode.Upscale,
+            TargetWidth = targetWidth,
+            TargetHeight = targetHeight,
+        }, "Real-ESRGAN upscale", cancel);
+        EngineImage up = result.Image
+            ?? throw new SwarmReadableErrorException("HartsyInference: the Real-ESRGAN upscale pass returned no image.");
+        return (up.Rgb, up.Width, up.Height);
+    }
+
+    /// <summary>Maps Comfy's Refiner Upscale Method value onto the pass this backend runs. Unset and the
+    /// <c>pixel-*</c> resamplers both become Real-ESRGAN (x2plus up to 2×, x4plus above — a model pass beats any
+    /// resampler for the same request); the extension's own <c>real-esrgan-*</c> / <c>seedvr2</c> entries are
+    /// literal; a <c>model-&lt;file&gt;</c> from Comfy's upscale_models folder picks the nearest Real-ESRGAN variant
+    /// by name, since that folder's arbitrary ESRGAN architectures are not loadable here. <c>latent-*</c> never
+    /// reaches this: <see cref="ValidateImageFeatures"/> refuses it without a refiner model.</summary>
+    private static string ResolveUpscaleModel(string method, double factor)
+    {
+        string m = (method ?? "").Trim().ToLowerInvariant();
+        if (m.Contains("seedvr"))
+        {
+            return SeedVr2UpscaleMethod;
+        }
+        if (m.StartsWith("real-esrgan-", StringComparison.Ordinal))
+        {
+            return m;
+        }
+        if (m.StartsWith("model-", StringComparison.Ordinal))
+        {
+            if (m.Contains("anime"))
+            {
+                return "real-esrgan-anime6b";
+            }
+            return m.Contains("x2") || m.Contains("2x") ? "real-esrgan-x2plus" : "real-esrgan-x4plus";
+        }
+        return factor <= 2.0 + 1e-6 ? "real-esrgan-x2plus" : "real-esrgan-x4plus";
+    }
+
+    /// <summary>RMBG-1.4 matte for the finished still: the engine's background removal returns the gray composite
+    /// the image→3D pipelines want plus the 8-bit alpha plane (engine 2.0.0-alpha.56+); only the plane is used here.</summary>
+    private async Task<byte[]> RemoveBackground(byte[] rgb, int width, int height, CancellationToken cancel)
+    {
+        ModelSpec spec = await ResolveAuxModel("rmbg", Modality.Vision, cancel);
+        VisionResult result = await RunVision(spec, new VisionRequest
+        {
+            Image = new EngineImage { Rgb = rgb, Width = width, Height = height },
+            Mode = VisionMode.BackgroundRemoval,
+        }, "background removal", cancel);
+        if (result.Image?.Alpha is not { } alpha || alpha.Length != width * height)
+        {
+            throw new SwarmReadableErrorException(
+                "HartsyInference: background removal returned no alpha plane — the engine build predates 2.0.0-alpha.56.");
+        }
+        return alpha;
+    }
+
+    /// <summary>One vision call with the engine's failure text kept readable; VRAM exhaustion and cancellation pass
+    /// through untouched so the retry-once and cancel paths in <c>GenerateAsync</c> still see them.</summary>
+    private async Task<VisionResult> RunVision(ModelSpec spec, VisionRequest request, string label, CancellationToken cancel)
+    {
+        try
+        {
+            return await _engine.Vision.RunAsync(spec, request, cancel);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException and not OutOfVramException and not SwarmReadableErrorException)
+        {
+            throw new SwarmReadableErrorException($"HartsyInference: the {label} pass failed: {ex.Message}");
+        }
     }
 
     /// <summary>The restore knobs shared by the still and video paths (target size, strength, seed).</summary>
@@ -741,7 +925,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         {
             // The resident T2V DiT and SeedVR2's VAE peak cannot share 24 GB.
             _engine.FreeMemory();
-            ModelSpec restoreSpec = ModelResolver.Resolve(restoreModel, null, Modality.Restore);
+            ModelSpec restoreSpec = await ResolveAuxModel(restoreModel, Modality.Restore, cancel);
             RestoreRequest restoreRequest = BuildRestoreKnobs(input) with
             {
                 Frames = [.. frames.Select(f => new ImageData { Rgb = f, Width = width, Height = height })],
@@ -1768,12 +1952,6 @@ public class HartsyInferenceBackend : AbstractT2IBackend
 
     // ─────────────────────────────── 5. Validation (the honesty guard) ───────────────────────────────
 
-    /// <summary>Cleaned IDs of "comfyui"-tagged params we genuinely service, so the comfy-only guard in
-    /// <see cref="IsValidForThisBackend"/> doesn't falsely refuse them. <c>refinersampler</c>/<c>refinerscheduler</c>/
-    /// <c>refinerupscalemethod</c> were removed 2026-08-09: they allow-listed but <see cref="BuildRefiner"/> never
-    /// read any of them — StepSwap shares the base loop's scheduler by construction (no independent refiner
-    /// sampler/scheduler exists to honor), and upscale-method has no consumer until hires-fix ships. Re-add
-    /// <c>refinerupscalemethod</c> only once a real consumer exists.</summary>
     /// <summary>Refuses a sampler or sigma schedule the selected family cannot run, for EVERY family rather than the
     /// SD pair this used to cover.
     ///
@@ -1840,11 +2018,19 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         return true;
     }
 
+    /// <summary>Cleaned IDs of "comfyui"-tagged params we genuinely service, so the comfy-only guard in
+    /// <see cref="IsValidForThisBackend"/> doesn't falsely refuse them. <c>refinersampler</c>/<c>refinerscheduler</c>
+    /// were removed 2026-08-09: they allow-listed but <see cref="BuildRefiner"/> never read them — StepSwap shares the
+    /// base loop's scheduler by construction, so no independent refiner sampler/scheduler exists to honor.
+    /// <c>refinerupscalemethod</c> came back 2026-09-09 with its first real consumer, <see cref="UpscaleStill"/>.</summary>
     private static readonly HashSet<string> HonoredComfyParams =
         ["sampler", "scheduler",
          // Tangential Damping CFG — Comfy's param drives our own ImageRequest.Tcfg (same paper, same boolean),
          // so we honor it rather than registering a second control beside it.
          "usetcfg",
+         // Refiner Upscale Method — picks the pixel-space engine (Real-ESRGAN variant or SeedVR2) for a Refiner
+         // Upscale with no refiner model; see ResolveUpscaleModel for the value mapping.
+         "refinerupscalemethod",
          // Style-model (FLUX.1 Redux) strengths — mapped onto the engine's redux.* Extra keys.
          "stylemodelmergestrength", "stylemodelmultiplystrength", "stylemodelapplystart",
          // IP-Adapter scheduling knobs — mapped onto the engine's ipadapter.* Extra keys.
@@ -2073,6 +2259,19 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     {
         if (!ValidateSamplingChoice(input, family))
         {
+            return false;
+        }
+        // Refiner Upscale without a refiner model is a pixel-space pass here (Real-ESRGAN / SeedVR2). The latent
+        // methods need the refiner's re-denoise — that is the hires-fix item (P2) — so refuse them and let Comfy serve.
+        if (input.Get(T2IParamTypes.RefinerModel) is null
+            && input.TryGet(T2IParamTypes.RefinerUpscale, out double upscale) && upscale > 1.0 + 1e-6
+            && input.TryGet(ComfyUIBackendExtension.RefinerUpscaleMethod, out string upscaleMethod)
+            && upscaleMethod is not null && upscaleMethod.StartsWith("latent", StringComparison.OrdinalIgnoreCase))
+        {
+            input.RefusalReasons.Add(
+                $"HartsyInference: the '{upscaleMethod}' upscale method needs a refiner model's latent pass. Without a "
+                + "refiner this backend upscales in pixel space — pick a Pixel, Model, Real-ESRGAN or SeedVR2 method, "
+                + "or use a ComfyUI backend for this generation.");
             return false;
         }
         // A refiner MODEL must come from a family whose recipe can consume an init image — that is the PostApply

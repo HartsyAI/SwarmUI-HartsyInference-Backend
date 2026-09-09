@@ -174,7 +174,7 @@
              including full temporal video frames for animated WebP previews and direct API/CLI consumers. -->
         <!-- 2.0.0-alpha.44 = side-model download policy change (strict pathing unless user grants consent) + public-side-model
              selection work for LTX-2.5 (upscaler repack selection and no implicit fetch on missing side models). -->
-        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.44" />
+        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.56" />
     </ItemGroup>
 
     <!-- LOCAL ENGINE: prebuilt DLLs from the HartsyInference Cli bin (its full runtime closure). Referenced
