@@ -23,9 +23,11 @@ not here — they move too fast for a hand-maintained table to stay honest.
   "fetched on first use" (now `ResolveAuxModel`, and every restore/upscale/cutout failure
   is a `SwarmReadableErrorException`), and the catalog's embeddings asset pointed at a
   private repo (engine alpha.57 fetches the public `ByteDance-Seed/SeedVR2-3B/pos_emb.pt`).
-  `hartsy pull seedvr2-3b` completes on a fresh box. Still unverified end-to-end: SeedVR2
-  inference needs the CUDA backend (the CPU backend is F32-only and the DiT keeps F16
-  biases), so the restore pass on a still has only been exercised up to weight loading here.
+  `hartsy pull seedvr2-3b` completes on a fresh box. Verified end-to-end 2026-09-10 through
+  SwarmUI's own API on a CPU backend (engine alpha.58, which casts the fp16 checkpoints to
+  F32 for the F32-only CPU kernels): the `seedvr2` Refiner Upscale Method takes a 96x64 init
+  image to 192x128 in under 8 minutes, and the Restore group at a 256 px area target returns
+  304x208, both markedly sharper than a bilinear resize.
 
 ## TODO
 
