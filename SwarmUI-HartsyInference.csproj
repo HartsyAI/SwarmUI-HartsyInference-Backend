@@ -174,7 +174,12 @@
              including full temporal video frames for animated WebP previews and direct API/CLI consumers. -->
         <!-- 2.0.0-alpha.44 = side-model download policy change (strict pathing unless user grants consent) + public-side-model
              selection work for LTX-2.5 (upscaler repack selection and no implicit fetch on missing side models). -->
-        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.58" />
+        <!-- 2.0.0-alpha.66 = ImageRequest.ReferenceImages, which the prompt-images mapping above needs: an edit
+             model takes extra references as its own conditioning, not through the IP-Adapter slot. Also carries the
+             SwarmUI prompt-tag parity work (<weight[N]:>/<alternate:>/<fromto[N]:> now arrive as literal tags) and
+             ImageRequest.RemoveBackground — the engine-side cutout, which this extension does NOT set because it
+             runs its own Vision pass at the final resolution; setting both would remove the background twice. -->
+        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.66" />
     </ItemGroup>
 
     <!-- LOCAL ENGINE: prebuilt DLLs from the HartsyInference Cli bin (its full runtime closure). Referenced

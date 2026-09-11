@@ -13,6 +13,7 @@ using SwarmUI.Text2Image;
 using SwarmUI.Utils;
 using Hartsy.Extensions.HartsyInferenceBackend.Generation;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.MemoryManagement;
 using SiLogs = HartsyInference.Core.Logging.Logs;
@@ -193,6 +194,9 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     public override async Task Init()
     {
         EnsureLoggerWired();
+        // Swarm owns the model-root setting. Pin the in-process engine to that exact resolved directory so its
+        // side-model locator and downloader share files with Comfy even when Swarm is launched outside the engine repo.
+        KnobStore.Set(EngineKnobs.ModelsRoot, Program.ServerSettings.Paths.ActualModelRoot);
         if (await MaybeAutoUpdateEngine())
         {
             // A newer engine was staged but can't hot-swap into this process. Fail loud instead of
