@@ -1090,6 +1090,9 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         }
         Image initImage = input.Get(T2IParamTypes.InitImage);
         Image maskImage = input.Get(T2IParamTypes.MaskImage);
+        // Where the recipe edits from references rather than adapting to them, prompt images are those references —
+        // the Init Image is the first, and these follow in the order the prompt refers to them.
+        bool refEditFamily = ((RecipeRegistry.Resolve(family.Id)?.Supports ?? ImageFeatures.None) & ImageFeatures.RefEdit) != 0;
         IReadOnlyList<ControlNetConditioning> controlNets = BuildControlNets(input, out List<(int Index, string UnionType)> unionTypes);
         return new ImageRequest
         {
@@ -1119,7 +1122,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             Components = BuildComponents(input),
             Loras = BuildLoras(input),
             ControlNets = controlNets,
-            IpAdapter = BuildIpAdapter(input),
+            IpAdapter = refEditFamily ? null : BuildIpAdapter(input),
+            ReferenceImages = refEditFamily ? BuildReferenceImages(input) : null,
             Refiner = BuildRefiner(input),
             Img2Img = initImage is null ? null : new Img2Img
             {
@@ -1649,7 +1653,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     /// <see cref="T2IParamTypes.PromptImages"/> is the internal carrier the textbox fills when media is dragged or
     /// pasted onto it, and the model's own text encoder resolves the <c>&lt;Picture N&gt;</c> tags the user types
     /// inline. Swarm never parses those tags — it just supplies the ordered list, which is exactly what the
-    /// MiniMax-H3 reference node consumes, index for index.</summary>
+    /// MiniMax-H3 reference node and the Qwen-Image-Edit template consume, index for index. The consuming recipe
+    /// applies its own slot cap, which is tighter than this one for some families.</summary>
     private static IReadOnlyList<EngineImage> BuildReferenceImages(T2IParamInput input)
     {
         if (!input.TryGet(T2IParamTypes.PromptImages, out List<Image> images) || images is not { Count: > 0 })
@@ -2304,7 +2309,11 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         [
             (ImageFeatures.Lora, "LoRAs", input.TryGet(T2IParamTypes.Loras, out List<string> loras) && loras is not null && loras.Count > 0),
             (ImageFeatures.ControlNet, "ControlNet", AnyControlNetSelected(input)),
-            (ImageFeatures.IpAdapter, "IP-Adapter / image prompting", input.TryGet(T2IParamTypes.PromptImages, out List<Image> imgs) && imgs is not null && imgs.Count > 0),
+            // Prompt images are EITHER adapter conditioning or in-context edit references depending on the family,
+            // and no family declares both bits, so either one satisfies the slot. Checking IpAdapter alone refused
+            // every reference-edit family outright, which is what blocked multi-image Qwen-Image-Edit.
+            (ImageFeatures.IpAdapter | ImageFeatures.RefEdit, "IP-Adapter / reference image prompting",
+                input.TryGet(T2IParamTypes.PromptImages, out List<Image> imgs) && imgs is not null && imgs.Count > 0),
             (ImageFeatures.Refiner, "Refiners", input.Get(T2IParamTypes.RefinerModel) is not null),
             // An Init Image is satisfied by EITHER mode: strength-based img2img, or reference-image editing on an edit
             // model (Mage-Flow, OmniGen2, Boogu, Qwen-Image-Edit) where Creativity has nothing to select. Checking only
