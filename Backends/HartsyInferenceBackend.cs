@@ -17,6 +17,7 @@ using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.MemoryManagement;
 using SiLogs = HartsyInference.Core.Logging.Logs;
+using HartsyInference.Cuda;
 using HartsyInference.Engine;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Recipes;
@@ -48,7 +49,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     /// backend class so BackendHandler.RegisterBackendType discovers it via reflection.</summary>
     public class HartsyInferenceBackendSettings : AutoConfiguration
     {
-        [ConfigComment("Compute backend to use. 'auto' tries CUDA, then CPU.")]
+        [ConfigComment("Compute backend to use.\n'Auto' (default) tries CUDA, then falls back to CPU.\nOnly options this machine can actually use are offered here: 'Cuda' only appears when an NVIDIA GPU is present AND a real test computation on it succeeds, not just that a driver reports a device (this catches a kernel built for the wrong GPU architecture, a missing PTX directory, or a driver/toolkit mismatch, before it surfaces mid-generation instead of here).\n'Vulkan' has no cheap ahead-of-time probe, so it is always offered; a missing Vulkan driver only shows up when this backend starts.\nThis list is built once per SwarmUI process start. If you plug in a GPU or fix a driver, restart SwarmUI to see it here.")]
+        [SettingsOptions(Impl = typeof(ComputeBackendOptions))]
         public string ComputeBackend = "auto";
 
         [ConfigComment("Which GPU to use, if multiple are available.\nShould be a single number, like '0' (first GPU), '1' (second GPU), etc.\nIgnored for the CPU compute backend.\nThis is a CUDA device ordinal, which is NOT necessarily the same order nvidia-smi shows: CUDA enumerates fastest-first by default, so on a mixed-GPU machine '0' is the fastest card. To confirm which physical GPU you got, watch nvidia-smi memory while a generation runs.\nRun one backend per GPU to use several cards at once.")]
@@ -86,6 +88,115 @@ public class HartsyInferenceBackend : AbstractT2IBackend
 
         [ConfigComment("Whether to auto-update the HartsyInference engine (the in-process NuGet library) when this backend starts.\n'false' (default): never check.\n'true': on start, check NuGet for a newer engine build and, if found, download + rebuild the extension against it.\n'aggressive': same as 'true' but also clears the NuGet caches first (fixes a stuck floating-version restore) and automatically restarts SwarmUI to load the new build.\nThe engine is loaded in-process, so a staged update applies on the NEXT SwarmUI restart (a loaded DLL can't hot-swap). With 'true' you'll get a log line telling you to restart; 'aggressive' restarts for you.")]
         public string AutoUpdate = "false";
+    }
+
+    /// <summary>Builds the ComputeBackend dropdown from whatever kinds the engine reports
+    /// (<see cref="BackendFactory.ValidSelectors"/>) rather than a hardcoded list, filtered to what this machine
+    /// can actually use: 'auto' and 'cpu' always qualify, 'vulkan' can't be cheaply probed ahead of time so it
+    /// always qualifies too, and 'cuda' only qualifies when <see cref="BackendFactory.ProbeCuda"/> runs a real
+    /// test computation on the GPU and gets the right answer, not just that a driver reports a device exists.
+    /// Mirrors AudioLab's AudioDeviceOptions, minus the per-GPU-ordinal expansion: this backend already has its
+    /// own separate GPU_ID setting for picking a device, so ComputeBackend only needs to offer the KIND.
+    /// Evaluated once and cached for the process lifetime: a probe is a real GPU context and kernel launch, and
+    /// the answer cannot change without a restart.</summary>
+    public class ComputeBackendOptions : SettingsOptionsAttribute.AbstractImpl
+    {
+        private static readonly Lazy<(string[] Vals, string[] Names)> _options = new(Build);
+
+        /// <summary>Friendly labels for the kinds we know about today. Anything the engine adds later (Metal,
+        /// AMD/ROCm, Arc/oneAPI, ...) falls back to its own token, so an unknown kind is still selectable, just
+        /// plainly named, with no change needed here.</summary>
+        private static readonly Dictionary<string, string> KindLabels = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["auto"] = "Auto (recommended)",
+            ["cpu"] = "CPU (slow; F32-only, cannot run fp8/bf16 models)",
+            ["cuda"] = "CUDA (NVIDIA GPU)",
+            ["vulkan"] = "Vulkan (any GPU)",
+        };
+
+        private static (string[] Vals, string[] Names) Build()
+        {
+            List<string> vals = [];
+            List<string> names = [];
+            foreach (string kind in Guard(() => BackendFactory.ValidSelectors.ToList(), "backend list") ?? [])
+            {
+                if (!IsUsable(kind))
+                {
+                    continue;
+                }
+                vals.Add(kind);
+                names.Add(Label(kind));
+            }
+            if (vals.Count == 0)
+            {
+                // Nothing validated (e.g. engine assemblies not resolvable yet). 'auto' always resolves
+                // (falls back to CPU), so never ship an empty dropdown.
+                vals.Add("auto");
+                names.Add(KindLabels["auto"]);
+            }
+            return ([.. vals], [.. names]);
+        }
+
+        /// <summary>'cuda' gets the strong check (an actual GPU computation, not just driver presence, per the
+        /// engine's "ask whether the GPU works, not whether one exists" probe). Every other kind gets the
+        /// syntax/existence-level <see cref="BackendFactory.Validate"/> the engine already performs cheaply.</summary>
+        private static bool IsUsable(string kind)
+        {
+            if (!kind.Equals("cuda", StringComparison.OrdinalIgnoreCase))
+            {
+                return Guard(() => { BackendFactory.Validate(kind); return true; }, $"validate '{kind}'");
+            }
+            bool ok = Guard(() => BackendFactory.ProbeCuda(), "CUDA probe");
+            if (!ok)
+            {
+                // Warning, not Debug: hiding an option the user would otherwise expect deserves a visible reason.
+                string why = Guard(() => BackendFactory.CudaProbeFailureReason, "CUDA probe reason") ?? "no reason reported";
+                Logs.Warning($"[HartsyInference] ComputeBackend dropdown: excluding 'cuda': {why}");
+            }
+            return ok;
+        }
+
+        /// <summary>Enriches the CUDA label with the actual card name via the engine's own <see cref="CudaTopology"/>.
+        /// Deliberately NOT SwarmUI's <see cref="NvidiaUtil"/> (nvidia-smi): this file's own GPU_ID remark records
+        /// ordinal 0 as the 4090 while nvidia-smi index 0 is the 3060 on the dev box, so naming the card from
+        /// nvidia-smi output would name the WRONG physical GPU whenever the two orderings disagree. CudaTopology is
+        /// ordinal-ordered, matching what ComputeBackend+GPU_ID actually selects.</summary>
+        private static string Label(string kind)
+        {
+            string baseLabel = KindLabels.TryGetValue(kind, out string label) ? label : kind;
+            if (!kind.Equals("cuda", StringComparison.OrdinalIgnoreCase))
+            {
+                return baseLabel;
+            }
+            IReadOnlyList<GpuTopologyInfo> gpus = Guard(() => CudaTopology.Probe(), "CUDA topology probe") ?? [];
+            GpuTopologyInfo gpu0 = gpus.FirstOrDefault(d => d.Ordinal == 0 && d.Name is not null);
+            if (gpu0.Name is null)
+            {
+                return baseLabel;
+            }
+            string detected = gpus.Count == 1 ? gpu0.Name : $"{gpu0.Name} + {gpus.Count - 1} more";
+            return $"CUDA ({detected})";
+        }
+
+        /// <summary>Runs a probe that must never take the whole settings schema down with it: a throw here (no
+        /// engine loaded, no driver, a probe timeout) is the answer "not usable", not a fault worth surfacing to
+        /// the user. Returns default on failure.</summary>
+        private static T Guard<T>(Func<T> probe, string what)
+        {
+            try
+            {
+                return probe();
+            }
+            catch (Exception ex)
+            {
+                Logs.Debug($"[HartsyInference] ComputeBackend dropdown: {what} failed ({ex.Message}).");
+                return default;
+            }
+        }
+
+        public override string[] GetOptions => _options.Value.Vals;
+
+        public override string[] Names => _options.Value.Names;
     }
 
     public HartsyInferenceBackendSettings Settings => SettingsRaw as HartsyInferenceBackendSettings;
