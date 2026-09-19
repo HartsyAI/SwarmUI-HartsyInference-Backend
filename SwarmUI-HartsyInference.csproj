@@ -182,7 +182,13 @@
         <!-- 2.0.0-alpha.75 = the Kohya SD1.5/SDXL LoRA LDM-block-name fix (LoraFormatDetector/KohyaSdMapper) —
              every CivitAI SDXL LoRA using sd-scripts' input_blocks_/output_blocks_/middle_block_ naming was
              previously refused as an undetectable format. -->
-        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.75" />
+        <!-- 2.0.0-alpha.130 = catch-up bump, 2026-09-19 (alpha.75 -> alpha.130). Confirmed via a full Release
+             build against this pin that nothing in this extension needed to change: BackendFactory.ValidSelectors/
+             Validate/Resolve/Kind/WithOrdinal/ParseOrdinal (everything this file calls) are unchanged; the only
+             API surface added in the gap is BackendFactory.ProbeCuda/CudaProbeFailureReason/ResolveProbed (a real
+             GPU test-computation, not just device presence) and BackendFactory.CanonicalDeviceKey, both additive.
+             ProbeCuda is now used by the new ComputeBackendOptions dropdown below. -->
+        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.130" />
     </ItemGroup>
 
     <!-- LOCAL ENGINE: prebuilt DLLs from the HartsyInference Cli bin (its full runtime closure). Referenced
