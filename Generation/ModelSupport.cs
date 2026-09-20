@@ -71,6 +71,7 @@ public static class ModelSupport
         ["anima"] = new("anima", Kind.Image),
         ["hidream-i1"] = new("hidream", Kind.Image),
         ["qwen-image"] = new("qwen-image", Kind.Image),
+        [ModelClassRegistrations.QwenImage21CompatClassId] = new("qwen-image-2.1", Kind.Image),
         ["kandinsky5-imglite"] = new("kandinsky5", Kind.Image),
         [ModelClassRegistrations.LanceCompatClassId] = new("lance-image", Kind.Image),
         ["lens"] = new("lens", Kind.Image),

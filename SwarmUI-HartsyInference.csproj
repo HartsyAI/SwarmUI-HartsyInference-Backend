@@ -54,6 +54,7 @@
              alpha.33 = Boogu-Image pipeline + Qwen3-VL vision/multimodal encoders.
              alpha.35 = first version with Krea 2 (transformer + pipeline + converter + Qwen3_VL_4B preset).
              alpha.36 = Krea 2 keys.
+             alpha.149 = Qwen-Image 2.1 (single-stream DiT, Qwen3-VL-8B encoder, RGBA Wan-2.2 VAE).
              alpha.38 = CUDA LeakyRelu + AdaInstanceNorm1d kernels (Kokoro/StyleTTS2 runs fully on GPU).
                         (alpha.37 was burned by a pre-fix pack; bumped to dodge the immutable NuGet cache.)
              alpha.43 = query-tiled CUDA SDPA for long sequences (Wan-Video full-res self-attention no
@@ -187,8 +188,11 @@
              Validate/Resolve/Kind/WithOrdinal/ParseOrdinal (everything this file calls) are unchanged; the only
              API surface added in the gap is BackendFactory.ProbeCuda/CudaProbeFailureReason/ResolveProbed (a real
              GPU test-computation, not just device presence) and BackendFactory.CanonicalDeviceKey, both additive.
-             ProbeCuda is now used by the new ComputeBackendOptions dropdown below. -->
-        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.130" />
+             ProbeCuda is now used by the new ComputeBackendOptions dropdown below.
+             2.0.0-alpha.149 = Qwen-Image 2.1, 2026-09-20 (alpha.130 -> alpha.149). Same check: a full Release
+             build against this pin succeeds with no source change beyond the model-class registration this bump
+             accompanies. -->
+        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.149" />
     </ItemGroup>
 
     <!-- LOCAL ENGINE: prebuilt DLLs from the HartsyInference Cli bin (its full runtime closure). Referenced
