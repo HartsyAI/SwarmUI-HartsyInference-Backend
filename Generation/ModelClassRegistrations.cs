@@ -35,6 +35,12 @@ public static class ModelClassRegistrations
     /// <summary>F-Lite compat + model class ID.</summary>
     public const string FLiteCompatClassId = "f-lite";
 
+    /// <summary>Qwen-Image 2.1 compat + model class ID. Deliberately NOT core's <c>qwen-image</c> compat class:
+    /// 2.1 shares neither the architecture nor the VAE family, and core's own <c>isQwenImage</c> requires
+    /// <c>img_in.bias</c> and <c>add_k_proj.bias</c>, which a bias-free single-stream 2.1 checkpoint does not
+    /// have — so core leaves it unclassified rather than mislabelling it.</summary>
+    public const string QwenImage21CompatClassId = "qwen-image-2.1";
+
     /// <summary>Registers every extension-owned model class. Call EXACTLY once, at pre-init, and only for classes
     /// Swarm core does not already define: <c>T2IModelClassSorter.Register</c>/<c>RegisterCompat</c> are backed by
     /// <c>Dictionary.Add</c>, so re-registering an existing ID throws rather than overwriting.</summary>
@@ -45,6 +51,7 @@ public static class ModelClassRegistrations
         // MusicGen and YuE moved to AudioLab ownership (they are not SwarmUI-native music classes); their
         // compat/model class registrations left with them. Core itself owns ace-step-1_5 and minimax-music-3.
         RegisterFLite();
+        RegisterQwenImage21();
         // Mage-Flow: core registers the compat class and model class itself, and its class carries this same
         // compat id, so checkpoints it classifies already land on the ModelSupport row. Nothing to add here.
     }
@@ -108,6 +115,40 @@ public static class ModelClassRegistrations
             IsThisModelOfClass = (model, header) =>
                 header is not null && header.ContainsKey("blocks.0.cross_attn.context_kv.weight"),
         });
+    }
+
+    /// <summary>Qwen-Image 2.1 (single-stream DiT). ComfyUI's own signature from <c>model_detection.py</c>: the
+    /// shared <c>modulation.1</c>, the zero-centered <c>txt_in.text_norm</c>, per-head QK norms, and the patch-1
+    /// <c>img_in</c>/<c>proj_out</c> pair, plus an <c>img_mlp</c> in either the fused or split form. Checked with
+    /// and without the <c>model.diffusion_model.</c> wrapper a repack may add.</summary>
+    private static void RegisterQwenImage21()
+    {
+        T2IModelCompatClass compat = T2IModelClassSorter.RegisterCompat(
+            new() { ID = QwenImage21CompatClassId, ShortCode = "Qwen2.1", LorasTargetTextEnc = false });
+        T2IModelClassSorter.Register(new T2IModelClass
+        {
+            ID = QwenImage21CompatClassId,
+            CompatClass = compat,
+            Name = "Qwen Image 2.1",
+            StandardWidth = 1024,
+            StandardHeight = 1024,
+            IsThisModelOfClass = (model, header) => IsQwenImage21(header),
+        });
+    }
+
+    private static bool IsQwenImage21(JObject header)
+    {
+        if (header is null)
+        {
+            return false;
+        }
+        bool has(string key) => header.ContainsKey(key) || header.ContainsKey("model.diffusion_model." + key);
+        return has("txt_in.text_norm.weight")
+            && has("modulation.1.weight")
+            && has("transformer_blocks.0.attn.norm_q.weight")
+            && has("img_in.weight")
+            && has("proj_out.weight")
+            && (has("transformer_blocks.0.img_mlp.gate_up.weight") || has("transformer_blocks.0.img_mlp.proj.weight"));
     }
 
     /// <summary>A Lance checkpoint is a folder with <c>llm_config.json</c> declaring the Qwen2.5-VL backbone and
