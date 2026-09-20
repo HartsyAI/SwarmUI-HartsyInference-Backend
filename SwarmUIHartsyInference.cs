@@ -402,7 +402,7 @@ public class SwarmUIHartsyInference : Extension
         H3ChainTotalFramesParam = T2IParamTypes.Register<int>(new(
             "H3 Chain Total Frames",
             "MiniMax-H3: total length of the finished video, generated as back-to-back segments that each hold the previous segment's tail fixed while denoising only their own new frames.\nLeave off (or at or below the normal frame count) for a single segment.",
-            "0", Min: 0, Max: 4096, Step: 8,
+            "0", Min: 0, Max: 4096, Step: 17,
             Toggleable: true,
             Group: MiniMaxH3ParamGroup,
             FeatureFlag: "hartsyinference,hartsy_h3_chain",
@@ -410,8 +410,8 @@ public class SwarmUIHartsyInference : Extension
 
         H3ChainContextFramesParam = T2IParamTypes.Register<int>(new(
             "H3 Chain Context Frames",
-            "MiniMax-H3: how many frames of the previous segment are carried into the next as fixed context, which is what keeps the seams continuous.\nMust land on H3's 17k+5 grid so the protected head covers whole latent tokens; the default is the engine's own reference value. Longer holds continuity better and costs that many re-denoised frames per segment.",
-            HartsyInference.Engine.Recipes.Video.MiniMaxH3ChainPlanner.DefaultContextFrames.ToString(), Min: 5, Max: 500, Step: 17,
+            "MiniMax-H3: how many frames of the previous segment are carried into the next as fixed context, which is what keeps the seams continuous.\nSnapped onto the chain's own grid (39, 90, 141, ...), the 17k+5 grid intersected with a whole number of 40 Hz audio rows; the default is the engine's own reference value. Refused (not silently adjusted) if the result leaves no room for new frames at the current frame count. Longer holds continuity better and costs that many re-denoised frames per segment.",
+            HartsyInference.Engine.Recipes.Video.MiniMaxH3ChainPlanner.DefaultContextFrames.ToString(), Min: 39, Max: 498, Step: 51,
             Toggleable: true,
             Group: MiniMaxH3ParamGroup,
             FeatureFlag: "hartsyinference,hartsy_h3_chain",
