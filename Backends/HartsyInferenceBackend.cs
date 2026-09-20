@@ -267,6 +267,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         "hartsy_minimaxmusic",
         "hartsy_wan_animate",
         "hartsy_audio_ref",
+        "hartsy_h3_chain",
         "hartsy_refedit_choice",
     ];
 
@@ -1216,6 +1217,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             Width = NullableInt(input, T2IParamTypes.Width),
             Height = NullableInt(input, T2IParamTypes.Height),
             Steps = NullableInt(input, T2IParamTypes.Steps),
+            // Core's existing toggle; the Engine now reads it too, to gate Krea 2's joint-attention prompt-weight patch.
+            ModelSpecificEnhancements = input.Get(T2IParamTypes.ModelSpecificEnhancements, true),
             CfgScale = input.TryGet(T2IParamTypes.CFGScale, out double cfg) ? (float)cfg : null,
             CfgRescale = input.TryGet(SwarmUIHartsyInference.CfgRescaleParam, out double cfgRescale) ? (float)cfgRescale : null,
             // Comfy's own TCFG param, not a duplicate of it: same paper (arXiv 2503.18137), same boolean, and
@@ -1584,6 +1587,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         Image endFrame = GetVideoEndImage(input);
         int? frames = ResolveFrames(input);
         RefuseIncompatibleH3Conditioning(input, initImage, endFrame);
+        (int? chainTotal, int chainContext) = ResolveH3Chain(input, frames);
         Dictionary<string, object> extra = new(StringComparer.Ordinal);
         Image reference = input.Get(SwarmUIHartsyInference.AnimateReferenceImageParam);
         // Comfy-backend parity: core's carrier for a Wan character/subject reference is the prompt-attached image
@@ -1681,6 +1685,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             TrimVideoEndFrames = input.Get(T2IParamTypes.TrimVideoEndFrames, 0),
             Components = BuildComponents(input),
             Loras = BuildLoras(input),
+            ChainTotalFrames = chainTotal,
+            ChainContextFrames = chainContext,
             Extra = extra,
             Vram = MapVramOverrides(input),
         };
@@ -1708,6 +1714,48 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 + $"Remove either the {(initImage is not null ? "Init Image" : "Video End Frame")} or the media "
                 + "attached to the prompt.");
         }
+    }
+
+    /// <summary>Resolves and validates MiniMax-H3's chain params by dry-running the real planner (pure arithmetic,
+    /// no GPU) rather than re-deriving its grid/cap rules client-side, which is how this shipped snapping onto the
+    /// wrong grid once already: the required grid is 39+51k (17k+5 intersected with a whole number of 40 Hz audio
+    /// rows), not the plain 17k+5 frame-count grid <see cref="MiniMaxH3Geometry.AlignFrameCount"/> aligns onto.</summary>
+    private static (int? Total, int Context) ResolveH3Chain(T2IParamInput input, int? frames)
+    {
+        int? total = input.TryGet(SwarmUIHartsyInference.H3ChainTotalFramesParam, out int totalRaw) && totalRaw > 0
+            ? totalRaw : null;
+        bool contextSet = input.TryGet(SwarmUIHartsyInference.H3ChainContextFramesParam, out int contextRaw);
+        int context = contextSet ? SnapChainContextFrames(contextRaw)
+            : HartsyInference.Engine.Recipes.Video.MiniMaxH3ChainPlanner.DefaultContextFrames;
+        if (contextSet && total is null)
+        {
+            throw new SwarmUserErrorException(
+                "HartsyInference: H3 Chain Context Frames is set without H3 Chain Total Frames, so it has nothing "
+                + "to apply to. Set Total Frames past one segment's length to actually chain, or remove Context Frames.");
+        }
+        if (total is int t)
+        {
+            int maxSegment = HartsyInference.Diffusion.Models.Denoisers.MiniMaxH3Geometry.AlignFrameCount(frames ?? 124);
+            try
+            {
+                HartsyInference.Engine.Recipes.Video.MiniMaxH3ChainPlanner.Plan(t, context, maxSegment);
+            }
+            catch (ArgumentOutOfRangeException ex)
+            {
+                throw new SwarmUserErrorException(
+                    $"HartsyInference: H3 chain settings are invalid: {ex.Message.Replace("\r\n", " ").Replace('\n', ' ')}");
+            }
+        }
+        return (total, context);
+    }
+
+    /// <summary>Nearest, not up: rounding up can push a reasonable value past the segment cap that nearest would
+    /// have stayed under (e.g. 100 at the default 124-frame segment: up gives 141, which fails; nearest gives 90,
+    /// which passes).</summary>
+    private static int SnapChainContextFrames(int frames)
+    {
+        int k = (int)Math.Round((frames - 39) / 51.0, MidpointRounding.AwayFromZero);
+        return 39 + Math.Max(0, k) * 51;
     }
 
     /// <summary>The requested frame count, or null to let the family's own default stand.</summary>
@@ -2334,6 +2382,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 || input.Get(SwarmUIHartsyInference.AnimatePoseVideoParam) is not null
                 || input.Get(SwarmUIHartsyInference.AnimateFaceVideoParam) is not null
                 || (animateCheckpoint && hasRefImages)),
+            (VideoFeatures.LongFormChain, "long-form chaining (H3 Chain Total Frames)",
+                input.TryGet(SwarmUIHartsyInference.H3ChainTotalFramesParam, out int chainCheck) && chainCheck > 0),
         ];
         foreach ((VideoFeatures feature, string name, bool requested) in videoChecks)
         {

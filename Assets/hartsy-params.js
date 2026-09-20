@@ -25,6 +25,10 @@ const HartsyParamConfig = {
         // Only family declaring BOTH Img2Img and RefEdit, so the only one where picking a mode is a real
         // choice. RefEdit-only families (Boogu, Mage-Flow, OmniGen2) have nothing to choose between.
         'qwen-image': 'hartsy_refedit_choice',
+        // Long-form chaining (VideoFeatures.LongFormChain). Unlike hartsy_audio_ref below, this is NOT stripped
+        // by ModelSupport.MiniMaxH3TaskFeatures for either fl2va or ref2va, so a plain compat-class match is
+        // enough: no filename test needed.
+        'minimax-h3': 'hartsy_h3_chain',
     },
 
     /** Flags that additionally depend on the checkpoint FILE, not just its compat class. */
