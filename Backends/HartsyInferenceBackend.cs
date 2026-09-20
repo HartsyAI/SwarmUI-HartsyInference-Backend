@@ -267,6 +267,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         "hartsy_minimaxmusic",
         "hartsy_wan_animate",
         "hartsy_audio_ref",
+        "hartsy_h3_chain",
         "hartsy_refedit_choice",
     ];
 
@@ -1216,6 +1217,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             Width = NullableInt(input, T2IParamTypes.Width),
             Height = NullableInt(input, T2IParamTypes.Height),
             Steps = NullableInt(input, T2IParamTypes.Steps),
+            // Core's existing toggle; the Engine now reads it too, to gate Krea 2's joint-attention prompt-weight patch.
+            ModelSpecificEnhancements = input.Get(T2IParamTypes.ModelSpecificEnhancements, true),
             CfgScale = input.TryGet(T2IParamTypes.CFGScale, out double cfg) ? (float)cfg : null,
             CfgRescale = input.TryGet(SwarmUIHartsyInference.CfgRescaleParam, out double cfgRescale) ? (float)cfgRescale : null,
             // Comfy's own TCFG param, not a duplicate of it: same paper (arXiv 2503.18137), same boolean, and
@@ -1681,8 +1684,43 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             TrimVideoEndFrames = input.Get(T2IParamTypes.TrimVideoEndFrames, 0),
             Components = BuildComponents(input),
             Loras = BuildLoras(input),
+            VideoDenoiseMask = BuildVideoDenoiseMask(input, initImage, initIsVideo),
+            // 0 / unset / at-or-below what one generation already covers both mean "generate once"; MiniMax-H3 only.
+            ChainTotalFrames = input.TryGet(SwarmUIHartsyInference.H3ChainTotalFramesParam, out int chainTotal)
+                && chainTotal > 0 ? chainTotal : null,
+            // Snapped up onto the same 17k+5 grid the engine itself aligns onto: the UI slider's Min/Step already
+            // lands on it via the up/down steppers, but free-typed values aren't otherwise constrained.
+            ChainContextFrames = HartsyInference.Diffusion.Models.Denoisers.MiniMaxH3Geometry.AlignFrameCount(
+                input.Get(SwarmUIHartsyInference.H3ChainContextFramesParam,
+                    HartsyInference.Engine.Recipes.Video.MiniMaxH3ChainPlanner.DefaultContextFrames)),
             Extra = extra,
             Vram = MapVramOverrides(input),
+        };
+    }
+
+    /// <summary>Maps core's Mask Image onto the Engine's <see cref="VideoDenoiseMask"/>, preserved-under-mask
+    /// pixels coming from whatever Init Image already resolved to. MiniMax-H3 only; <see cref="ValidateVideo"/>
+    /// guards every other family.</summary>
+    private static VideoDenoiseMask BuildVideoDenoiseMask(T2IParamInput input, Image initImage, bool initIsVideo)
+    {
+        Image maskMedia = input.Get(T2IParamTypes.MaskImage);
+        if (maskMedia is null)
+        {
+            return null;
+        }
+        if (initImage is null)
+        {
+            throw new SwarmUserErrorException(
+                "Mask Image needs an Init Image to preserve pixels under its black regions, "
+                + "add an Init Image or remove Mask Image.");
+        }
+        bool maskIsVideo = maskMedia.Type?.MetaType == MediaMetaType.Video;
+        return new VideoDenoiseMask
+        {
+            MaskImage = maskIsVideo ? null : ToEngineImage(maskMedia),
+            MaskVideo = maskIsVideo ? ToVideoClip(maskMedia) : null,
+            SourceImage = !initIsVideo ? ToEngineImage(initImage) : null,
+            SourceVideo = initIsVideo ? ToVideoClip(initImage) : null,
         };
     }
 
@@ -2334,6 +2372,9 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 || input.Get(SwarmUIHartsyInference.AnimatePoseVideoParam) is not null
                 || input.Get(SwarmUIHartsyInference.AnimateFaceVideoParam) is not null
                 || (animateCheckpoint && hasRefImages)),
+            (VideoFeatures.VideoDenoiseMask, "video masking (Mask Image)", input.Get(T2IParamTypes.MaskImage) is not null),
+            (VideoFeatures.LongFormChain, "long-form chaining (H3 Chain Total Frames)",
+                input.TryGet(SwarmUIHartsyInference.H3ChainTotalFramesParam, out int chainCheck) && chainCheck > 0),
         ];
         foreach ((VideoFeatures feature, string name, bool requested) in videoChecks)
         {

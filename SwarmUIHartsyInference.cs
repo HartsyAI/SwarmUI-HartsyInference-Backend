@@ -67,6 +67,13 @@ public class SwarmUIHartsyInference : Extension
     public static T2IRegisteredParam<Image> AnimateBackgroundVideoParam;
     public static T2IRegisteredParam<Image> AnimateMaskVideoParam;
 
+    // MiniMax-H3 long-form chaining: generates past one denoise pass as successive segments that each hold the
+    // previous segment's tail fixed. A model-named group for the same reason as WanAnimateParamGroup above:
+    // hartsy_h3_chain is only granted for a MiniMax-H3 checkpoint.
+    public static T2IParamGroup MiniMaxH3ParamGroup;
+    public static T2IRegisteredParam<int> H3ChainTotalFramesParam;
+    public static T2IRegisteredParam<int> H3ChainContextFramesParam;
+
     // CFG-Rescale is registered here rather than reading Comfy's "Rescale CFG Multiplier" because the two
     // compute different things: CfgHelper.ApplyCfgRescale rescales the per-token last-dim L2 norm, Comfy's
     // RescaleCFG node reduces standard deviation over all non-batch dims. The same slider value would produce a
@@ -253,6 +260,11 @@ public class SwarmUIHartsyInference : Extension
                 + "pose/face driving clips. The Init Image slot carries the driving video. The character image can "
                 + "also just be attached to the prompt box (the same carrier core uses for Wan reference images).");
 
+        MiniMaxH3ParamGroup = new("MiniMax-H3 Chain", Toggles: true, Open: false,
+            Description: "MiniMax-H3 long-form generation: output longer than one pass, produced as successive "
+                + "segments that each hold the previous segment's tail fixed while denoising only their own new "
+                + "frames.");
+
         AnimateReferenceImageParam = T2IParamTypes.Register<Image>(new(
             "Animate Reference Image",
             "Wan-Animate: the character/identity image to animate.\nThe Init Image slot carries the driving (pose/motion) video; this image is who performs that motion.\nAn image attached to the prompt box works too, matching how core's ComfyUI backend carries Wan reference images; this param wins if both are set.\nRequired (one way or the other) for Wan-Animate generations on the HartsyInference backend.",
@@ -383,6 +395,26 @@ public class SwarmUIHartsyInference : Extension
             Toggleable: true,
             Group: T2IParamTypes.GroupAdvancedVideo,
             FeatureFlag: "hartsyinference,hartsy_audio_ref",
+            ChangeWeight: 2));
+
+        // Extension-registered (no core equivalent): MiniMax-H3 long-form chaining. The backend maps these to the
+        // engine's VideoRequest.ChainTotalFrames/ChainContextFrames.
+        H3ChainTotalFramesParam = T2IParamTypes.Register<int>(new(
+            "H3 Chain Total Frames",
+            "MiniMax-H3: total length of the finished video, generated as back-to-back segments that each hold the previous segment's tail fixed while denoising only their own new frames.\nLeave off (or at or below the normal frame count) for a single segment.",
+            "0", Min: 0, Max: 4096, Step: 8,
+            Toggleable: true,
+            Group: MiniMaxH3ParamGroup,
+            FeatureFlag: "hartsyinference,hartsy_h3_chain",
+            ChangeWeight: 2));
+
+        H3ChainContextFramesParam = T2IParamTypes.Register<int>(new(
+            "H3 Chain Context Frames",
+            "MiniMax-H3: how many frames of the previous segment are carried into the next as fixed context, which is what keeps the seams continuous.\nMust land on H3's 17k+5 grid so the protected head covers whole latent tokens; the default is the engine's own reference value. Longer holds continuity better and costs that many re-denoised frames per segment.",
+            HartsyInference.Engine.Recipes.Video.MiniMaxH3ChainPlanner.DefaultContextFrames.ToString(), Min: 5, Max: 500, Step: 17,
+            Toggleable: true,
+            Group: MiniMaxH3ParamGroup,
+            FeatureFlag: "hartsyinference,hartsy_h3_chain",
             ChangeWeight: 2));
 
         // Sampler and TCFG are NOT registered here — the backend reads Comfy's own "Sampler" and "Use TCFG"
