@@ -71,7 +71,10 @@ public static class ModelSupport
         ["anima"] = new("anima", Kind.Image),
         ["hidream-i1"] = new("hidream", Kind.Image),
         ["qwen-image"] = new("qwen-image", Kind.Image),
-        [ModelClassRegistrations.QwenImage21CompatClassId] = new("qwen-image-2.1", Kind.Image),
+        // Core owns the qwen-image-2.1 compat class (T2IModelClassSorter, "Adds Qwen2.1 support" #1548) along with
+        // its model class and VAE family — this maps it, it must not re-register it. Keyed off core's own
+        // registration rather than a repeated literal, the same as CompatMiniMaxH3 below.
+        [T2IModelClassSorter.CompatQwenImage21.ID] = new("qwen-image-2.1", Kind.Image),
         ["kandinsky5-imglite"] = new("kandinsky5", Kind.Image),
         [ModelClassRegistrations.LanceCompatClassId] = new("lance-image", Kind.Image),
         ["lens"] = new("lens", Kind.Image),

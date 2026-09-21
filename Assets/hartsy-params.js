@@ -126,6 +126,26 @@ const HartsyCoreGating = {
         'seamlesstileable': 'seamlesstiling',
         'variationseed': 'variationseed',
         'variationseedstrength': 'variationseed',
+        // Init Image has THREE features that can satisfy it, and the list is not optional: it mirrors the
+        // (Img2Img | RefEdit) check IsValidForThisBackend makes on the image side, plus VideoFeatures.InitImage
+        // on the video side, because featuresByArch mixes both vocabularies in one map. Dropping any one of the
+        // three hides Init Image on a family that serves it — 'refedit' alone for the edit-only image families
+        // (Boogu, Mage-Flow, OmniGen2, where the init image IS the reference), 'initimage' alone for every
+        // image-to-video family (Wan, MiniMax-H3, Kandinsky5). Measured against a live
+        // HartsyInferenceGetSupportedArchs before this list was written.
+        //
+        // What it hides today: Qwen-Image 2.1 (text-to-image only, while SwarmUI core advertises Init Image for
+        // the class), HunyuanVideo, LTX 0.9/2, Lance video — all of which the backend already refuses at
+        // generate time, so this only moves the refusal to where the user can see it.
+        //
+        // Prompt Images is deliberately NOT gated. It would need (IpAdapter | RefEdit | ReferenceImages), and
+        // even then Wan-Animate would lose it: Animate is detected from the FILENAME (see fileFlags below), so
+        // it shares plain Wan's compat class and its feature row says nothing about references. A compat-class
+        // map cannot express that, and hiding a control that works is worse than a late refusal.
+        'initimage': ['img2img', 'refedit', 'initimage'],
+        'initimagecreativity': ['img2img', 'refedit', 'initimage'],
+        'initimagenoise': ['img2img', 'refedit', 'initimage'],
+        'initimageresettonorm': ['img2img', 'refedit', 'initimage'],
         'initimagerecompositemask': 'inpaint',
         'maskbehavior': 'inpaint',
         'maskblur': 'inpaint',
@@ -180,13 +200,20 @@ const HartsyCoreGating = {
     /** Marker flag parked on a param to hide it; nothing ever grants it. */
     BLOCKED: '__hartsy_unsupported__',
 
-    /** True when we know this arch and it lacks the feature. Unknown arch => don't touch anything. */
-    lacks(compatClass, feature) {
+    /**
+     * True when we know this arch and it has none of the listed features. Unknown arch => don't touch anything.
+     * A list means "any one of these satisfies the param", mirroring the server-side checks in
+     * IsValidForThisBackend: Prompt Images is satisfied by ipadapter OR refedit, Init Image by img2img OR refedit.
+     * Hiding on a single feature would hide Init Image on every edit-only family (Boogu, Mage-Flow, OmniGen2),
+     * where the init image IS the reference.
+     */
+    lacks(compatClass, features) {
         let map = this.featuresByArch;
         if (!map || !compatClass || !(compatClass in map)) {
             return false;
         }
-        return !map[compatClass].includes(feature);
+        let have = map[compatClass];
+        return !(Array.isArray(features) ? features : [features]).some(f => have.includes(f));
     },
 
     /**
