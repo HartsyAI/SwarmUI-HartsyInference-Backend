@@ -191,8 +191,13 @@
              ProbeCuda is now used by the new ComputeBackendOptions dropdown below.
              2.0.0-alpha.149 = Qwen-Image 2.1, 2026-09-20 (alpha.130 -> alpha.149). Same check: a full Release
              build against this pin succeeds with no source change beyond the model-class registration this bump
-             accompanies. -->
-        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.149" />
+             accompanies.
+             2.0.0-alpha.151 = Qwen-Image 2.1 aligned with SwarmUI's native support, 2026-09-21. No API change;
+             the bump is for BEHAVIOUR this extension's gating depends on — alpha.151 is the first version where
+             qwen-image-2.1 reports its sampler seam instead of an empty one, so the Sampler/Scheduler controls
+             stop being hidden for the family, and where the side-model paths match what SwarmUI core downloads
+             for ComfyUI. -->
+        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.151" />
     </ItemGroup>
 
     <!-- LOCAL ENGINE: prebuilt DLLs from the HartsyInference Cli bin (its full runtime closure). Referenced
