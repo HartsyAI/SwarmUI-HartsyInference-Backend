@@ -693,13 +693,9 @@ public static class ModelSupport
             _ => Modality.Image,
         };
         string familyId = Ltx25DistilledFamilyOr(model, family.Id);
-        // MiniMax Music 3: the LM-precision param rides as the selector variant ("minimaxmusic3:q8") — the
-        // engine's descriptor maps it to its GGUF-quantized language-model path.
-        if (familyId == "minimaxmusic3" && input is not null
-            && input.TryGet(SwarmUIHartsyInference.MiniMaxMusicLmPrecisionParam, out string lmPrecision)
-            && lmPrecision is "q8" or "q4")
+        if (familyId == "minimaxmusic3")
         {
-            familyId = $"minimaxmusic3:{lmPrecision}";
+            familyId = MiniMaxMusicFamily(model, input);
         }
         string localPath = model.RawFilePath;
         if (IsLtx25(model))
@@ -723,6 +719,37 @@ public static class ModelSupport
                 Status = ModelStatus.Verified,
             },
         };
+    }
+
+    /// <summary>Picks MiniMax Music 3's language-model precision: the family id carries it as the selector variant
+    /// (<c>minimaxmusic3:q8</c>), which the engine's descriptor maps to its GGUF-quantized language-model path.</summary>
+    /// <remarks>Two things can say it. An explicit <c>q8</c>/<c>q4</c> on the LM-precision param wins. Otherwise the
+    /// picked model decides: AudioLab offers the one checkpoint as three entries, <c>base</c>, <c>q8</c> and
+    /// <c>q4</c>, and until this read them every entry ran the 17 GB bf16 language model, so "MiniMax Music 3 Q4
+    /// (smallest)" was out of VRAM on a 24 GB card exactly like the base entry. The param's default is <c>bf16</c>,
+    /// which is why the default is not allowed to override the model: a user who picked the Q4 entry and never
+    /// opened the advanced group has said what they want once already. Those entries have no file, so the name's
+    /// last segment is matched (<c>Audio Models/MiniMaxMusic3/q4</c>); a real file's stem is read the same way.</remarks>
+    private static string MiniMaxMusicFamily(SwarmUI.Text2Image.T2IModel model, T2IParamInput input)
+    {
+        if (input is not null
+            && input.TryGet(SwarmUIHartsyInference.MiniMaxMusicLmPrecisionParam, out string lmPrecision)
+            && lmPrecision is "q8" or "q4")
+        {
+            return $"minimaxmusic3:{lmPrecision}";
+        }
+        string stem = Path.GetFileNameWithoutExtension(model.RawFilePath ?? model.Name ?? "").ToLowerInvariant();
+        foreach (string precision in new[] { "q8", "q4" })
+        {
+            if (stem == precision
+                || stem.EndsWith($"-{precision}", StringComparison.Ordinal)
+                || stem.EndsWith($"_{precision}", StringComparison.Ordinal)
+                || stem.Contains(precision == "q8" ? "q8_0" : "q4_k", StringComparison.Ordinal))
+            {
+                return $"minimaxmusic3:{precision}";
+            }
+        }
+        return "minimaxmusic3";
     }
 
     /// <summary>Routes an LTX-2.5 <b>distilled</b> checkpoint to the Engine's <c>ltx-2.5-distilled</c> family, which

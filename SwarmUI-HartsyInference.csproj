@@ -203,8 +203,14 @@
              and the backend refused to start on hardware it could have driven through Vulkan. Adds
              VulkanContext, ProbeVulkan and VulkanUnavailableReason/VulkanProbeFailureReason (read reflectively
              below, so an older engine still builds), and makes Validate("vulkan") check for a device rather than
-             only for spelling, which is what stops the dropdown offering Vulkan on a machine with no Vulkan GPU. -->
-        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.158" />
+             only for spelling, which is what stops the dropdown offering Vulkan on a machine with no Vulkan GPU.
+             2.0.0-alpha.160 = MiniMax Music 3 :q8/:q4 actually run, 2026-09-23 (alpha.158 -> alpha.160). The
+             engine read its own quant caches back transposed since alpha.130 (GGUF writer in ggml axis order,
+             cache readers taking it verbatim), so every quantized MiniMax and HeartMuLa run on CUDA failed with
+             CUDA_ERROR_INVALID_VALUE at the first GEMV. Paired here with BuildSpec reading the picked model's
+             q8/q4 entry, without which the quantized path was never selected on this backend at all. A full
+             Release build from the nuget.org packages succeeds with no other source change. -->
+        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.160" />
     </ItemGroup>
 
     <!-- LOCAL ENGINE: prebuilt DLLs from the HartsyInference Cli bin (its full runtime closure). Referenced
