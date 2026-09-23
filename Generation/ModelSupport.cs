@@ -682,7 +682,11 @@ public static class ModelSupport
     /// what the Engine keys its recipe registry on), and the checkpoint path as the resolved local path.</summary>
     /// <param name="input">The request, when there is one, so a user-picked VAE / text encoder is honoured. Optional
     /// only so callers that merely describe a model (rather than run it) need not supply one.</param>
-    public static ModelSpec BuildSpec(SwarmUI.Text2Image.T2IModel model, Family family, T2IParamInput input = null)
+    /// <param name="stageBundles">False skips staging split checkpoints (LTX-2.5) into their bundle directory and
+    /// points the spec at the selected file itself: for callers that only inspect the checkpoint, such as memory
+    /// routing, which runs before every generation and must not rewrite links a running generation is reading.</param>
+    public static ModelSpec BuildSpec(SwarmUI.Text2Image.T2IModel model, Family family, T2IParamInput input = null,
+        bool stageBundles = true)
     {
         ArgumentNullException.ThrowIfNull(model);
         ArgumentNullException.ThrowIfNull(family);
@@ -698,7 +702,7 @@ public static class ModelSupport
             familyId = MiniMaxMusicFamily(model, input);
         }
         string localPath = model.RawFilePath;
-        if (IsLtx25(model))
+        if (stageBundles && IsLtx25(model))
         {
             // LTX-2.5 ships split, and the Engine takes ONE path. This resolves the side models through SwarmUI and
             // hands over a directory holding exactly the right set — throwing rather than letting the recipe load

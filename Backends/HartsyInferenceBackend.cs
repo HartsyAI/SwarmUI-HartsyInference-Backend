@@ -13,6 +13,7 @@ using SwarmUI.Media;
 using SwarmUI.Text2Image;
 using SwarmUI.Utils;
 using Hartsy.Extensions.HartsyInferenceBackend.Generation;
+using Hartsy.Extensions.HartsyInferenceBackend.Services;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Exceptions;
@@ -21,6 +22,7 @@ using SiLogs = HartsyInference.Core.Logging.Logs;
 using HartsyInference.Cuda;
 using HartsyInference.Engine;
 using HartsyInference.Engine.Dispatch;
+using HartsyInference.Engine.Planning.Memory;
 using HartsyInference.Engine.Recipes;
 using HartsyInference.Engine.Registry;
 using HartsyInference.Engine.Requests;
@@ -226,16 +228,10 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     /// extra dispatched jobs here until the current one finishes.</summary>
     private readonly SemaphoreSlim _genLock = new(1, 1);
 
-    /// <summary>Live backend count per PHYSICAL device, to warn when two backends share one GPU.</summary>
-    /// <remarks>Keyed by what the engine reports it bound to (<c>cuda:0</c>, or a Vulkan device UUID), not by the
-    /// selector we asked for. The two are the same thing only while every selector names its device outright: once
-    /// the engine ranks devices for a selector that names none, a key composed from our own settings says
-    /// <c>vulkan:0</c> for a backend running on some other card, and two backends sharing one GPU land in separate
-    /// slots with nothing warning about the VRAM they are about to contend for.</remarks>
-    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> _liveDeviceCounts = new();
-
-    /// <summary>The device key this instance registered in <see cref="_liveDeviceCounts"/>, for Shutdown to release.</summary>
-    private string _registeredDeviceKey;
+    /// <summary>This backend's physical device plus every setting that changes a memory verdict, as registered in
+    /// <see cref="BackendDeviceRegistry"/>. Backends sharing a key get one fit assessment per request between them.
+    /// Null until a successful Init and after Shutdown.</summary>
+    public string FitProfileKey { get; private set; }
 
     /// <summary>What <see cref="Init"/>'s probe resolved <c>ComputeBackend</c> to, so callers that build their own
     /// device do not re-derive it through the cheap <see cref="BackendFactory.Resolve"/> and land somewhere else.
@@ -499,7 +495,10 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             // cannot honor fails here rather than on the first generation.
             (string Key, string Name) device = EngineDeviceIdentity();
             AddLoadStatus($"Engine ready: {_engine.BackendDescription}{(device.Key is null ? "" : $" on {device.Name ?? device.Key} [{device.Key}]")}");
-            RegisterDeviceUsage(resolved, ordinal, device);
+            // Everything besides the device that changes what fits: the tier and where the components run.
+            string fitSettings = $"vram={Settings?.LowVram}|te={teSelector}|vae={vaeSelector}"
+                + $"|shard={(enableDitSharding ? ditShardSelector : "")}";
+            RegisterDeviceUsage(resolved, ordinal, device, fitSettings);
 
             // MaxUsages is what the scheduler checks to decide when to route a request to a different
             // backend (BackendHandler: in-use once Usages >= MaxUsages). Mirror ComfyUI's model:
@@ -523,22 +522,25 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         }
     }
 
-    /// <summary>Tracks how many live backends target one device and notes the sharing tradeoffs: co-residency
-    /// means both models must fit in that GPU's VRAM together, and the engine serializes same-device generations
-    /// (per-backend state is fully isolated; concurrent same-GPU execution arrives with the DeviceGate flip).</summary>
+    /// <summary>Registers this backend's device and engine with <see cref="BackendDeviceRegistry"/> — which is what
+    /// memory-aware routing (<see cref="ModelFitGate"/>) reads — and notes the sharing tradeoffs when another backend
+    /// is on the same device: co-residency means both models must fit in that GPU's VRAM together, and the engine
+    /// serializes same-device generations (per-backend state is fully isolated; concurrent same-GPU execution arrives
+    /// with the DeviceGate flip).</summary>
     /// <param name="kind">An ALREADY-RESOLVED backend kind, never <c>auto</c>. Re-resolving here is what this
     /// signature exists to prevent: the cheap <see cref="BackendFactory.Resolve"/> can disagree with the probe
-    /// <see cref="Init"/> ran, and this keys the sharing map, so it would name a device the engine is not on.</param>
+    /// <see cref="Init"/> ran, and this keys the registry, so it would name a device the engine is not on.</param>
     /// <param name="device">What the engine reports it bound to. Key is null when this engine build cannot say, in
     /// which case the selector is all there is to key on; Name is for the warning, since a Vulkan key is a UUID and
     /// nobody can tell which of their cards that is.</param>
-    private void RegisterDeviceUsage(string kind, int ordinal, (string Key, string Name) device)
+    /// <param name="fitSettings">Every setting besides the device that changes a memory verdict, joined into the
+    /// backend's <see cref="FitProfileKey"/>.</param>
+    private void RegisterDeviceUsage(string kind, int ordinal, (string Key, string Name) device, string fitSettings)
     {
         try
         {
-            // Idempotent. Init runs again on this same instance whenever its settings are edited, and a second
-            // registration without this counts one backend twice, so the slot never returns to zero and every later
-            // backend on that device is told it is sharing.
+            // Idempotent. Init runs again on this same instance whenever its settings are edited; the registry is keyed
+            // by instance, so re-registering replaces the old entry instead of counting this backend twice.
             ReleaseDeviceUsage();
             if (!BackendFactory.IsDeviceKind(kind))
             {
@@ -547,8 +549,11 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             // The engine's own answer first. The composed selector is the fallback, and goes through the factory's
             // grammar rather than being spelled here, so one device cannot acquire two spellings.
             string key = device.Key ?? BackendFactory.CanonicalDeviceKey(BackendFactory.WithOrdinal(kind, ordinal));
-            _registeredDeviceKey = key;
-            int live = _liveDeviceCounts.AddOrUpdate(key, 1, static (_, n) => n + 1);
+            FitProfileKey = $"{key}|{fitSettings}";
+            // Reconfigured: whatever ran out of memory under the old settings says nothing about the new ones.
+            ModelFitGate.ForgetProfile(FitProfileKey);
+            int live = BackendDeviceRegistry.Register(this,
+                new BackendDeviceEntry(BackendData?.ID ?? -1, key, device.Name, FitProfileKey, _engine));
             if (live > 1)
             {
                 // Named, not just keyed: a Vulkan key is a device UUID, and telling someone their backends share
@@ -569,31 +574,11 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         }
     }
 
-    /// <summary>Drops this backend's claim on its device, leaving no slot behind when it was the last one holding it.</summary>
-    /// <remarks>Not a decrement through <c>AddOrUpdate</c>, which ADDS a zero-valued entry for a key that is not
-    /// there: that is how a map which otherwise only counts upward accumulates entries for devices nothing is using.
-    /// The retry loop is the compare-and-swap that <c>ConcurrentDictionary</c> has no single call for.</remarks>
+    /// <summary>Drops this backend from <see cref="BackendDeviceRegistry"/>, so routing stops considering its device.</summary>
     private void ReleaseDeviceUsage()
     {
-        string key = Interlocked.Exchange(ref _registeredDeviceKey, null);
-        if (key is null)
-        {
-            return;
-        }
-        while (_liveDeviceCounts.TryGetValue(key, out int live))
-        {
-            if (live <= 1)
-            {
-                if (_liveDeviceCounts.TryRemove(new KeyValuePair<string, int>(key, live)))
-                {
-                    return;
-                }
-            }
-            else if (_liveDeviceCounts.TryUpdate(key, live - 1, live))
-            {
-                return;
-            }
-        }
+        BackendDeviceRegistry.Release(this);
+        FitProfileKey = null;
     }
 
     /// <summary>The device the engine actually bound to, as a key to count by and a name to show; both null when
@@ -853,6 +838,13 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 }
                 catch (OutOfVramException second)
                 {
+                    // Genuinely too big for this card at this size. Record it so routing skips this card (and any
+                    // no larger) for this workload, then let Swarm re-route when a larger card is still available.
+                    if (ModelFitGate.RecordFailure(input, this))
+                    {
+                        Logs.Warning($"[HartsyInference] {second.Message} Redirecting '{model.Name}' to a GPU with more memory.");
+                        throw new PleaseRedirectException();
+                    }
                     throw new SwarmReadableErrorException(DescribeVramFailure(second, family));
                 }
             }
@@ -1346,8 +1338,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             // running LLM backend. Opt-in, and a no-op that returns the prompt unchanged when unavailable.
             prompt = Ideogram4MagicPrompt.Expand(
                 prompt,
-                input.Get(T2IParamTypes.Width, 1024),
-                input.Get(T2IParamTypes.Height, 1024),
+                input.Get(T2IParamTypes.Width, DefaultImageSize),
+                input.Get(T2IParamTypes.Height, DefaultImageSize),
                 input.Get(SwarmUIHartsyInference.Ideogram4MagicPromptModelParam, ""),
                 input.SourceSession,
                 msg => Logs.Verbose($"[HartsyInference][Ideogram4] {msg}"));
@@ -1509,7 +1501,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             AddLoadStatus($"ControlNet '{cnModel.Name}' → {mode} preprocessing.");
             EngineImage annotated = ControlNetPreprocessing.Preprocess(
                 mode, hint,
-                input.Get(T2IParamTypes.Width, 1024), input.Get(T2IParamTypes.Height, 1024),
+                input.Get(T2IParamTypes.Width, DefaultImageSize), input.Get(T2IParamTypes.Height, DefaultImageSize),
                 PreprocessBackend, msg => AddLoadStatus(msg));
             // Keyed by the EMITTED slot index (the engine indexes request.ControlNets positionally); a skipped
             // holder must not shift the pairing. Only union checkpoints consult it engine-side.
@@ -1710,7 +1702,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 AddLoadStatus($"FLUX.1 Tools checkpoint detected ('{modelName}') → {toolsMode} preprocessing.");
                 EngineImage annotated = ControlNetPreprocessing.Preprocess(
                     toolsMode.Value, initImage,
-                    input.Get(T2IParamTypes.Width, 1024), input.Get(T2IParamTypes.Height, 1024),
+                    input.Get(T2IParamTypes.Width, DefaultImageSize), input.Get(T2IParamTypes.Height, DefaultImageSize),
                     PreprocessBackend, msg => AddLoadStatus(msg));
                 extra[HartsyInference.Engine.Features.RequestExtras.FluxToolsControlImage] = annotated;
             }
@@ -1776,8 +1768,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         {
             Prompt = input.Get(T2IParamTypes.Prompt) ?? "",
             NegativePrompt = input.Get(T2IParamTypes.NegativePrompt),
-            Width = input.Get(T2IParamTypes.Width, 704),
-            Height = input.Get(T2IParamTypes.Height, 480),
+            Width = input.Get(T2IParamTypes.Width, DefaultVideoWidth),
+            Height = input.Get(T2IParamTypes.Height, DefaultVideoHeight),
             Steps = NullableInt(input, T2IParamTypes.VideoSteps) ?? NullableInt(input, T2IParamTypes.Steps),
             CfgScale = input.TryGet(T2IParamTypes.VideoCFG, out double videoCfg) ? (float)videoCfg
                 : input.TryGet(T2IParamTypes.CFGScale, out double baseCfg) ? (float)baseCfg : null,
@@ -2104,6 +2096,30 @@ public class HartsyInferenceBackend : AbstractT2IBackend
 
     // ─── mapping helpers ───
 
+    /// <summary>Image width/height when the request leaves them unset.</summary>
+    public const int DefaultImageSize = 1024;
+
+    /// <summary>Video width when the request leaves it unset.</summary>
+    public const int DefaultVideoWidth = 704;
+
+    /// <summary>Video height when the request leaves it unset.</summary>
+    public const int DefaultVideoHeight = 480;
+
+    /// <summary>The geometry and VRAM overrides a generation will run with, for the engine's memory estimate — read
+    /// through the same defaults and helpers as the real request, so routing is judged on what will actually run.
+    /// Frames stay null when the request leaves them to the family, and the engine substitutes the recipe's own.</summary>
+    public static MemoryEstimateRequest MapMemoryEstimateRequest(T2IParamInput input, ModelSupport.Family family)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+        ArgumentNullException.ThrowIfNull(family);
+        bool video = family.Kind == ModelSupport.Kind.Video;
+        return new MemoryEstimateRequest(
+            input.Get(T2IParamTypes.Width, video ? DefaultVideoWidth : DefaultImageSize),
+            input.Get(T2IParamTypes.Height, video ? DefaultVideoHeight : DefaultImageSize),
+            video ? ResolveFrames(input) : 1,
+            Vram: MapVramOverrides(input));
+    }
+
     /// <summary>An int param's value, or null when the request didn't set it (so the Engine's family default wins).</summary>
     private static int? NullableInt(T2IParamInput input, T2IRegisteredParam<int> param) =>
         input.TryGet(param, out int value) && value > 0 ? value : null;
@@ -2419,7 +2435,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         {
             return false;
         }
-        return ValidateComfyOnlyParams(input);
+        // Last, after every capability check: memory routing only matters among backends that can run the request.
+        return ValidateComfyOnlyParams(input) && ModelFitGate.Allows(input, this);
     }
 
     /// <summary>Music models: refuse the image-only knobs that make no sense for an audio output, plus any music
