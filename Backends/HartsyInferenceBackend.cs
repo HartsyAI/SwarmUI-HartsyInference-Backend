@@ -425,29 +425,43 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 };
             }
 
-            // 'auto' silently degrades to CPU when CUDA can't load, and the CPU kernels are F32-only: fp8/bf16
-            // checkpoint weights read past the end of their allocation, corrupting the heap and aborting the
-            // process. Refuse to come up rather than serve a backend that cannot generate safely.
-            if (BackendFactory.Resolve(requested) == "cpu" && BackendFactory.Kind(requested) != "cpu")
+            // ResolveProbed, not Resolve: Resolve only asks whether a driver can see a device, which is true on a
+            // machine whose CUDA is installed but broken (skewed toolkit, kernels built for another architecture).
+            // That machine used to report RUNNING here and then fail on its first generation. Probing also picks up
+            // the Vulkan step, so an AMD/Intel box lands on its GPU instead of being told it has none.
+            string resolved = BackendFactory.ResolveProbed(BackendFactory.WithOrdinal(requested, deviceOrdinal ?? 0));
+
+            // The CPU kernels are F32-only: fp8/bf16 checkpoint weights read past the end of their allocation,
+            // corrupting the heap and aborting the process. Refuse to come up rather than serve a backend that
+            // cannot generate safely. Only an explicit 'cpu' opts into it.
+            if (resolved == "cpu" && BackendFactory.Kind(requested) != "cpu")
             {
-                string why = CudaUnavailableReason() ?? "no reason reported";
                 Status = BackendStatus.ERRORED;
-                string msg = $"CUDA is unavailable, so compute='{requested}' resolved to CPU — refusing to start. "
-                    + $"Reason: {why} "
-                    + "The CPU backend cannot run fp8/bf16 image models (it is F32-only and will corrupt memory). "
-                    + "Fix the GPU/driver, or set this backend's ComputeBackend to 'cpu' explicitly to override.";
+                // Both reasons, not just CUDA's: on a non-NVIDIA box the CUDA line is noise and the Vulkan line is
+                // the actionable one, and naming only CUDA is what sent AMD users off to fix a driver they do not have.
+                string msg = $"No usable GPU, so compute='{requested}' resolved to CPU, and this backend refuses to "
+                    + "start on CPU. The CPU backend cannot run fp8/bf16 image models (it is F32-only and will "
+                    + $"corrupt memory). CUDA: {CudaUnavailableReason() ?? CudaProbeFailureReason() ?? "no reason reported"}"
+                    + $" Vulkan: {VulkanUnavailableReason() ?? VulkanProbeFailureReason() ?? "no reason reported"}"
+                    + " Fix whichever of those is closest to working, or set this backend's ComputeBackend to 'cpu'"
+                    + " explicitly to override.";
                 AddLoadStatus(msg);
                 Logs.Error($"[HartsyInference] Backend #{BackendData?.ID} refusing CPU fallback: {msg}");
                 return;
             }
 
-            AddLoadStatus($"Constructing HartsyInference.Engine (compute='{requested}', device={deviceOrdinal?.ToString() ?? "auto"})...");
+            AddLoadStatus($"Constructing HartsyInference.Engine (compute='{requested}' resolved to '{resolved}', device={deviceOrdinal?.ToString() ?? "auto"})...");
             EngineOptions engineOptions = new EngineOptions { VramPolicy = vramPolicy, Placement = placement };
+            // The RESOLVED kind, not the raw setting: InferenceEngine builds through BackendFactory.Create, which
+            // routes 'auto' through the cheap Resolve. Handing it 'auto' after probing would let it build a device
+            // the probe just rejected, on the machines the probe exists for.
             _engine = deviceOrdinal.HasValue
-                ? new InferenceEngine(requested, deviceOrdinal.Value, engineOptions)
-                : new InferenceEngine(requested, engineOptions);
+                ? new InferenceEngine(resolved, deviceOrdinal.Value, engineOptions)
+                : new InferenceEngine(resolved, engineOptions);
             AddLoadStatus($"Engine ready: {_engine.BackendDescription}");
-            RegisterDeviceUsage(requested, deviceOrdinal ?? 0);
+            // Resolved, for the same reason the engine got it: this keys the device-sharing map, and re-deriving it
+            // from 'auto' through the cheap Resolve could name a device the engine is not on.
+            RegisterDeviceUsage(resolved, deviceOrdinal ?? 0);
 
             // MaxUsages is what the scheduler checks to decide when to route a request to a different
             // backend (BackendHandler: in-use once Usages >= MaxUsages). Mirror ComfyUI's model:
@@ -548,8 +562,21 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     /// <summary>Why the Engine could not use CUDA, or null when that Engine build does not report it.</summary>
     // Reflection, not a direct reference: Swarm's own extension rebuild never passes UseLocalHartsy, so a
     // compile-time dependency on this property silently drops both image backends when the git hash changes.
-    private static string CudaUnavailableReason()
-        => typeof(BackendFactory).GetProperty("CudaUnavailableReason", BindingFlags.Public | BindingFlags.Static)
+    private static string CudaUnavailableReason() => EngineReason("CudaUnavailableReason");
+
+    /// <summary>Why the Engine's CUDA probe failed, or null when it passed or that Engine build predates it.</summary>
+    private static string CudaProbeFailureReason() => EngineReason("CudaProbeFailureReason");
+
+    /// <summary>Why the Engine found no Vulkan GPU, or null when it did or that Engine build predates it.</summary>
+    private static string VulkanUnavailableReason() => EngineReason("VulkanUnavailableReason");
+
+    /// <summary>Why the Engine's Vulkan probe failed, or null when it passed or that Engine build predates it.</summary>
+    private static string VulkanProbeFailureReason() => EngineReason("VulkanProbeFailureReason");
+
+    /// <summary>Reads one of BackendFactory's diagnostic reason properties by name, for the reflection reason above.
+    /// A build that predates the property returns null rather than failing to load.</summary>
+    private static string EngineReason(string property)
+        => typeof(BackendFactory).GetProperty(property, BindingFlags.Public | BindingFlags.Static)
             ?.GetValue(null) as string;
 
     /// <summary>Parses the configured GPU_ID into the device ordinal handed to the Engine. Swarm allows a
