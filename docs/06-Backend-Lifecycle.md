@@ -153,7 +153,10 @@ only fight that cache, not warm it usefully.
 - **Out-of-VRAM retry.** If `Dispatch()` throws `OutOfVramException` and cancellation was not
   requested, it logs a warning, calls `FreeMemory(false)`, and retries `Dispatch()` exactly
   once — the assumption being a pipeline cached from an earlier, larger model is holding VRAM
-  this request needs. A second `OutOfVramException` (or the first one, if cancellation-excluded
+  this request needs. A second `OutOfVramException` is first recorded with
+  `ModelFitGate.RecordFailure`; when a larger card can still take the request (and it was not
+  pinned with Exact Backend ID) the backend throws `PleaseRedirectException` and SwarmUI re-routes it,
+  with the gate now excluding this card. Otherwise it (or the first one, if cancellation-excluded
   retry didn't apply) is wrapped in `SwarmReadableErrorException` via `DescribeVramFailure`,
   which reports the requested/available byte counts when known and suggests concrete levers
   (lower resolution/frame-count/batch, set `DitShardGpuId` to pool a second card's VRAM, or set
@@ -199,6 +202,12 @@ first hit (so the request routes to a Comfy backend if one exists):
 5. `ValidateComfyOnlyParams` — refuses any request-set param flagged `"comfyui"` that isn't in
    the small `HonoredComfyParams` allow-list (sampler/scheduler/refiner selection, style-model
    and IP-Adapter scheduling knobs), and explicitly refuses raw custom-workflow IR.
+
+6. `ModelFitGate.Allows` — memory-aware routing. Reads the per-request GPU fit answer that
+   `ModelFitGate.Prepare` froze on `T2IEngine.PreGenerateEvent` (one engine `AssessAsync` per
+   distinct device/settings profile in `BackendDeviceRegistry`) and refuses a card the model should
+   not run on under the effective VRAM tier. O(1), no I/O: this runs on SwarmUI's scheduler thread
+   for every pending request and backend. See [`15-Two-GPU-Setups.md`](./15-Two-GPU-Setups.md).
 
 Why this backend advertises `"comfyui"` at all, and the honesty-guard design behind step 5, is
 covered in [`07-Parameters-And-Feature-Flags.md`](./07-Parameters-And-Feature-Flags.md) — this

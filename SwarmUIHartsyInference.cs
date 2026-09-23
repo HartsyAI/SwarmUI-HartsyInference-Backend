@@ -6,6 +6,7 @@ using SwarmUI.Utils;
 using HartsyInference.Engine;
 using HartsyInference.Engine.Registry;
 using Hartsy.Extensions.HartsyInferenceBackend.Backends;
+using Hartsy.Extensions.HartsyInferenceBackend.Services;
 using Hartsy.Extensions.HartsyInferenceBackend.WebAPI;
 
 // NOTE: Namespace must NOT contain "SwarmUI" (reserved for built-ins).
@@ -249,6 +250,10 @@ public class SwarmUIHartsyInference : Extension
         // dropdown uses), so IPA works Comfy-free. Refresh keeps it current after downloads.
         PopulateIpAdapterModels();
         Program.ModelRefreshEvent += PopulateIpAdapterModels;
+
+        // Memory-aware routing: freeze a per-request GPU fit answer before Swarm picks a backend, so our backends'
+        // validator can steer each model to a card it fits on (see Services/ModelFitGate).
+        T2IEngine.PreGenerateEvent += ModelFitGate.Prepare;
         PopulateSamplerValues();
         PopulateUpscaleMethodValues();
 
@@ -993,7 +998,7 @@ public class SwarmUIHartsyInference : Extension
     public override void OnShutdown()
     {
         Logs.Init("HartsyInference extension shutdown");
-        // Per-instance shutdown is handled by the BackendHandler;
-        // nothing extension-level to clean up here.
+        T2IEngine.PreGenerateEvent -= ModelFitGate.Prepare;
+        // Per-instance shutdown is handled by the BackendHandler.
     }
 }

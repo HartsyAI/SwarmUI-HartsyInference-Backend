@@ -29,8 +29,33 @@ Symptom: jobs queue behind each other while a card sits idle.
 
 - Two backends, one per GPU, **no placement knobs set**.
 - `OverQueue = 0`, so a second job spills to the idle backend immediately instead of queuing behind
-  the first. SwarmUI's scheduler always prefers the lowest-ID idle backend for a single job; that is
-  core behaviour, not something this extension changes.
+  the first. Among backends that can take a job, SwarmUI's scheduler prefers the least-busy one, and
+  loads a new model on the one idle longest; it never looks at VRAM itself. This extension adds that
+  (next section), so on unequal cards a big model is not sent to the small one just because it was free.
+
+## Memory-aware routing (automatic)
+
+Before SwarmUI picks a backend, the extension asks each GPU's engine whether the request fits, from
+the checkpoint header alone (read once per model, then cached). The answer follows each backend's
+`LowVram` tier, with a per-generation **VRAM Mode** taking precedence:
+
+| Effective tier | What routing does |
+|---|---|
+| Performance | Nothing. You size your own workloads; the backend takes whatever it is sent. |
+| Auto / Balanced | Prefer a card that holds the model fully resident. If none can, use the largest card that can stream it. A smaller card waits rather than streaming slowly. |
+| Aggressive / Maximum | You chose streaming, so any card that can stream the model takes it. |
+
+If the estimate says no card fits, the largest card is still tried; the engine's own pre-flight then
+gives the exact refusal. Only backends SwarmUI can currently dispatch to count, and a job never waits
+on a preferred card that has since been disabled or reloaded. If a card actually runs out of memory
+(after the free-and-retry), the job is redirected to a larger card when one exists. For the next 30
+minutes, jobs for that model with the same shape (frame count left default or set, refiner upscale,
+LoRA and ControlNet counts, per-generation VRAM levers) at that size or larger skip that card and any
+equally configured card no larger. Changing the backend's settings clears its records.
+Pinning a job with **Exact Backend ID** bypasses routing entirely.
+The routing decision for each GPU is logged at Verbose level as `Fit '<model>' on <GPU>`.
+Wan video is sized with its pipeline's own formulas; other families use header weights plus a
+generic allowance, so their routing is coarser.
 
 ## Component placement (composes with either posture)
 
