@@ -54,6 +54,10 @@ LoRA and ControlNet counts, per-generation VRAM levers) at that size or larger s
 equally configured card no larger. Changing the backend's settings clears its records.
 Pinning a job with **Exact Backend ID** bypasses routing entirely.
 The routing decision for each GPU is logged at Verbose level as `Fit '<model>' on <GPU>`.
+To check routing on a two-card box, queue two jobs at once, with one deliberately too big for the
+small card: the small-card refusal, the wait and any redirect only show up under queue load, never on
+a single manual run. A Verbose `has no answer for a request` line means a request reached a backend
+without being prepared, which would turn routing off for it.
 Wan video is sized with its pipeline's own formulas; other families use header weights plus a
 generic allowance, so their routing is coarser.
 

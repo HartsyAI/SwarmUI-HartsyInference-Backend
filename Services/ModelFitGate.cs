@@ -44,7 +44,15 @@ public static class ModelFitGate
     private static readonly TimeSpan RecordLifetime = TimeSpan.FromMinutes(30);
 
     /// <summary>The routing answer for each in-flight request, collected with the request itself.</summary>
+    /// <remarks>Keyed by instance: SwarmUI hands the same <see cref="T2IParamInput"/> to <c>PreGenerateEvent</c> and to
+    /// the backend filter of one <c>CreateImageTask</c> (it clones per image before both). <see cref="Allows"/> logs if
+    /// that ever stops being true, since a miss otherwise looks exactly like no routing at all.</remarks>
     private static readonly ConditionalWeakTable<T2IParamInput, RequestFit> Fits = new();
+
+    /// <summary>What <see cref="Prepare"/> stores when it deliberately has no opinion (not our model, pinned to another
+    /// backend type, nothing to assess), so <see cref="Allows"/> can tell that apart from a request it never saw.</summary>
+    private static readonly RequestFit NoOpinion = new(null, null, null, 0, false,
+        ImmutableDictionary<string, ProfileFit>.Empty);
 
     /// <summary>Smallest workload that has run out of memory per (checkpoint, request shape, fit profile, effective
     /// tier). Bounded by the models, shapes and profiles in use, not by request volume, and pruned as records expire.</summary>
@@ -63,14 +71,11 @@ public static class ModelFitGate
         Fits.Remove(input);
         try
         {
-            RequestFit fit = Assess(input);
-            if (fit is not null)
-            {
-                Fits.AddOrUpdate(input, fit);
-            }
+            Fits.AddOrUpdate(input, Assess(input) ?? NoOpinion);
         }
         catch (Exception ex)
         {
+            Fits.AddOrUpdate(input, NoOpinion);
             Logs.Warning($"[HartsyInference] VRAM fit check skipped for this generation: {ex.Message}");
         }
     }
@@ -79,8 +84,21 @@ public static class ModelFitGate
     /// <see cref="T2IParamInput.RefusalReasons"/> when not. Called from the backend's own validator.</summary>
     public static bool Allows(T2IParamInput input, SiBackend backend)
     {
-        if (input is null || backend?.FitProfileKey is null || !Fits.TryGetValue(input, out RequestFit fit)
-            || !fit.Profiles.TryGetValue(backend.FitProfileKey, out ProfileFit profile) || profile.Allowed)
+        if (input is null || backend?.FitProfileKey is null)
+        {
+            return true;
+        }
+        if (!Fits.TryGetValue(input, out RequestFit fit))
+        {
+            // Prepare runs for every generation and always leaves an answer, so a miss means SwarmUI filtered a
+            // different instance than it prepared. Said once per request, then remembered, so the scheduler's repeated
+            // passes do not repeat it.
+            Logs.Verbose($"[HartsyInference] VRAM fit routing has no answer for a request reaching backend "
+                + $"{backend.FitProfileKey}; it was not prepared on this instance, so it is routed without memory checks.");
+            Fits.AddOrUpdate(input, NoOpinion);
+            return true;
+        }
+        if (!fit.Profiles.TryGetValue(backend.FitProfileKey, out ProfileFit profile) || profile.Allowed)
         {
             return true;
         }
@@ -110,6 +128,18 @@ public static class ModelFitGate
         OutOfMemoryRecord record = new(failed.Fit.CapacityBytes, fit.Workload, failed.FitSettings, DateTime.UtcNow);
         FailedWorkloads.AddOrUpdate(new LedgerKey(fit.Checkpoint, fit.Shape, backend.FitProfileKey, failed.Fit.EffectiveTier),
             record, (_, known) => record with { Workload = Math.Min(known.Workload, fit.Workload) });
+        // Exclude the failed card from this request's own frozen answer too, rather than relying on SwarmUI re-firing
+        // PreGenerateEvent for the redirected attempt: that is what makes each redirect exclude one more card.
+        Fits.AddOrUpdate(input, fit with
+        {
+            Profiles = fit.Profiles.SetItem(backend.FitProfileKey, failed with
+            {
+                OutOfMemory = true,
+                Allowed = false,
+                Refusal = $"HartsyInference: '{fit.ModelName}' just ran out of VRAM on {backend.FitProfileKey} for this "
+                    + "request. Lower the resolution or frame count, or use a GPU with more memory.",
+            }),
+        });
         Logs.Info($"[HartsyInference] Recorded out-of-VRAM for '{fit.ModelName}' on {backend.FitProfileKey} at "
             + $"workload {fit.Workload}; for {RecordLifetime.TotalMinutes:0} minutes, requests like it at least this "
             + "large skip this card and equally configured cards no larger.");
