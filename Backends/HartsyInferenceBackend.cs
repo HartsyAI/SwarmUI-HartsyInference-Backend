@@ -3,6 +3,7 @@ using System.IO;
 using System.Net.Http;
 using System.Reflection;
 using System.Runtime.CompilerServices;
+using System.Runtime.ExceptionServices;
 using SwarmUI.Builtin_ComfyUIBackend;
 using FreneticUtilities.FreneticDataSyntax;
 using Newtonsoft.Json.Linq;
@@ -49,11 +50,11 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     /// backend class so BackendHandler.RegisterBackendType discovers it via reflection.</summary>
     public class HartsyInferenceBackendSettings : AutoConfiguration
     {
-        [ConfigComment("Compute backend to use.\n'Auto' (default) tries CUDA, then falls back to CPU.\nOnly options this machine can actually use are offered here: 'Cuda' only appears when an NVIDIA GPU is present AND a real test computation on it succeeds, not just that a driver reports a device (this catches a kernel built for the wrong GPU architecture, a missing PTX directory, or a driver/toolkit mismatch, before it surfaces mid-generation instead of here).\n'Vulkan' has no cheap ahead-of-time probe, so it is always offered; a missing Vulkan driver only shows up when this backend starts.\nThis list is built once per SwarmUI process start. If you plug in a GPU or fix a driver, restart SwarmUI to see it here.")]
+        [ConfigComment("Compute backend to use.\n'Auto' (default) tries CUDA, then Vulkan, then CPU. Vulkan is how a non-NVIDIA GPU (AMD, Intel) gets used, so 'Auto' does not mean 'CUDA or nothing'.\nOnly options this machine can actually use are offered here: 'Cuda' only appears when an NVIDIA GPU is present AND a real test computation on it succeeds, not just that a driver reports a device (this catches a kernel built for the wrong GPU architecture, a missing PTX directory, or a driver/toolkit mismatch, before it surfaces mid-generation instead of here).\n'Vulkan' only appears when a real Vulkan GPU is present. Software rasterizers such as Mesa's lavapipe enumerate as Vulkan devices but are CPU implementations of it, slower than the CPU backend, so they do not count as a GPU here.\nThis list is built once per SwarmUI process start. If you plug in a GPU or fix a driver, restart SwarmUI to see it here.")]
         [SettingsOptions(Impl = typeof(ComputeBackendOptions))]
         public string ComputeBackend = "auto";
 
-        [ConfigComment("Which GPU to use, if multiple are available.\nShould be a single number, like '0' (first GPU), '1' (second GPU), etc.\nIgnored for the CPU compute backend.\nThis is a CUDA device ordinal, which is NOT necessarily the same order nvidia-smi shows: CUDA enumerates fastest-first by default, so on a mixed-GPU machine '0' is the fastest card. To confirm which physical GPU you got, watch nvidia-smi memory while a generation runs.\nRun one backend per GPU to use several cards at once.")]
+        [ConfigComment("Which GPU to use, if multiple are available.\nShould be a single number, like '0' (first GPU), '1' (second GPU), etc.\nIgnored for the CPU compute backend.\nUnder CUDA this is a CUDA device ordinal, which is NOT necessarily the same order nvidia-smi shows: CUDA enumerates fastest-first by default, so on a mixed-GPU machine '0' is the fastest card. To confirm which physical GPU you got, watch nvidia-smi memory while a generation runs.\nUnder Vulkan the numbering works differently. '0' (the default) means 'let the engine pick the best GPU'; any other number is the Vulkan loader's RAW device index. That raw list can include software rasterizers, which take up an index without being usable GPUs, so '1' is not necessarily your second card. The backend's startup log names the device it actually bound to, which is the reliable way to check.\nRun one backend per GPU to use several cards at once.")]
         public string GPU_ID = "0";
 
         [ConfigComment("How hard the engine should work to fit a model in VRAM.\n\n'Auto' (default) reads your card's size to pick a starting posture, then measures free VRAM before each phase and streams only when the model would not otherwise fit. Cards with headroom keep the full-speed resident path, so this costs nothing when it isn't needed. Leave it here unless you have a reason not to.\n\n'Performance' never streams and never auto-evicts: everything loads and an oversized model fails with an out-of-VRAM error instead of running slowly. For operators who size their own workloads and want a hard failure.\n\n'Balanced' releases each phase's weights at its boundary so the next phase gets the space, and streams only when the measurement says it must.\n\n'Aggressive' always streams, halves the precision of cross-step caches, and shrinks chunk/tile sizes. Useful when sharing the GPU with another program, or to test the streamed path.\n\n'Maximum' adds activation offload, quantized compute and freeing after every generation, and will spill onto a second GPU when one is configured and idle. Last resort — every one of those costs speed, and some change numerics.\n\nStreaming is typically 5-8x slower than a fully-resident model, but it is what lets large models run on a 12GB card at all. Individual levers can be overridden per-generation under the 'VRAM & Memory' parameter group.\nThe older 'auto'/'on'/'off' values still load: 'on' becomes Aggressive and 'off' becomes Performance.")]
@@ -138,8 +139,12 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         }
 
         /// <summary>'cuda' gets the strong check (an actual GPU computation, not just driver presence, per the
-        /// engine's "ask whether the GPU works, not whether one exists" probe). Every other kind gets the
-        /// syntax/existence-level <see cref="BackendFactory.Validate"/> the engine already performs cheaply.</summary>
+        /// engine's "ask whether the GPU works, not whether one exists" probe). Every other kind gets
+        /// <see cref="BackendFactory.Validate"/>, which is not merely syntactic any more: since alpha.158 it asks
+        /// Vulkan for a real device and excludes software rasterizers, so 'vulkan' no longer needs its own
+        /// <c>ProbeVulkan</c> branch here to stop being offered on a machine that has no Vulkan GPU. A device that
+        /// enumerates but cannot meet the engine's shader requirements would still be listed; that is the gap a
+        /// ProbeVulkan branch would close, and it is narrower than the one Validate now covers.</summary>
         private static bool IsUsable(string kind)
         {
             if (!kind.Equals("cuda", StringComparison.OrdinalIgnoreCase))
@@ -221,11 +226,24 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     /// extra dispatched jobs here until the current one finishes.</summary>
     private readonly SemaphoreSlim _genLock = new(1, 1);
 
-    /// <summary>Live backend count per device key ("cuda:0"), to warn when two backends share one GPU.</summary>
+    /// <summary>Live backend count per PHYSICAL device, to warn when two backends share one GPU.</summary>
+    /// <remarks>Keyed by what the engine reports it bound to (<c>cuda:0</c>, or a Vulkan device UUID), not by the
+    /// selector we asked for. The two are the same thing only while every selector names its device outright: once
+    /// the engine ranks devices for a selector that names none, a key composed from our own settings says
+    /// <c>vulkan:0</c> for a backend running on some other card, and two backends sharing one GPU land in separate
+    /// slots with nothing warning about the VRAM they are about to contend for.</remarks>
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> _liveDeviceCounts = new();
 
     /// <summary>The device key this instance registered in <see cref="_liveDeviceCounts"/>, for Shutdown to release.</summary>
     private string _registeredDeviceKey;
+
+    /// <summary>What <see cref="Init"/>'s probe resolved <c>ComputeBackend</c> to, so callers that build their own
+    /// device do not re-derive it through the cheap <see cref="BackendFactory.Resolve"/> and land somewhere else.
+    /// Null until a successful Init, which is why readers fall back to the raw setting.</summary>
+    /// <remarks>Volatile because <see cref="PreprocessBackend"/> reads it under its own lock while <see cref="Init"/>
+    /// writes it under none. Init finishes before any generation today, so this documents the ordering rather than
+    /// fixing a live race.</remarks>
+    private volatile string _resolvedComputeKind;
 
     /// <summary>Every feature flag this backend advertises. Static so the startup self-check in
     /// <c>SwarmUIHartsyInference</c> can compare it against the flags our registered params actually carry —
@@ -425,29 +443,63 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 };
             }
 
-            // 'auto' silently degrades to CPU when CUDA can't load, and the CPU kernels are F32-only: fp8/bf16
-            // checkpoint weights read past the end of their allocation, corrupting the heap and aborting the
-            // process. Refuse to come up rather than serve a backend that cannot generate safely.
-            if (BackendFactory.Resolve(requested) == "cpu" && BackendFactory.Kind(requested) != "cpu")
+            // One ordinal for the probe, the engine and the device-sharing key, so the three cannot silently
+            // disagree about which device this backend is talking about.
+            int ordinal = deviceOrdinal ?? 0;
+
+            // ResolveProbed, not Resolve: Resolve only asks whether a driver can see a device, which is true on a
+            // machine whose CUDA is installed but broken (skewed toolkit, kernels built for another architecture).
+            // That machine used to report RUNNING here and then fail on its first generation. Probing also picks up
+            // the Vulkan step, so an AMD/Intel box lands on its GPU instead of being told it has none.
+            // A throw is treated as "no usable GPU" rather than escaping: the broken-driver machine is exactly what
+            // the probe is for, so it is the likeliest to throw, and the generic catch below would report a raw
+            // exception instead of the refusal message this path exists to produce.
+            string resolved;
+            try
             {
-                string why = CudaUnavailableReason() ?? "no reason reported";
+                resolved = BackendFactory.ResolveProbed(BackendFactory.WithOrdinal(requested, ordinal));
+            }
+            catch (Exception ex)
+            {
+                Logs.Warning($"[HartsyInference] Backend probe threw, treating as no usable GPU: {ex.Message}");
+                resolved = "cpu";
+            }
+
+            // The CPU kernels are F32-only: fp8/bf16 checkpoint weights read past the end of their allocation,
+            // corrupting the heap and aborting the process. Refuse to come up rather than serve a backend that
+            // cannot generate safely. Only an explicit 'cpu' opts into it.
+            if (resolved == "cpu" && BackendFactory.Kind(requested) != "cpu")
+            {
                 Status = BackendStatus.ERRORED;
-                string msg = $"CUDA is unavailable, so compute='{requested}' resolved to CPU — refusing to start. "
-                    + $"Reason: {why} "
-                    + "The CPU backend cannot run fp8/bf16 image models (it is F32-only and will corrupt memory). "
-                    + "Fix the GPU/driver, or set this backend's ComputeBackend to 'cpu' explicitly to override.";
+                // Both reasons, not just CUDA's: on a non-NVIDIA box the CUDA line is noise and the Vulkan line is
+                // the actionable one, and naming only CUDA is what sent AMD users off to fix a driver they do not
+                // have. Bracketed because neither reason is guaranteed to end in punctuation, and this message is
+                // the whole user-facing payoff of the change.
+                string msg = $"No usable GPU, so compute='{requested}' resolved to CPU, and this backend refuses to "
+                    + "start on CPU. The CPU backend cannot run fp8/bf16 image models (it is F32-only and will "
+                    + $"corrupt memory). CUDA: [{CudaReason()}] Vulkan: [{VulkanReason()}] "
+                    + "Fix whichever of those is closest to working, or set this backend's ComputeBackend to 'cpu' "
+                    + "explicitly to override.";
                 AddLoadStatus(msg);
                 Logs.Error($"[HartsyInference] Backend #{BackendData?.ID} refusing CPU fallback: {msg}");
                 return;
             }
+            _resolvedComputeKind = resolved;
 
-            AddLoadStatus($"Constructing HartsyInference.Engine (compute='{requested}', device={deviceOrdinal?.ToString() ?? "auto"})...");
+            AddLoadStatus($"Constructing HartsyInference.Engine (compute='{requested}' resolved to '{resolved}', device={deviceOrdinal?.ToString() ?? "auto"})...");
             EngineOptions engineOptions = new EngineOptions { VramPolicy = vramPolicy, Placement = placement };
+            // The RESOLVED kind, not the raw setting: InferenceEngine builds through BackendFactory.Create, which
+            // routes 'auto' through the cheap Resolve. Handing it 'auto' after probing would let it build a device
+            // the probe just rejected, on the machines the probe exists for.
             _engine = deviceOrdinal.HasValue
-                ? new InferenceEngine(requested, deviceOrdinal.Value, engineOptions)
-                : new InferenceEngine(requested, engineOptions);
-            AddLoadStatus($"Engine ready: {_engine.BackendDescription}");
-            RegisterDeviceUsage(requested, deviceOrdinal ?? 0);
+                ? new InferenceEngine(resolved, deviceOrdinal.Value, engineOptions)
+                : new InferenceEngine(resolved, engineOptions);
+            // Asked for, not assumed: a selector that names no device lets the engine rank them, so this is the only
+            // thing that knows which card we are on. It builds the backend, so an explicit selector this machine
+            // cannot honor fails here rather than on the first generation.
+            (string Key, string Name) device = EngineDeviceIdentity();
+            AddLoadStatus($"Engine ready: {_engine.BackendDescription}{(device.Key is null ? "" : $" on {device.Name ?? device.Key} [{device.Key}]")}");
+            RegisterDeviceUsage(resolved, ordinal, device);
 
             // MaxUsages is what the scheduler checks to decide when to route a request to a different
             // backend (BackendHandler: in-use once Usages >= MaxUsages). Mirror ComfyUI's model:
@@ -474,23 +526,39 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     /// <summary>Tracks how many live backends target one device and notes the sharing tradeoffs: co-residency
     /// means both models must fit in that GPU's VRAM together, and the engine serializes same-device generations
     /// (per-backend state is fully isolated; concurrent same-GPU execution arrives with the DeviceGate flip).</summary>
-    private void RegisterDeviceUsage(string requested, int ordinal)
+    /// <param name="kind">An ALREADY-RESOLVED backend kind, never <c>auto</c>. Re-resolving here is what this
+    /// signature exists to prevent: the cheap <see cref="BackendFactory.Resolve"/> can disagree with the probe
+    /// <see cref="Init"/> ran, and this keys the sharing map, so it would name a device the engine is not on.</param>
+    /// <param name="device">What the engine reports it bound to. Key is null when this engine build cannot say, in
+    /// which case the selector is all there is to key on; Name is for the warning, since a Vulkan key is a UUID and
+    /// nobody can tell which of their cards that is.</param>
+    private void RegisterDeviceUsage(string kind, int ordinal, (string Key, string Name) device)
     {
         try
         {
-            string kind = BackendFactory.Resolve(BackendFactory.WithOrdinal(requested, ordinal));
-            if (kind != "cuda" && kind != "vulkan")
+            // Idempotent. Init runs again on this same instance whenever its settings are edited, and a second
+            // registration without this counts one backend twice, so the slot never returns to zero and every later
+            // backend on that device is told it is sharing.
+            ReleaseDeviceUsage();
+            if (!BackendFactory.IsDeviceKind(kind))
             {
                 return;
             }
-            string key = $"{kind}:{ordinal}";
+            // The engine's own answer first. The composed selector is the fallback, and goes through the factory's
+            // grammar rather than being spelled here, so one device cannot acquire two spellings.
+            string key = device.Key ?? BackendFactory.CanonicalDeviceKey(BackendFactory.WithOrdinal(kind, ordinal));
             _registeredDeviceKey = key;
-            int live = _liveDeviceCounts.AddOrUpdate(key, 1, (_, n) => n + 1);
+            int live = _liveDeviceCounts.AddOrUpdate(key, 1, static (_, n) => n + 1);
             if (live > 1)
             {
-                string warning = $"{live} HartsyInference backends now share device {key}. Their models must co-fit " +
-                    "in that GPU's VRAM, and generations on this device run one at a time (the engine serializes " +
-                    "same-GPU work; concurrent same-GPU execution is planned). Use distinct GPU_IDs for parallel throughput.";
+                // Named, not just keyed: a Vulkan key is a device UUID, and telling someone their backends share
+                // 'vulkan:6d65...' does not tell them which of their cards to stop pointing at.
+                string named = string.IsNullOrWhiteSpace(device.Name) ? key : $"{device.Name} [{key}]";
+                string warning = $"{live} HartsyInference backends now share one physical device: {named}. Their models " +
+                    "must co-fit in that GPU's VRAM, and generations on this device run one at a time (the engine " +
+                    "serializes same-GPU work; concurrent same-GPU execution is planned). If you gave these backends " +
+                    "different GPU_IDs expecting different cards, note that under Vulkan the ordinal is the loader's raw " +
+                    "device index and software rasterizers occupy indices, so two different numbers can land on one card.";
                 AddLoadStatus($"WARNING: {warning}");
                 Logs.Warning($"[HartsyInference] {warning}");
             }
@@ -498,6 +566,65 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         catch (Exception ex)
         {
             Logs.Error($"[HartsyInference] Device-usage registration failed (non-fatal): {ex.Message}");
+        }
+    }
+
+    /// <summary>Drops this backend's claim on its device, leaving no slot behind when it was the last one holding it.</summary>
+    /// <remarks>Not a decrement through <c>AddOrUpdate</c>, which ADDS a zero-valued entry for a key that is not
+    /// there: that is how a map which otherwise only counts upward accumulates entries for devices nothing is using.
+    /// The retry loop is the compare-and-swap that <c>ConcurrentDictionary</c> has no single call for.</remarks>
+    private void ReleaseDeviceUsage()
+    {
+        string key = Interlocked.Exchange(ref _registeredDeviceKey, null);
+        if (key is null)
+        {
+            return;
+        }
+        while (_liveDeviceCounts.TryGetValue(key, out int live))
+        {
+            if (live <= 1)
+            {
+                if (_liveDeviceCounts.TryRemove(new KeyValuePair<string, int>(key, live)))
+                {
+                    return;
+                }
+            }
+            else if (_liveDeviceCounts.TryUpdate(key, live - 1, live))
+            {
+                return;
+            }
+        }
+    }
+
+    /// <summary>The device the engine actually bound to, as a key to count by and a name to show; both null when
+    /// this engine build cannot say.</summary>
+    /// <remarks>Reflective for the reason given on <see cref="VulkanReason"/>: the property is newer than this file's
+    /// compile-time floor. Worth asking at all, rather than composing a key from our own settings, because the two
+    /// stopped agreeing once the engine gained device ranking. A backend that asked for <c>vulkan</c> runs on whichever
+    /// device ranked best, so a composed <c>vulkan:0</c> can name a card it is not on.
+    ///
+    /// <para>Reading it constructs the engine's backend, which is the point: an explicit <c>cuda</c>/<c>vulkan</c>
+    /// selector is never probed, so this is where a machine that cannot honor one says so, at startup and with a
+    /// reason, rather than midway through someone's first generation. The throw is unwrapped and left to
+    /// <see cref="Init"/>'s own handler.</para></remarks>
+    private (string Key, string Name) EngineDeviceIdentity()
+    {
+        PropertyInfo prop = _engine?.GetType().GetProperty("DeviceKey", BindingFlags.Public | BindingFlags.Instance);
+        if (prop is null)
+        {
+            // An older engine: leave the backend lazy rather than forcing it to learn nothing.
+            return (null, null);
+        }
+        try
+        {
+            string key = prop.GetValue(_engine) as string;
+            // Free now: reading the key above built the backend, so this cannot be what forces construction.
+            return (key, _engine.ComputeBackend?.Capabilities?.Name);
+        }
+        catch (TargetInvocationException ex) when (ex.InnerException is not null)
+        {
+            ExceptionDispatchInfo.Capture(ex.InnerException).Throw();
+            throw; // unreachable, and the compiler needs it said
         }
     }
 
@@ -509,11 +636,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         _engine?.Dispose();
         _engine = null;
         DisposePreprocessBackend();
-        if (_registeredDeviceKey is not null)
-        {
-            _liveDeviceCounts.AddOrUpdate(_registeredDeviceKey, 0, (_, n) => Math.Max(0, n - 1));
-            _registeredDeviceKey = null;
-        }
+        ReleaseDeviceUsage();
         CurrentModelName = null;
         await Task.CompletedTask;
     }
@@ -545,12 +668,37 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         _cancelCts?.Cancel();
     }
 
-    /// <summary>Why the Engine could not use CUDA, or null when that Engine build does not report it.</summary>
-    // Reflection, not a direct reference: Swarm's own extension rebuild never passes UseLocalHartsy, so a
-    // compile-time dependency on this property silently drops both image backends when the git hash changes.
-    private static string CudaUnavailableReason()
-        => typeof(BackendFactory).GetProperty("CudaUnavailableReason", BindingFlags.Public | BindingFlags.Static)
+    /// <summary>Why the Engine did not use CUDA, as a display string.</summary>
+    /// <remarks>Referenced directly, not reflectively. The reflection below exists so a local engine checkout older
+    /// than the pin still builds, but that protection only reaches back as far as the oldest API this file already
+    /// names at compile time, and <see cref="ComputeBackendOptions.IsUsable"/> names
+    /// <see cref="BackendFactory.ProbeCuda"/> and <see cref="BackendFactory.CudaProbeFailureReason"/> directly
+    /// (<c>Guard</c> catches throws, not missing members). So the floor is already that era, and routing CUDA's
+    /// reasons through reflection would buy nothing while implying a tolerance this file does not have.</remarks>
+    private static string CudaReason()
+        => (BackendFactory.CudaUnavailableReason ?? BackendFactory.CudaProbeFailureReason)?.Trim()
+            ?? "no reason reported";
+
+    /// <summary>Why the Engine did not use Vulkan, as a display string.</summary>
+    /// <remarks>Reflective, because these two properties are newer than the compile-time floor described on
+    /// <see cref="CudaReason"/>: an engine between that floor and alpha.158 has no Vulkan reasons to give, and a
+    /// direct reference would stop it building rather than degrade. "Absent" and "present but null" are reported
+    /// differently on purpose: the first means this build cannot answer, and rendering it as "no reason reported"
+    /// would tell the user we looked and found nothing, which is the same misdirection this change removes for
+    /// AMD users being sent to fix CUDA.</remarks>
+    private static string VulkanReason()
+    {
+        PropertyInfo unavailable = typeof(BackendFactory)
+            .GetProperty("VulkanUnavailableReason", BindingFlags.Public | BindingFlags.Static);
+        if (unavailable is null)
+        {
+            return "not supported by this engine build; update HartsyInference to 2.0.0-alpha.158 or newer";
+        }
+        string probeFailure = typeof(BackendFactory)
+            .GetProperty("VulkanProbeFailureReason", BindingFlags.Public | BindingFlags.Static)
             ?.GetValue(null) as string;
+        return (unavailable.GetValue(null) as string ?? probeFailure)?.Trim() ?? "no reason reported";
+    }
 
     /// <summary>Parses the configured GPU_ID into the device ordinal handed to the Engine. Swarm allows a
     /// comma-separated list (one backend instance per device); a single Engine drives one device, so the first
@@ -2050,7 +2198,10 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 }
                 else
                 {
-                    string selector = Settings?.ComputeBackend?.ToLowerInvariant() ?? "auto";
+                    // Init's probed answer when there is one: Create routes 'auto' through the cheap Resolve, which
+                    // is the same disagreement Init avoids by handing the engine a resolved kind. Without this the
+                    // annotator is the one device left that can land on CPU, or on a card the probe just rejected.
+                    string selector = _resolvedComputeKind ?? Settings?.ComputeBackend?.ToLowerInvariant() ?? "auto";
                     int? ordinal = ParseGpuId(Settings?.GPU_ID);
                     AddLoadStatus($"Creating ControlNet annotator device (compute='{selector}', device={ordinal?.ToString() ?? "auto"})...");
                     // Create takes only a selector; the ordinal rides as a 'cuda:1' suffix (0 composes back to the bare kind).
