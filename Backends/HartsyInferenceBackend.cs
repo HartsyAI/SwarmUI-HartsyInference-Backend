@@ -230,7 +230,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
 
     /// <summary>This backend's physical device plus every setting that changes a memory verdict, as registered in
     /// <see cref="BackendDeviceRegistry"/>. Backends sharing a key get one fit assessment per request between them.
-    /// Null until a successful Init and after Shutdown.</summary>
+    /// Null until the first successful Init; kept across Shutdown so a reload that changes settings can forget the
+    /// out-of-memory evidence gathered under the old key.</summary>
     public string FitProfileKey { get; private set; }
 
     /// <summary>What <see cref="Init"/>'s probe resolved <c>ComputeBackend</c> to, so callers that build their own
@@ -496,8 +497,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             (string Key, string Name) device = EngineDeviceIdentity();
             AddLoadStatus($"Engine ready: {_engine.BackendDescription}{(device.Key is null ? "" : $" on {device.Name ?? device.Key} [{device.Key}]")}");
             // Everything besides the device that changes what fits: the tier and where the components run.
-            string fitSettings = $"vram={Settings?.LowVram}|te={teSelector}|vae={vaeSelector}"
-                + $"|shard={(enableDitSharding ? ditShardSelector : "")}";
+            string fitSettings = $"vram={Settings?.LowVram?.Trim().ToLowerInvariant()}|te={teSelector}|vae={vaeSelector}"
+                + $"|cfg={cfgParallelSelector}|shard={(enableDitSharding ? ditShardSelector : "")}";
             RegisterDeviceUsage(resolved, ordinal, device, fitSettings);
 
             // MaxUsages is what the scheduler checks to decide when to route a request to a different
@@ -541,6 +542,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         {
             // Idempotent. Init runs again on this same instance whenever its settings are edited; the registry is keyed
             // by instance, so re-registering replaces the old entry instead of counting this backend twice.
+            string previousProfile = FitProfileKey;
             ReleaseDeviceUsage();
             if (!BackendFactory.IsDeviceKind(kind))
             {
@@ -550,10 +552,14 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             // grammar rather than being spelled here, so one device cannot acquire two spellings.
             string key = device.Key ?? BackendFactory.CanonicalDeviceKey(BackendFactory.WithOrdinal(kind, ordinal));
             FitProfileKey = $"{key}|{fitSettings}";
-            // Reconfigured: whatever ran out of memory under the old settings says nothing about the new ones.
-            ModelFitGate.ForgetProfile(FitProfileKey);
+            // Reconfigured: whatever ran out of memory under the old settings says nothing about the new ones. A
+            // restart with unchanged settings keeps the evidence, which other backends sharing the profile gathered too.
+            if (previousProfile is not null && previousProfile != FitProfileKey)
+            {
+                ModelFitGate.ForgetProfile(previousProfile);
+            }
             int live = BackendDeviceRegistry.Register(this,
-                new BackendDeviceEntry(BackendData?.ID ?? -1, key, device.Name, FitProfileKey, _engine));
+                new BackendDeviceEntry(key, device.Name, FitProfileKey, fitSettings, _engine));
             if (live > 1)
             {
                 // Named, not just keyed: a Vulkan key is a device UUID, and telling someone their backends share
@@ -578,7 +584,6 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     private void ReleaseDeviceUsage()
     {
         BackendDeviceRegistry.Release(this);
-        FitProfileKey = null;
     }
 
     /// <summary>The device the engine actually bound to, as a key to count by and a name to show; both null when
@@ -616,12 +621,13 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     public override async Task Shutdown()
     {
         Status = BackendStatus.DISABLED;
+        // Out of routing before the engine goes: a request being prepared must not ask a disposed engine for a fit.
+        ReleaseDeviceUsage();
         _cancelCts?.Cancel();
         _cancelCts = null;
         _engine?.Dispose();
         _engine = null;
         DisposePreprocessBackend();
-        ReleaseDeviceUsage();
         CurrentModelName = null;
         await Task.CompletedTask;
     }

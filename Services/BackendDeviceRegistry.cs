@@ -19,6 +19,12 @@ public static class BackendDeviceRegistry
     /// <summary>The current snapshot. Safe to enumerate while backends start and stop.</summary>
     public static ImmutableDictionary<AbstractT2IBackend, BackendDeviceEntry> Entries => Volatile.Read(ref _entries);
 
+    /// <summary>Whether SwarmUI's scheduler can currently hand <paramref name="backend"/> a generation — the same
+    /// eligibility <c>BackendHandler</c> applies before any filter runs. A card that fails this cannot be the one a
+    /// request waits for.</summary>
+    public static bool IsDispatchable(AbstractT2IBackend backend) =>
+        backend.IsEnabled && !backend.ShutDownReserve && backend.MaxUsages > 0 && backend.Status == BackendStatus.RUNNING;
+
     /// <summary>Adds or replaces <paramref name="backend"/>'s entry.</summary>
     /// <returns>How many live backends now share <paramref name="entry"/>'s physical device, this one included.</returns>
     public static int Register(AbstractT2IBackend backend, BackendDeviceEntry entry)

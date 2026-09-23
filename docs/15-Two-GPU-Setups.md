@@ -46,10 +46,13 @@ the checkpoint header alone (read once per model, then cached). The answer follo
 | Aggressive / Maximum | You chose streaming, so any card that can stream the model takes it. |
 
 If the estimate says no card fits, the largest card is still tried; the engine's own pre-flight then
-gives the exact refusal. If a card actually runs out of memory (after the free-and-retry), the job is
-redirected to a larger card when one exists, and later jobs for that model at that size or larger
-skip cards no larger than the one that failed. That record resets when the backend's settings change.
-Pinning a job with **Exact Backend ID** skips the preference (but not a recorded out-of-memory).
+gives the exact refusal. Only backends SwarmUI can currently dispatch to count, and a job never waits
+on a preferred card that has since been disabled or reloaded. If a card actually runs out of memory
+(after the free-and-retry), the job is redirected to a larger card when one exists. For the next 30
+minutes, jobs for that model with the same shape (frame count left default or set, refiner upscale,
+LoRA and ControlNet counts, per-generation VRAM levers) at that size or larger skip that card and any
+equally configured card no larger. Changing the backend's settings clears its records.
+Pinning a job with **Exact Backend ID** bypasses routing entirely.
 The routing decision for each GPU is logged at Verbose level as `Fit '<model>' on <GPU>`.
 Wan video is sized with its pipeline's own formulas; other families use header weights plus a
 generic allowance, so their routing is coarser.
