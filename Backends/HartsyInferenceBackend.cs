@@ -3,6 +3,7 @@ using System.IO;
 using System.Net.Http;
 using System.Reflection;
 using System.Runtime.CompilerServices;
+using System.Runtime.ExceptionServices;
 using SwarmUI.Builtin_ComfyUIBackend;
 using FreneticUtilities.FreneticDataSyntax;
 using Newtonsoft.Json.Linq;
@@ -225,7 +226,12 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     /// extra dispatched jobs here until the current one finishes.</summary>
     private readonly SemaphoreSlim _genLock = new(1, 1);
 
-    /// <summary>Live backend count per device key ("cuda:0"), to warn when two backends share one GPU.</summary>
+    /// <summary>Live backend count per PHYSICAL device, to warn when two backends share one GPU.</summary>
+    /// <remarks>Keyed by what the engine reports it bound to (<c>cuda:0</c>, or a Vulkan device UUID), not by the
+    /// selector we asked for. The two are the same thing only while every selector names its device outright: once
+    /// the engine ranks devices for a selector that names none, a key composed from our own settings says
+    /// <c>vulkan:0</c> for a backend running on some other card, and two backends sharing one GPU land in separate
+    /// slots with nothing warning about the VRAM they are about to contend for.</remarks>
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> _liveDeviceCounts = new();
 
     /// <summary>The device key this instance registered in <see cref="_liveDeviceCounts"/>, for Shutdown to release.</summary>
@@ -234,7 +240,10 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     /// <summary>What <see cref="Init"/>'s probe resolved <c>ComputeBackend</c> to, so callers that build their own
     /// device do not re-derive it through the cheap <see cref="BackendFactory.Resolve"/> and land somewhere else.
     /// Null until a successful Init, which is why readers fall back to the raw setting.</summary>
-    private string _resolvedComputeKind;
+    /// <remarks>Volatile because <see cref="PreprocessBackend"/> reads it under its own lock while <see cref="Init"/>
+    /// writes it under none. Init finishes before any generation today, so this documents the ordering rather than
+    /// fixing a live race.</remarks>
+    private volatile string _resolvedComputeKind;
 
     /// <summary>Every feature flag this backend advertises. Static so the startup self-check in
     /// <c>SwarmUIHartsyInference</c> can compare it against the flags our registered params actually carry —
@@ -485,8 +494,12 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             _engine = deviceOrdinal.HasValue
                 ? new InferenceEngine(resolved, deviceOrdinal.Value, engineOptions)
                 : new InferenceEngine(resolved, engineOptions);
-            AddLoadStatus($"Engine ready: {_engine.BackendDescription}");
-            RegisterDeviceUsage(resolved, ordinal);
+            // Asked for, not assumed: a selector that names no device lets the engine rank them, so this is the only
+            // thing that knows which card we are on. It builds the backend, so an explicit selector this machine
+            // cannot honor fails here rather than on the first generation.
+            string deviceKey = EngineDeviceKey();
+            AddLoadStatus($"Engine ready: {_engine.BackendDescription}{(deviceKey is null ? "" : $" on {deviceKey}")}");
+            RegisterDeviceUsage(resolved, ordinal, deviceKey);
 
             // MaxUsages is what the scheduler checks to decide when to route a request to a different
             // backend (BackendHandler: in-use once Usages >= MaxUsages). Mirror ComfyUI's model:
@@ -516,21 +529,29 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     /// <param name="kind">An ALREADY-RESOLVED backend kind, never <c>auto</c>. Re-resolving here is what this
     /// signature exists to prevent: the cheap <see cref="BackendFactory.Resolve"/> can disagree with the probe
     /// <see cref="Init"/> ran, and this keys the sharing map, so it would name a device the engine is not on.</param>
-    private void RegisterDeviceUsage(string kind, int ordinal)
+    /// <param name="deviceKey">What the engine reports it bound to, or null when this engine build cannot say, in
+    /// which case the selector is all there is to key on.</param>
+    private void RegisterDeviceUsage(string kind, int ordinal, string deviceKey)
     {
         try
         {
+            // Idempotent. Init runs again on this same instance whenever its settings are edited, and a second
+            // registration without this counts one backend twice, so the slot never returns to zero and every later
+            // backend on that device is told it is sharing.
+            ReleaseDeviceUsage();
             if (!BackendFactory.IsDeviceKind(kind))
             {
                 return;
             }
-            string key = $"{kind}:{ordinal}";
+            // The engine's own answer first. The composed selector is the fallback, and goes through the factory's
+            // grammar rather than being spelled here, so one device cannot acquire two spellings.
+            string key = deviceKey ?? BackendFactory.CanonicalDeviceKey(BackendFactory.WithOrdinal(kind, ordinal));
             _registeredDeviceKey = key;
-            int live = _liveDeviceCounts.AddOrUpdate(key, 1, (_, n) => n + 1);
+            int live = _liveDeviceCounts.AddOrUpdate(key, 1, static (_, n) => n + 1);
             if (live > 1)
             {
-                string warning = $"{live} HartsyInference backends now share device {key}. Their models must co-fit " +
-                    "in that GPU's VRAM, and generations on this device run one at a time (the engine serializes " +
+                string warning = $"{live} HartsyInference backends now share physical device {key}. Their models must " +
+                    "co-fit in that GPU's VRAM, and generations on this device run one at a time (the engine serializes " +
                     "same-GPU work; concurrent same-GPU execution is planned). Use distinct GPU_IDs for parallel throughput.";
                 AddLoadStatus($"WARNING: {warning}");
                 Logs.Warning($"[HartsyInference] {warning}");
@@ -542,6 +563,61 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         }
     }
 
+    /// <summary>Drops this backend's claim on its device, leaving no slot behind when it was the last one holding it.</summary>
+    /// <remarks>Not a decrement through <c>AddOrUpdate</c>, which ADDS a zero-valued entry for a key that is not
+    /// there: that is how a map which otherwise only counts upward accumulates entries for devices nothing is using.
+    /// The retry loop is the compare-and-swap that <c>ConcurrentDictionary</c> has no single call for.</remarks>
+    private void ReleaseDeviceUsage()
+    {
+        string key = Interlocked.Exchange(ref _registeredDeviceKey, null);
+        if (key is null)
+        {
+            return;
+        }
+        while (_liveDeviceCounts.TryGetValue(key, out int live))
+        {
+            if (live <= 1)
+            {
+                if (_liveDeviceCounts.TryRemove(new KeyValuePair<string, int>(key, live)))
+                {
+                    return;
+                }
+            }
+            else if (_liveDeviceCounts.TryUpdate(key, live - 1, live))
+            {
+                return;
+            }
+        }
+    }
+
+    /// <summary>The device the engine actually bound to, or null when this engine build cannot say.</summary>
+    /// <remarks>Reflective for the reason given on <see cref="VulkanReason"/>: the property is newer than this file's
+    /// compile-time floor. Worth asking at all, rather than composing a key from our own settings, because the two
+    /// stopped agreeing once the engine gained device ranking. A backend that asked for <c>vulkan</c> runs on whichever
+    /// device ranked best, so a composed <c>vulkan:0</c> can name a card it is not on.
+    ///
+    /// <para>Reading it constructs the engine's backend, which is the point: an explicit <c>cuda</c>/<c>vulkan</c>
+    /// selector is never probed, so this is where a machine that cannot honor one says so, at startup and with a
+    /// reason, rather than midway through someone's first generation. The throw is unwrapped and left to
+    /// <see cref="Init"/>'s own handler.</para></remarks>
+    private string EngineDeviceKey()
+    {
+        PropertyInfo prop = _engine?.GetType().GetProperty("DeviceKey", BindingFlags.Public | BindingFlags.Instance);
+        if (prop is null)
+        {
+            return null;
+        }
+        try
+        {
+            return prop.GetValue(_engine) as string;
+        }
+        catch (TargetInvocationException ex) when (ex.InnerException is not null)
+        {
+            ExceptionDispatchInfo.Capture(ex.InnerException).Throw();
+            throw; // unreachable, and the compiler needs it said
+        }
+    }
+
     public override async Task Shutdown()
     {
         Status = BackendStatus.DISABLED;
@@ -550,11 +626,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         _engine?.Dispose();
         _engine = null;
         DisposePreprocessBackend();
-        if (_registeredDeviceKey is not null)
-        {
-            _liveDeviceCounts.AddOrUpdate(_registeredDeviceKey, 0, (_, n) => Math.Max(0, n - 1));
-            _registeredDeviceKey = null;
-        }
+        ReleaseDeviceUsage();
         CurrentModelName = null;
         await Task.CompletedTask;
     }
