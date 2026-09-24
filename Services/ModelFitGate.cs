@@ -6,6 +6,7 @@ using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Planning.Memory;
 using SwarmUI.Backends;
+using SwarmUI.Core;
 using SwarmUI.Text2Image;
 using SwarmUI.Utils;
 // The class name collides with the trailing namespace segment, so alias it explicitly.
@@ -44,7 +45,14 @@ public static class ModelFitGate
     private static readonly TimeSpan RecordLifetime = TimeSpan.FromMinutes(30);
 
     /// <summary>The routing answer for each in-flight request, collected with the request itself.</summary>
+    /// <remarks>Keyed by instance: SwarmUI hands the same <see cref="T2IParamInput"/> to <c>PreGenerateEvent</c> and to
+    /// the backend filter of one <c>CreateImageTask</c> (it clones per image before both). <see cref="Allows"/> logs if
+    /// that ever stops being true, since a miss otherwise looks exactly like no routing at all.</remarks>
     private static readonly ConditionalWeakTable<T2IParamInput, RequestFit> Fits = new();
+
+    /// <summary>One-time announcements already made this process, so a condition that holds for every request is said
+    /// once rather than per request.</summary>
+    private static readonly ConcurrentDictionary<string, byte> Announced = new();
 
     /// <summary>Smallest workload that has run out of memory per (checkpoint, request shape, fit profile, effective
     /// tier). Bounded by the models, shapes and profiles in use, not by request volume, and pruned as records expire.</summary>
@@ -63,14 +71,11 @@ public static class ModelFitGate
         Fits.Remove(input);
         try
         {
-            RequestFit fit = Assess(input);
-            if (fit is not null)
-            {
-                Fits.AddOrUpdate(input, fit);
-            }
+            Fits.AddOrUpdate(input, Assess(input));
         }
         catch (Exception ex)
         {
+            Fits.AddOrUpdate(input, RequestFit.NoOpinion("assessment failed"));
             Logs.Warning($"[HartsyInference] VRAM fit check skipped for this generation: {ex.Message}");
         }
     }
@@ -79,8 +84,30 @@ public static class ModelFitGate
     /// <see cref="T2IParamInput.RefusalReasons"/> when not. Called from the backend's own validator.</summary>
     public static bool Allows(T2IParamInput input, SiBackend backend)
     {
-        if (input is null || backend?.FitProfileKey is null || !Fits.TryGetValue(input, out RequestFit fit)
-            || !fit.Profiles.TryGetValue(backend.FitProfileKey, out ProfileFit profile) || profile.Allowed)
+        if (input is null || backend?.FitProfileKey is null)
+        {
+            return true;
+        }
+        if (!Fits.TryGetValue(input, out RequestFit fit))
+        {
+            // Prepare runs for every generation and always leaves an answer, so a miss means SwarmUI filtered a
+            // different T2IParamInput than the one PreGenerateEvent handed over — which turns routing off for that
+            // request, and looks exactly like the bug routing exists to fix. A warning the first time in this process,
+            // Verbose after; remembered per request so the scheduler's repeated passes say nothing more.
+            string miss = "[HartsyInference] VRAM fit routing has no answer for this generation request: SwarmUI "
+                + "filtered a request object that PreGenerateEvent never prepared, so it is routed without memory checks.";
+            if (FirstTime("unprepared-request"))
+            {
+                Logs.Warning(miss + " This means a SwarmUI change broke memory-aware routing; further misses log at Verbose.");
+            }
+            else
+            {
+                Logs.Verbose(miss);
+            }
+            Fits.AddOrUpdate(input, RequestFit.NoOpinion("not prepared"));
+            return true;
+        }
+        if (!fit.Profiles.TryGetValue(backend.FitProfileKey, out ProfileFit profile) || profile.Allowed)
         {
             return true;
         }
@@ -110,6 +137,18 @@ public static class ModelFitGate
         OutOfMemoryRecord record = new(failed.Fit.CapacityBytes, fit.Workload, failed.FitSettings, DateTime.UtcNow);
         FailedWorkloads.AddOrUpdate(new LedgerKey(fit.Checkpoint, fit.Shape, backend.FitProfileKey, failed.Fit.EffectiveTier),
             record, (_, known) => record with { Workload = Math.Min(known.Workload, fit.Workload) });
+        // Exclude the failed card from this request's own frozen answer too, rather than relying on SwarmUI re-firing
+        // PreGenerateEvent for the redirected attempt: that is what makes each redirect exclude one more card.
+        Fits.AddOrUpdate(input, fit with
+        {
+            Profiles = fit.Profiles.SetItem(backend.FitProfileKey, failed with
+            {
+                OutOfMemory = true,
+                Allowed = false,
+                Refusal = $"HartsyInference: '{fit.ModelName}' just ran out of VRAM on {failed.Device} for this request. "
+                    + "Lower the resolution or frame count, or use a GPU with more memory.",
+            }),
+        });
         Logs.Info($"[HartsyInference] Recorded out-of-VRAM for '{fit.ModelName}' on {backend.FitProfileKey} at "
             + $"workload {fit.Workload}; for {RecordLifetime.TotalMinutes:0} minutes, requests like it at least this "
             + "large skip this card and equally configured cards no larger.");
@@ -131,32 +170,51 @@ public static class ModelFitGate
         }
     }
 
-    /// <summary>The routing answer for one request, or null when the gate has nothing to say about it.</summary>
+    /// <summary>The routing answer for one request: a verdict per fit profile, or a no-opinion marker naming why the
+    /// gate stays out of it. The quiet reasons (another backend's request, a model or modality this gate does not
+    /// route) stay quiet; the ones that mean routing is off where it should be on are said once per process.</summary>
     private static RequestFit Assess(T2IParamInput input)
     {
         if (input.TryGet(T2IParamTypes.BackendType, out string backendType)
             && !string.Equals(backendType, "any", StringComparison.OrdinalIgnoreCase)
             && !string.Equals(backendType, BackendTypeId, StringComparison.OrdinalIgnoreCase))
         {
-            return null;
+            return RequestFit.NoOpinion("pinned to another backend type");
         }
-        List<BackendDeviceEntry> entries = [.. BackendDeviceRegistry.Entries
-            .Where(entry => BackendDeviceRegistry.IsDispatchable(entry.Key)).Select(entry => entry.Value)];
         T2IModel model = input.Get(T2IParamTypes.Model);
         string compat = model?.ModelClass?.CompatClass?.ID;
-        if (entries.Count == 0 || model is null || !ModelSupport.IsArchitectureSupported(compat))
+        if (model is null || !ModelSupport.IsArchitectureSupported(compat))
         {
-            return null;
+            return RequestFit.NoOpinion("not a HartsyInference model");
         }
         ModelSupport.Family family = ModelSupport.Resolve(compat);
         if (family.Kind is not (ModelSupport.Kind.Image or ModelSupport.Kind.Video))
         {
-            return null;
+            return RequestFit.NoOpinion("modality not routed");
+        }
+        List<BackendDeviceEntry> entries = [.. BackendDeviceRegistry.Entries
+            .Where(entry => BackendDeviceRegistry.IsDispatchable(entry.Key)).Select(entry => entry.Value)];
+        if (entries.Count == 0)
+        {
+            // Our own backends running with nothing in the registry is a registration fault, not a shrug.
+            if (Program.Backends.RunningBackendsOfType<SiBackend>().Any(BackendDeviceRegistry.IsDispatchable)
+                && FirstTime("empty-registry"))
+            {
+                Logs.Warning("[HartsyInference] VRAM fit routing is off: HartsyInference backends are running but none "
+                    + "registered its device, so generations are routed without memory checks.");
+            }
+            return RequestFit.NoOpinion("no registered devices");
         }
         ModelSpec spec = ModelSupport.BuildSpec(model, family, input, stageBundles: false);
         if (string.IsNullOrEmpty(spec.LocalPath))
         {
-            return null;
+            if (FirstTime($"no-path:{model.Name}"))
+            {
+                Logs.Info($"[HartsyInference] VRAM fit routing is off for '{model.Name}': its checkpoint has no single "
+                    + "local path to size (a split LTX-2.5 install without a bundle folder), so it is routed without "
+                    + "memory checks.");
+            }
+            return RequestFit.NoOpinion("no local checkpoint path");
         }
         MemoryEstimateRequest request = SiBackend.MapMemoryEstimateRequest(input, family);
         string shape = RequestShape(input, request);
@@ -190,7 +248,7 @@ public static class ModelFitGate
         }
         if (assessed.Count == 0)
         {
-            return null;
+            return RequestFit.NoOpinion("no profile assessed");
         }
 
         bool pinned = input.TryGet(T2IParamTypes.ExactBackendID, out string _);
@@ -286,7 +344,15 @@ public static class ModelFitGate
                         + "with more memory for this model.";
                 }
             }
-            routed[key] = new ProfileFit(fit, entry.FitSettings, outOfMemory, allowed, refusal);
+            routed[key] = new ProfileFit(fit, entry.FitSettings, device, outOfMemory, allowed, refusal);
+        }
+        // Every card refused (all recently ran out of memory at this size) would leave the request to SwarmUI's generic
+        // "no backend" error. Let the largest card through instead, so the engine's own pre-flight names the geometry
+        // and the fix; the attempt was doomed either way, and the explanation is what the user retries on.
+        if (routed.Count > 0 && !routed.Values.Any(profile => profile.Allowed))
+        {
+            string largestKey = routed.MaxBy(pair => pair.Value.Fit.CapacityBytes).Key;
+            routed[largestKey] = routed[largestKey] with { Allowed = true, Refusal = null };
         }
         return routed;
     }
@@ -305,6 +371,9 @@ public static class ModelFitGate
         return false;
     }
 
+    /// <summary>True the first time <paramref name="key"/> is asked about in this process.</summary>
+    private static bool FirstTime(string key) => Announced.TryAdd(key, 0);
+
     /// <summary>What one out-of-memory record is filed under.</summary>
     private readonly record struct LedgerKey(string Checkpoint, string Shape, string Profile, VramTier Tier);
 
@@ -312,9 +381,17 @@ public static class ModelFitGate
     private sealed record OutOfMemoryRecord(long CapacityBytes, long Workload, string FitSettings, DateTime RecordedUtc);
 
     /// <summary>The frozen routing answer for one request.</summary>
+    /// <param name="SkipReason">Why the gate has no opinion; null when <paramref name="Profiles"/> carries one.</param>
     private sealed record RequestFit(string ModelName, string Checkpoint, string Shape, long Workload, bool Pinned,
-        ImmutableDictionary<string, ProfileFit> Profiles);
+        ImmutableDictionary<string, ProfileFit> Profiles, string SkipReason = null)
+    {
+        /// <summary>An answer that filters nothing, recording why the gate stayed out of this request.</summary>
+        public static RequestFit NoOpinion(string reason) => new(ModelName: null, Checkpoint: null, Shape: null,
+            Workload: 0, Pinned: false, Profiles: ImmutableDictionary<string, ProfileFit>.Empty, SkipReason: reason);
+    }
 
     /// <summary>One fit profile's verdict for one request, and whether routing lets it take the request.</summary>
-    private sealed record ProfileFit(MemoryFit Fit, string FitSettings, bool OutOfMemory, bool Allowed, string Refusal);
+    /// <param name="Device">The card's human name, for messages a user reads; a device key can be a Vulkan UUID.</param>
+    private sealed record ProfileFit(MemoryFit Fit, string FitSettings, string Device, bool OutOfMemory, bool Allowed,
+        string Refusal);
 }
