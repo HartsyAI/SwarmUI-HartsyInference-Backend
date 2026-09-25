@@ -242,7 +242,7 @@
         <Reference Include="Microsoft.ML.Tokenizers"><HintPath>$(HartsyLocalBin)/Microsoft.ML.Tokenizers.dll</HintPath><Private>true</Private></Reference>
         <!-- CUDA PTX kernels (the NuGet copies these via its targets; replicate for local). -->
         <Content Include="$(HartsyRepo)/src/HartsyInference.Cuda/Ptx/*.ptx" Link="Ptx/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" Condition="Exists('$(HartsyRepo)/src/HartsyInference.Cuda/Ptx')" />
-        <Content Include="$(HartsyRepo)/src/HartsyInference.Vulkan/Spirv/*.spv" Link="Spirv/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" Condition="Exists('$(HartsyRepo)/src/HartsyInference.Vulkan/Spv')" />
+        <Content Include="$(HartsyRepo)/src/HartsyInference.Vulkan/Spirv/*.spv" Link="Spirv/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" Condition="Exists('$(HartsyRepo)/src/HartsyInference.Vulkan/Spirv')" />
     </ItemGroup>
 
     <!-- Ideogram 4's magic-prompt system prompt, ported verbatim from upstream
