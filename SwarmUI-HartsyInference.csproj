@@ -214,7 +214,7 @@
              (Services/ModelFitGate) calls IInferenceEngine.MemoryEstimation, which does not exist before
              alpha.162, so this pin cannot go lower. The engine must be published before this builds from
              nuget.org. -->
-        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.162" />
+        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.175" />
     </ItemGroup>
 
     <!-- LOCAL ENGINE: prebuilt DLLs from the HartsyInference Cli bin (its full runtime closure). Referenced
@@ -242,7 +242,7 @@
         <Reference Include="Microsoft.ML.Tokenizers"><HintPath>$(HartsyLocalBin)/Microsoft.ML.Tokenizers.dll</HintPath><Private>true</Private></Reference>
         <!-- CUDA PTX kernels (the NuGet copies these via its targets; replicate for local). -->
         <Content Include="$(HartsyRepo)/src/HartsyInference.Cuda/Ptx/*.ptx" Link="Ptx/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" Condition="Exists('$(HartsyRepo)/src/HartsyInference.Cuda/Ptx')" />
-        <Content Include="$(HartsyRepo)/src/HartsyInference.Vulkan/Spv/*.spv" Link="Spirv/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" Condition="Exists('$(HartsyRepo)/src/HartsyInference.Vulkan/Spv')" />
+        <Content Include="$(HartsyRepo)/src/HartsyInference.Vulkan/Spirv/*.spv" Link="Spirv/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" Condition="Exists('$(HartsyRepo)/src/HartsyInference.Vulkan/Spv')" />
     </ItemGroup>
 
     <!-- Ideogram 4's magic-prompt system prompt, ported verbatim from upstream
