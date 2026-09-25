@@ -213,8 +213,17 @@
              2.0.0-alpha.162 = memory-aware GPU routing, 2026-09-23. API this time, not just behaviour: the fit gate
              (Services/ModelFitGate) calls IInferenceEngine.MemoryEstimation, which does not exist before
              alpha.162, so this pin cannot go lower. The engine must be published before this builds from
-             nuget.org. -->
-        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.162" />
+             nuget.org.
+             2.0.0-alpha.175 = the first engine that runs on Blackwell at all, 2026-09-25 (alpha.162 -> alpha.175).
+             BEHAVIOUR, and absolute: from alpha.166 the engine shipped a compute-capability-12.0 kernel variant
+             that ptxas refuses, and CudaKernels loads it on every such card, so the CUDA backend could not
+             construct and this extension refused to start on a 5090 or a PRO 6000. alpha.175 corrects it
+             (HartsyAI/HartsyInference#148, verified on rented hardware). No API change: a full Release build
+             against this pin succeeds with no source change. The gap also carries the Blackwell readiness work
+             the extension inherits without asking for it - architecture tiers, native block-scaled GEMM (knob
+             numerics.fp4Native, still default-off pending an on-card quality run), per-architecture PTX, MXFP8
+             residency, the i-quant codecs and the Vulkan GEMM dispatcher. -->
+        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.175" />
     </ItemGroup>
 
     <!-- LOCAL ENGINE: prebuilt DLLs from the HartsyInference Cli bin (its full runtime closure). Referenced
@@ -242,7 +251,7 @@
         <Reference Include="Microsoft.ML.Tokenizers"><HintPath>$(HartsyLocalBin)/Microsoft.ML.Tokenizers.dll</HintPath><Private>true</Private></Reference>
         <!-- CUDA PTX kernels (the NuGet copies these via its targets; replicate for local). -->
         <Content Include="$(HartsyRepo)/src/HartsyInference.Cuda/Ptx/*.ptx" Link="Ptx/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" Condition="Exists('$(HartsyRepo)/src/HartsyInference.Cuda/Ptx')" />
-        <Content Include="$(HartsyRepo)/src/HartsyInference.Vulkan/Spv/*.spv" Link="Spirv/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" Condition="Exists('$(HartsyRepo)/src/HartsyInference.Vulkan/Spv')" />
+        <Content Include="$(HartsyRepo)/src/HartsyInference.Vulkan/Spirv/*.spv" Link="Spirv/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" Condition="Exists('$(HartsyRepo)/src/HartsyInference.Vulkan/Spirv')" />
     </ItemGroup>
 
     <!-- Ideogram 4's magic-prompt system prompt, ported verbatim from upstream
