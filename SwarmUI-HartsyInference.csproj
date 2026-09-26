@@ -222,8 +222,17 @@
              against this pin succeeds with no source change. The gap also carries the Blackwell readiness work
              the extension inherits without asking for it - architecture tiers, native block-scaled GEMM (knob
              numerics.fp4Native, still default-off pending an on-card quality run), per-architecture PTX, MXFP8
-             residency, the i-quant codecs and the Vulkan GEMM dispatcher. -->
-        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.175" />
+             residency, the i-quant codecs and the Vulkan GEMM dispatcher.
+             2.0.0-alpha.181 = Z-Image LoRAs and side models that fetch themselves, 2026-09-26 (alpha.175 ->
+             alpha.181). BEHAVIOUR, both of it user-facing through this extension. alpha.178 teaches the LoRA
+             format detector Z-Image's key layout, so a Z-Image adapter stops being rejected as an unknown
+             format - Comfy-Org ships one with the model, so it is the first LoRA anyone tries with it. alpha.177
+             makes a missing text encoder, VAE or CLIP download instead of failing the generation, which is what
+             SwarmUI's own ComfyUI backend does and what a user watching this backend refuse to load Z-Image over
+             an absent ae.safetensors expects. alpha.181 also adds 18 ComfyUI samplers; this extension reads the
+             list from SamplingCapabilities rather than hardcoding it, so they appear with no source change here.
+             A full Release build against this pin succeeds with no source change. -->
+        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.181" />
     </ItemGroup>
 
     <!-- LOCAL ENGINE: prebuilt DLLs from the HartsyInference Cli bin (its full runtime closure). Referenced
