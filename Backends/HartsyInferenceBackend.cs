@@ -1956,7 +1956,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     }
 
     /// <summary>Reference media caps the model was trained under, mirroring what the reference node accepts.</summary>
-    private const int MaxRefImages = 9, MaxRefAudios = 3, MaxRefVideos = 3;
+    private const int MaxRefImages = ImageInputs.MaxReferenceImages, MaxRefAudios = 3, MaxRefVideos = 3;
 
     /// <summary>Reference images come from the prompt box, not a param control: core's
     /// <see cref="T2IParamTypes.PromptImages"/> is the internal carrier the textbox fills when media is dragged or
@@ -2695,6 +2695,51 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                     + "that family is a reference-edit model with no denoise-strength path. Set Init Image Mode to reference or auto.");
                 return false;
             }
+        }
+        return ValidateImageInputs(input, compat, family, supported);
+    }
+
+    /// <summary>Refuses image inputs the family would otherwise drop or misuse: reference editing on a base Qwen-Image
+    /// checkpoint (runs, returns a wrong image), prompt images on a family that only edits the Init Image and has none
+    /// (returns plain text-to-image), and more images than the family reads (the extras used to be cut silently).
+    /// Limits come from <see cref="ImageInputs"/>, the same source the <c>HartsyInferenceGetImageInputs</c> route
+    /// answers from.</summary>
+    private static bool ValidateImageInputs(T2IParamInput input, string compat, ModelSupport.Family family, ImageFeatures supported)
+    {
+        T2IModel model = input.Get(T2IParamTypes.Model);
+        string modelClass = model?.ModelClass?.ID;
+        bool hasInit = input.Get(T2IParamTypes.InitImage) is not null;
+        // Prompt images only count as image inputs where they become edit references; elsewhere they are IP-Adapter
+        // input with its own gate above.
+        int promptImages = ImageInputs.PromptImagesAreReferences(supported)
+            && input.TryGet(T2IParamTypes.PromptImages, out List<Image> imgs) && imgs is not null
+            ? imgs.Count(i => i is not null) : 0;
+        bool referenceMode = hasInit && input.TryGet(SwarmUIHartsyInference.InitImageModeParam, out string mode) && mode == "reference";
+        if (ImageInputs.IsBaseQwen(family, modelClass) && (referenceMode || promptImages > 0))
+        {
+            input.RefusalReasons.Add(
+                $"HartsyInference: reference editing needs a Qwen Image Edit checkpoint, and '{model?.Name}' is classed as "
+                + $"base Qwen Image (architecture '{modelClass}'). If it is an Edit checkpoint, set its Architecture to "
+                + "'Qwen Image Edit' or 'Qwen Image Edit Plus' in the model's metadata. Otherwise remove the prompt images "
+                + "and set Init Image Mode to denoise or auto.");
+            return false;
+        }
+        if (!hasInit && promptImages > 0 && ImageInputs.ReferencesRequireInitImage(family))
+        {
+            input.RefusalReasons.Add(
+                $"HartsyInference: '{compat}' (engine family '{family.Id}') edits the Init Image and never reads prompt "
+                + "images on their own. Attach the image as the Init Image instead.");
+            return false;
+        }
+        int maxImages = ImageInputs.MaxImages(family, modelClass, supported);
+        int images = (hasInit ? 1 : 0) + promptImages;
+        if (images > maxImages)
+        {
+            input.RefusalReasons.Add(
+                $"HartsyInference: '{compat}' (engine family '{family.Id}') reads at most {maxImages} input "
+                + $"image{(maxImages == 1 ? "" : "s")} (Init Image plus prompt images); this request has {images}. "
+                + $"Remove {images - maxImages}.");
+            return false;
         }
         return true;
     }

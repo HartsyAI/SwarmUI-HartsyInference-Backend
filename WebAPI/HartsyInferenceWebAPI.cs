@@ -25,10 +25,11 @@ public static class HartsyInferenceWebAPI
     {
         API.RegisterAPICall(HartsyInferenceGetSupportedArchs, false, HartsyInferencePermissions.PermUseHartsyInference);
         API.RegisterAPICall(HartsyInferenceProbeModel, false, HartsyInferencePermissions.PermUseHartsyInference);
+        API.RegisterAPICall(HartsyInferenceGetImageInputs, false, HartsyInferencePermissions.PermUseHartsyInference);
         API.RegisterAPICall(HartsyInferenceListLoadedPipelines, false, HartsyInferencePermissions.PermAdminHartsyInference);
         API.RegisterAPICall(HartsyInferenceGetDeviceInfo, false, HartsyInferencePermissions.PermAdminHartsyInference);
         API.RegisterAPICall(HartsyInferenceClearCache, true, HartsyInferencePermissions.PermAdminHartsyInference);
-        Logs.Init("HartsyInference WebAPI routes registered (supported-archs, probe-model, list-pipelines, device-info, clear-cache).");
+        Logs.Init("HartsyInference WebAPI routes registered (supported-archs, probe-model, image-inputs, list-pipelines, device-info, clear-cache).");
     }
 
     /// <summary>Enumerate every live HartsyInference backend instance with its handler data.</summary>
@@ -76,6 +77,98 @@ public static class HartsyInferenceWebAPI
             ["pending"] = pending,
             ["features"] = features,
             ["sampling"] = sampling,
+            ["image_inputs"] = DescribeImageInputsByArch(),
+        };
+    }
+
+    /// <summary>The <see cref="ImageInputs"/> answer for every main-model class (sub-classes such as <c>/lora</c> and
+    /// <c>/vae</c> skipped) whose compat class is drivable, keyed by Swarm model class id. Per model class rather than
+    /// compat class because Qwen-Image's base and Edit builds share one compat class and differ exactly here.</summary>
+    private static JObject DescribeImageInputsByArch()
+    {
+        JObject result = [];
+        foreach (T2IModelClass modelClass in T2IModelClassSorter.ModelClasses.Values.OrderBy(c => c.ID, StringComparer.Ordinal))
+        {
+            if (modelClass?.ID is null || modelClass.ID.Contains('/'))
+            {
+                continue;
+            }
+            JObject inputs = ImageInputs.Describe(modelClass.CompatClass?.ID, modelClass.ID, null);
+            if (inputs is not null)
+            {
+                result[modelClass.ID] = inputs;
+            }
+        }
+        return result;
+    }
+
+    /// <summary>POST /API/HartsyInferenceGetImageInputs — what images a model takes as input:
+    /// <c>{ need: none|optional|required, modes: [denoise|reference|init], autoMode, maxImages, mask, endFrame }</c>.
+    /// Pass <paramref name="model_name"/> for a concrete model (preferred: Wan and MiniMax-H3 narrow per checkpoint
+    /// file), or <paramref name="arch_id"/> for a Swarm model class id such as <c>qwen-image-edit-plus</c>. A bare
+    /// compat class id is accepted too, but it cannot tell Qwen-Image base from Edit and answers for base.
+    /// The same limits drive this backend's refusals, so a request sized from this answer is not refused for its images.</summary>
+    public static async Task<JObject> HartsyInferenceGetImageInputs(Session session, string model_name = "", string arch_id = "")
+    {
+        await Task.CompletedTask;
+        string modelClass;
+        string compat;
+        string checkpointPath = null;
+        string resolvedName = null;
+        if (!string.IsNullOrWhiteSpace(model_name))
+        {
+            if (!Program.T2IModelSets.TryGetValue("Stable-Diffusion", out T2IModelHandler handler))
+            {
+                return new JObject { ["success"] = false, ["error"] = "Stable-Diffusion model set unavailable." };
+            }
+            T2IModel model = handler.GetModel(model_name);
+            if (model is null)
+            {
+                return new JObject { ["success"] = false, ["error"] = $"Model '{model_name}' not found." };
+            }
+            resolvedName = model.Name;
+            modelClass = model.ModelClass?.ID;
+            compat = model.ModelClass?.CompatClass?.ID;
+            checkpointPath = model.RawFilePath;
+        }
+        else if (!string.IsNullOrWhiteSpace(arch_id))
+        {
+            if (T2IModelClassSorter.ModelClasses.TryGetValue(arch_id, out T2IModelClass known))
+            {
+                modelClass = known.ID;
+                compat = known.CompatClass?.ID;
+            }
+            else
+            {
+                modelClass = null;
+                compat = arch_id;
+            }
+        }
+        else
+        {
+            return new JObject { ["success"] = false, ["error"] = "Provide model_name or arch_id." };
+        }
+        JObject inputs = ImageInputs.Describe(compat, modelClass, checkpointPath);
+        if (inputs is null)
+        {
+            return new JObject
+            {
+                ["success"] = false,
+                ["error"] = ModelSupport.WhyNotSupported(compat),
+                ["arch_id"] = modelClass,
+                ["compat_class"] = compat,
+            };
+        }
+        ModelSupport.Family family = ModelSupport.Resolve(compat);
+        return new JObject
+        {
+            ["success"] = true,
+            ["model_name"] = resolvedName,
+            ["arch_id"] = modelClass,
+            ["compat_class"] = compat,
+            ["family"] = family.Id,
+            ["kind"] = family.Kind.ToString().ToLowerInvariant(),
+            ["inputs"] = inputs,
         };
     }
 

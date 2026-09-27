@@ -172,6 +172,11 @@ public static class ModelSupport
         return recipe switch
         {
             null => VideoFeatures.None,
+            // End frames are verified on Wan2.2 TI2V-5B only. The 14B class covers T2V and concat-I2V checkpoints,
+            // neither run with an end frame, and none of its VACE/Animate/S2V variants declare one. Engine builds
+            // after alpha.184 stop claiming it themselves; this strip is a no-op once the pin moves past that.
+            HartsyInference.Engine.Recipes.Video.WanVideoRecipe wan when family.Id == "wan-21-14b"
+                => wan.SupportsFor(checkpointPath) & ~VideoFeatures.EndFrame,
             HartsyInference.Engine.Recipes.Video.WanVideoRecipe wan => wan.SupportsFor(checkpointPath),
             HartsyInference.Engine.Recipes.Video.LtxVideoRecipe ltx => ltx.SupportsFor(checkpointPath),
             _ when family.Id == "minimax-h3" => MiniMaxH3TaskFeatures(recipe.Supports, checkpointPath),
