@@ -22,23 +22,33 @@ const HartsyParamConfig = {
         'ideogram-4': 'hartsy_ideogram4',
         'ace-step-1_5': 'hartsy_acestep',
         'minimax-music-3': 'hartsy_minimaxmusic',
-        // Only family declaring BOTH Img2Img and RefEdit, so the only one where picking a mode is a real
-        // choice. RefEdit-only families (Boogu, Mage-Flow, OmniGen2) have nothing to choose between.
-        'qwen-image': 'hartsy_refedit_choice',
         // Long-form chaining (VideoFeatures.LongFormChain). Unlike hartsy_audio_ref below, this is NOT stripped
         // by ModelSupport.MiniMaxH3TaskFeatures for either fl2va or ref2va, so a plain compat-class match is
         // enough: no filename test needed.
         'minimax-h3': 'hartsy_h3_chain',
     },
 
-    /** Flags that additionally depend on the checkpoint FILE, not just its compat class. */
+    /**
+     * Flags that depend on the checkpoint, not just its compat class. `features` is the selected model's own
+     * feature list from HartsyInferenceGetModelFeatures (its resolved variant), or null until that answers; each
+     * rule falls back to the class/name guess it used before so the control does not flicker on first load.
+     */
     fileFlags: [
         {
+            flag: 'hartsy_refedit_choice',
+            // Picking a mode is a real choice only where the variant does BOTH (a Qwen-Image-Edit build). A base
+            // Qwen-Image has no reference editing, and RefEdit-only families have nothing to choose between.
+            test: (compat, model, features) => features
+                ? features.includes('img2img') && features.includes('refedit')
+                : compat === 'qwen-image',
+        },
+        {
             flag: 'hartsy_wan_animate',
-            // Core registers no distinct model class for Animate, so the filename is the only signal the
-            // browser has. The backend still checks properly via WanVideoRecipe.SupportsFor(checkpointPath),
-            // so a renamed checkpoint gets a clean refusal rather than a wrong generation.
-            test: (compat, model) => compat.startsWith('wan-2') && model.includes('animate'),
+            // Animate shares Wan's compat classes; the engine's variant resolver tells it apart from the weights
+            // and metadata. The filename guess only covers the moment before that answer arrives.
+            test: (compat, model, features) => features
+                ? features.includes('drivingvideo')
+                : compat.startsWith('wan-2') && model.includes('animate'),
         },
         {
             flag: 'hartsy_audio_ref',
@@ -54,7 +64,7 @@ const HartsyParamConfig = {
     },
 
     /** Flags the current model should have. */
-    activeFlags(compatClass, modelName) {
+    activeFlags(compatClass, modelName, features) {
         if (!compatClass) {
             return [];
         }
@@ -65,11 +75,52 @@ const HartsyParamConfig = {
             flags.push(exact);
         }
         for (let rule of this.fileFlags) {
-            if (rule.test(compatClass, model)) {
+            if (rule.test(compatClass, model, features)) {
                 flags.push(rule.flag);
             }
         }
         return flags;
+    },
+};
+
+/**
+ * Per-model features from HartsyInferenceGetModelFeatures. Checkpoints sharing a compat class can do different
+ * things (Qwen-Image base vs Edit, Wan vs Wan-Animate), which the per-class map cannot express, so the selected
+ * model's own list is fetched once and preferred wherever it is known.
+ */
+const HartsyModelFeatures = {
+    /** "model|class" -> array of lowercase feature names. Keyed on the class too, so re-classing a model in the
+     * model editor (base -> Qwen Image Edit) fetches its new answer instead of reusing the old one. */
+    byModel: {},
+
+    /** Keys with a request in flight, so a burst of revisions sends one. */
+    pending: {},
+
+    key(modelName, arch) {
+        return `${modelName}|${arch}`;
+    },
+
+    /** The model's features, or null when not fetched yet (callers fall back to the per-class map). */
+    get(modelName, arch) {
+        let key = this.key(modelName, arch);
+        return modelName && key in this.byModel ? this.byModel[key] : null;
+    },
+
+    /** Fetch the model's features once, then re-run the feature-set changers with them. */
+    request(modelName, arch) {
+        let key = this.key(modelName, arch);
+        if (!modelName || key in this.byModel || this.pending[key]) {
+            return;
+        }
+        this.pending[key] = true;
+        genericRequest('HartsyInferenceGetModelFeatures', { model_name: modelName }, data => {
+            delete this.pending[key];
+            if (!data || !data.success) {
+                return;
+            }
+            this.byModel[key] = data.features;
+            reviseBackendFeatureSet();
+        }, 0, () => { delete this.pending[key]; });
     },
 };
 
@@ -139,9 +190,9 @@ const HartsyCoreGating = {
         // generate time, so this only moves the refusal to where the user can see it.
         //
         // Prompt Images is deliberately NOT gated. It would need (IpAdapter | RefEdit | ReferenceImages), and
-        // even then Wan-Animate would lose it: Animate is detected from the FILENAME (see fileFlags below), so
-        // it shares plain Wan's compat class and its feature row says nothing about references. A compat-class
-        // map cannot express that, and hiding a control that works is worse than a late refusal.
+        // even then Wan-Animate would lose it: Animate shares plain Wan's compat class, whose feature row says
+        // nothing about references, and before HartsyModelFeatures answers that row is all there is. Hiding a
+        // control that works is worse than a late refusal.
         'initimage': ['img2img', 'refedit', 'initimage'],
         'initimagecreativity': ['img2img', 'refedit', 'initimage'],
         'initimagenoise': ['img2img', 'refedit', 'initimage'],
@@ -207,12 +258,12 @@ const HartsyCoreGating = {
      * Hiding on a single feature would hide Init Image on every edit-only family (Boogu, Mage-Flow, OmniGen2),
      * where the init image IS the reference.
      */
-    lacks(compatClass, features) {
+    lacks(compatClass, features, modelFeatures) {
         let map = this.featuresByArch;
-        if (!map || !compatClass || !(compatClass in map)) {
+        let have = modelFeatures || (map && compatClass && compatClass in map ? map[compatClass] : null);
+        if (!have) {
             return false;
         }
-        let have = map[compatClass];
         return !(Array.isArray(features) ? features : [features]).some(f => have.includes(f));
     },
 
@@ -250,7 +301,7 @@ const HartsyCoreGating = {
      * only a reason to hide the control when our backend is the one that would serve it — a ComfyUI backend
      * can service LoRAs and ControlNet on families our engine cannot, and Swarm would route there.
      */
-    shouldHide(compatClass, param, hartsyIsOnlyOption) {
+    shouldHide(compatClass, param, hartsyIsOnlyOption, modelFeatures) {
         if (this.audioArchs.includes(compatClass)
             && (this.audioHideParams.includes(param.id) || this.inHiddenGroup(param))) {
             return true;
@@ -262,19 +313,19 @@ const HartsyCoreGating = {
             return this.takesNoSampler(compatClass);
         }
         let needed = this.requires[param.id];
-        return needed ? this.lacks(compatClass, needed) : false;
+        return needed ? this.lacks(compatClass, needed, modelFeatures) : false;
     },
 
     /** One-shot guard for the deferred re-run scheduled when a foreign marker blocks a param we want. */
     revisePending: false,
 
-    apply(compatClass, hartsyIsOnlyOption) {
+    apply(compatClass, hartsyIsOnlyOption, modelFeatures) {
         if (typeof gen_param_types == 'undefined' || !gen_param_types) {
             return;
         }
         let sawForeignMarker = false;
         for (let param of gen_param_types) {
-            if (this.shouldHide(compatClass, param, hartsyIsOnlyOption)) {
+            if (this.shouldHide(compatClass, param, hartsyIsOnlyOption, modelFeatures)) {
                 // Never touch a param currently carrying another extension's marker. AudioLab and
                 // API-Backends rewrite feature_flag on these same core params with their own save/restore
                 // keys, and OUR changer runs FIRST (extension prep order) — so if we blocked it now, the
@@ -319,9 +370,14 @@ const HartsyCoreGating = {
 };
 
 featureSetChangers.push(() => {
-    let compat = currentBackendFeatureSet.includes('hartsyinference') ? currentModelHelper.curCompatClass : null;
-    HartsyCoreGating.apply(compat, !hasAnyComfyBackend());
-    let active = HartsyParamConfig.activeFlags(currentModelHelper.curCompatClass, currentModelHelper.curModel);
+    let hartsyUp = currentBackendFeatureSet.includes('hartsyinference');
+    let compat = hartsyUp ? currentModelHelper.curCompatClass : null;
+    let modelFeatures = hartsyUp ? HartsyModelFeatures.get(currentModelHelper.curModel, currentModelHelper.curArch) : null;
+    if (hartsyUp && compat && !modelFeatures) {
+        HartsyModelFeatures.request(currentModelHelper.curModel, currentModelHelper.curArch);
+    }
+    HartsyCoreGating.apply(compat, !hasAnyComfyBackend(), modelFeatures);
+    let active = HartsyParamConfig.activeFlags(currentModelHelper.curCompatClass, currentModelHelper.curModel, modelFeatures);
     let inactive = HartsyParamConfig.allFlags.filter(f => !active.includes(f));
     return [active, inactive];
 });

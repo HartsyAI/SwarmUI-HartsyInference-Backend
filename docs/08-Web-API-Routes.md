@@ -21,6 +21,7 @@ public static void Register()
 {
     API.RegisterAPICall(HartsyInferenceGetSupportedArchs, false, HartsyInferencePermissions.PermUseHartsyInference);
     API.RegisterAPICall(HartsyInferenceProbeModel, false, HartsyInferencePermissions.PermUseHartsyInference);
+    API.RegisterAPICall(HartsyInferenceGetModelFeatures, false, HartsyInferencePermissions.PermUseHartsyInference);
     API.RegisterAPICall(HartsyInferenceListLoadedPipelines, false, HartsyInferencePermissions.PermAdminHartsyInference);
     API.RegisterAPICall(HartsyInferenceGetDeviceInfo, false, HartsyInferencePermissions.PermAdminHartsyInference);
     API.RegisterAPICall(HartsyInferenceClearCache, true, HartsyInferencePermissions.PermAdminHartsyInference);
@@ -66,6 +67,37 @@ for it, checked live at call time. `pending` is an object, compat class ID to
 the `WhyNotSupported` reason string, for classes that are mapped to a family
 but have no registered recipe yet. The exact contents of both depend on which
 recipes are registered in the running build; see `Generation/ModelSupport.cs`.
+
+### `HartsyInferenceGetModelFeatures`
+
+`Task<JObject> HartsyInferenceGetModelFeatures(Session session, string model_name)`
+
+Returns the features of **one** model's resolved variant, plus which variant the engine
+resolved it to and from what evidence. Checkpoints that share a compat class can differ: a
+base Qwen-Image has no reference editing but its Edit builds do, and Wan-Animate takes a
+driving video. So `hartsy-params.js` asks this per selected model, and the per-class map
+from `HartsyInferenceGetSupportedArchs` only covers the moment before it answers.
+
+| | |
+|---|---|
+| Method | POST |
+| Path | `/API/HartsyInferenceGetModelFeatures` |
+| Permission | `use_hartsyinference` |
+| Mutating | false |
+
+**Returns (success):**
+```json
+{
+  "success": true,
+  "model_name": "qwen_image_edit_2509_fp8_e4m3fn.safetensors",
+  "features": ["img2img", "inpaint", "refedit", "lora", "controlnet"],
+  "variant": "edit-plus",
+  "variant_name": "Qwen-Image-Edit-Plus",
+  "variant_source": "callerhint"
+}
+```
+`variant` is null for a family that declares no variants. `variant_source` is one of `structure`,
+`callerhint`, `metadata`, `filename` (a guess) or `default`.
 
 ### `HartsyInferenceProbeModel`
 
