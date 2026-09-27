@@ -22,6 +22,7 @@ public static void Register()
     API.RegisterAPICall(HartsyInferenceGetSupportedArchs, false, HartsyInferencePermissions.PermUseHartsyInference);
     API.RegisterAPICall(HartsyInferenceProbeModel, false, HartsyInferencePermissions.PermUseHartsyInference);
     API.RegisterAPICall(HartsyInferenceGetModelFeatures, false, HartsyInferencePermissions.PermUseHartsyInference);
+    API.RegisterAPICall(HartsyInferenceGetImageInputs, false, HartsyInferencePermissions.PermUseHartsyInference);
     API.RegisterAPICall(HartsyInferenceListLoadedPipelines, false, HartsyInferencePermissions.PermAdminHartsyInference);
     API.RegisterAPICall(HartsyInferenceGetDeviceInfo, false, HartsyInferencePermissions.PermAdminHartsyInference);
     API.RegisterAPICall(HartsyInferenceClearCache, true, HartsyInferencePermissions.PermAdminHartsyInference);
@@ -29,7 +30,7 @@ public static void Register()
 ```
 
 The boolean is `isModifying` (true marks the call as a mutation).
-`GetSupportedArchs` and `ProbeModel` need only `use_hartsyinference`
+`GetSupportedArchs`, `ProbeModel` and `GetImageInputs` need only `use_hartsyinference`
 (default: power users); the other three need `admin_hartsyinference` (default:
 admins).
 
@@ -59,6 +60,11 @@ engine can drive today and what's mapped but not yet registered.
   }
 }
 ```
+
+The response also carries `features` and `sampling` (keyed by compat class) and
+`image_inputs`: the `GetImageInputs` answer for every drivable main-model class
+(sub-classes such as `/lora` and `/vae` skipped), keyed by Swarm model class
+ID — so a client can size its upload flow for every architecture in one call.
 
 `supported` holds compat-class IDs (`ModelSupport.SupportedArchitectures`),
 not the engine's internal family IDs — a mapped family only counts as
@@ -141,6 +147,67 @@ that ends up in `GetSupportedArchs`'s `pending` map.
 set isn't registered, or the named model doesn't exist:
 ```json
 { "success": false, "error": "Model 'nonexistent.safetensors' not found." }
+```
+
+### `HartsyInferenceGetImageInputs`
+
+`Task<JObject> HartsyInferenceGetImageInputs(Session session, string model_name = "", string arch_id = "")`
+
+What images a model takes as input, for the variant the engine resolves it to
+(`ModelCapabilities`), so Qwen-Image base and Edit builds, or Wan I2V and
+Animate checkpoints, are described as what they are. The same engine limits
+drive the backend's refusals, so a request sized from this answer is not
+refused for its images.
+
+| | |
+|---|---|
+| Method | POST |
+| Path | `/API/HartsyInferenceGetImageInputs` |
+| Permission | `use_hartsyinference` |
+| Mutating | false |
+
+**Inputs** — `model_name` (preferred; Wan and MiniMax-H3 narrow per checkpoint
+file) or `arch_id`, a Swarm model class ID, sent to the engine as the variant
+hint. A bare compat class ID is accepted as `arch_id` and answers for the
+family as a whole.
+```json
+{ "session_id": "...", "model_name": "qwen_image_edit_2511_fp8.safetensors" }
+```
+
+**Returns (success):**
+```json
+{
+  "success": true,
+  "model_name": "qwen_image_edit_2511_fp8.safetensors",
+  "arch_id": "qwen-image-edit-plus",
+  "compat_class": "qwen-image",
+  "family": "qwen-image",
+  "kind": "image",
+  "inputs": {
+    "need": "optional",
+    "modes": ["denoise", "reference"],
+    "autoMode": "denoise",
+    "maxImages": 3,
+    "mask": true,
+    "endFrame": false
+  }
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `need` | `none` (text only), `optional`, or `required` (Wan 14B image2video / flf2v classes, and Wan-Animate's character image). |
+| `modes` | What an attached image can be: `denoise` (Init Image + Creativity), `reference` (in-context edit reference: Init Image with `initimagemode=reference`, or prompt images; on Wan-Animate, the character to animate), `init` (video first frame). |
+| `autoMode` | What `initimagemode=auto` does with an Init Image alone. Families offering both prefer `denoise`, so send `initimagemode=reference` for an edit on a Qwen Edit checkpoint. |
+| `maxImages` | Most images one request may carry: Init Image plus prompt images. On video an init frame and reference images are separate tasks, so this is the larger of the two, not their sum; the end frame is separate. |
+| `mask` | Whether a Mask Image (inpainting) applies. |
+| `endFrame` | Whether a Video End Image applies. |
+
+**Returns (failure)** — neither input given, model not found, or the
+architecture isn't drivable (`error` is `WhyNotSupported`, and `arch_id` /
+`compat_class` are echoed):
+```json
+{ "success": false, "error": "Provide model_name or arch_id." }
 ```
 
 ### `HartsyInferenceListLoadedPipelines`
