@@ -118,8 +118,8 @@ Entries reuse Comfy's canonical names/URLs/hashes so files are shared with Comfy
       with progress bridged (no latent preview yet at this point — that's V3).
       `IsValidForThisBackend`/`ValidateVideo` refuse per-checkpoint now, not per-family:
       each conditioning object (InitImage, EndFrame, references, driving video, LoRAs)
-      is checked against `ModelSupport.SupportedVideoFeatures(compat, checkpointPath)`,
-      which asks the resolved recipe's `Supports`/`SupportsFor` rather than hard-coding
+      is checked against `ModelSupport.SupportedVideoFeatures(model)`, which asks the
+      engine's `ModelCapabilities` for the resolved variant rather than hard-coding
       what's refused — refiners over video are refused unconditionally. LTX-2 compat IDs
       fall to the standard unsupported-architecture refusal. Cancellation (`_cancelCts`)
       checked per progress callback and in the muxer.
@@ -235,12 +235,11 @@ What did need building:
 
 Deliberate divergences, both mirroring what SwarmUI core actually does:
 
-- **No distilled selector.** The engine can run 2.5's baked 8-step sigma schedule, but only
-  via the `ltx-2.5-distilled` catalog id, and dev/distilled checkpoints are byte-identical.
-  Core auto-detects no distilled variant anywhere (SD3.5 Turbo and HunyuanVideo 1.5
-  distilled are `Remaps`-collapsed) and its Comfy backend applies no fixed-sigma path for
-  LTX at all — it lets the user set Steps/CFG. We do the same. The distilled contract stays
-  reachable from the CLI/API.
+- **Distilled by variant, not a selector.** Dev and distilled checkpoints are
+  byte-identical, and core auto-detects no distilled variant. The engine's variant resolver
+  (`LtxVideo2Variants`) routes a checkpoint to the `ltx-2.5-distilled` contract from a hint,
+  `hartsy.model_id`, or, as a logged last resort, a `distilled` token in the file or bundle
+  names. This extension no longer does its own filename routing.
 - **Conv VAE only.** The engine's `NADiffusionDecoder` is ported and parity-checked but not
   on the decode path, and it refuses a diffusion-VAE bundle. Note this is where SwarmUI and
   upstream ComfyUI disagree: Swarm auto-downloads the conv VAE, while ComfyUI's own 2.5

@@ -7,6 +7,7 @@ using SwarmUI.Utils;
 using SwarmUI.WebAPI;
 using Hartsy.Extensions.HartsyInferenceBackend.Generation;
 using HartsyInference.Engine.Recipes;
+using HartsyInference.Engine.Variants;
 // The class name collides with the trailing namespace segment, so alias it explicitly.
 using SiBackend = Hartsy.Extensions.HartsyInferenceBackend.Backends.HartsyInferenceBackend;
 
@@ -25,11 +26,12 @@ public static class HartsyInferenceWebAPI
     {
         API.RegisterAPICall(HartsyInferenceGetSupportedArchs, false, HartsyInferencePermissions.PermUseHartsyInference);
         API.RegisterAPICall(HartsyInferenceProbeModel, false, HartsyInferencePermissions.PermUseHartsyInference);
+        API.RegisterAPICall(HartsyInferenceGetModelFeatures, false, HartsyInferencePermissions.PermUseHartsyInference);
         API.RegisterAPICall(HartsyInferenceGetImageInputs, false, HartsyInferencePermissions.PermUseHartsyInference);
         API.RegisterAPICall(HartsyInferenceListLoadedPipelines, false, HartsyInferencePermissions.PermAdminHartsyInference);
         API.RegisterAPICall(HartsyInferenceGetDeviceInfo, false, HartsyInferencePermissions.PermAdminHartsyInference);
         API.RegisterAPICall(HartsyInferenceClearCache, true, HartsyInferencePermissions.PermAdminHartsyInference);
-        Logs.Init("HartsyInference WebAPI routes registered (supported-archs, probe-model, image-inputs, list-pipelines, device-info, clear-cache).");
+        Logs.Init("HartsyInference WebAPI routes registered (supported-archs, probe-model, model-features, image-inputs, list-pipelines, device-info, clear-cache).");
     }
 
     /// <summary>Enumerate every live HartsyInference backend instance with its handler data.</summary>
@@ -93,7 +95,7 @@ public static class HartsyInferenceWebAPI
             {
                 continue;
             }
-            JObject inputs = ImageInputs.Describe(modelClass.CompatClass?.ID, modelClass.ID, null);
+            JObject inputs = ImageInputs.Describe(modelClass.CompatClass?.ID, modelClass.ID);
             if (inputs is not null)
             {
                 result[modelClass.ID] = inputs;
@@ -113,42 +115,30 @@ public static class HartsyInferenceWebAPI
         await Task.CompletedTask;
         string modelClass;
         string compat;
-        string checkpointPath = null;
         string resolvedName = null;
+        JObject inputs;
         if (!string.IsNullOrWhiteSpace(model_name))
         {
-            if (!Program.T2IModelSets.TryGetValue("Stable-Diffusion", out T2IModelHandler handler))
+            if (!TryFindModel(model_name, out T2IModel model, out JObject error))
             {
-                return new JObject { ["success"] = false, ["error"] = "Stable-Diffusion model set unavailable." };
-            }
-            T2IModel model = handler.GetModel(model_name);
-            if (model is null)
-            {
-                return new JObject { ["success"] = false, ["error"] = $"Model '{model_name}' not found." };
+                return error;
             }
             resolvedName = model.Name;
             modelClass = model.ModelClass?.ID;
             compat = model.ModelClass?.CompatClass?.ID;
-            checkpointPath = model.RawFilePath;
+            inputs = ImageInputs.Describe(model);
         }
         else if (!string.IsNullOrWhiteSpace(arch_id))
         {
-            if (T2IModelClassSorter.ModelClasses.TryGetValue(arch_id, out T2IModelClass known))
-            {
-                modelClass = known.ID;
-                compat = known.CompatClass?.ID;
-            }
-            else
-            {
-                modelClass = null;
-                compat = arch_id;
-            }
+            bool known = T2IModelClassSorter.ModelClasses.TryGetValue(arch_id, out T2IModelClass knownClass);
+            modelClass = known ? knownClass.ID : null;
+            compat = known ? knownClass.CompatClass?.ID : arch_id;
+            inputs = ImageInputs.Describe(compat, modelClass);
         }
         else
         {
             return new JObject { ["success"] = false, ["error"] = "Provide model_name or arch_id." };
         }
-        JObject inputs = ImageInputs.Describe(compat, modelClass, checkpointPath);
         if (inputs is null)
         {
             return new JObject
@@ -198,19 +188,22 @@ public static class HartsyInferenceWebAPI
         return new JObject { ["samplers"] = samplers, ["schedulers"] = schedulers };
     }
 
-    /// <summary>The declared feature names for one compat class as a lowercase array. Video families are described
-    /// by their <see cref="VideoFeatures"/> instead; the checkpoint-specific narrowing Wan/LTX/MiniMax-H3 do in
-    /// <c>SupportedVideoFeatures(compat, checkpointPath)</c> can't be answered per-class, so this reports the
-    /// family's declared set and the per-file narrowing stays a server-side refusal.</summary>
+    /// <summary>The declared feature names for one compat class as a lowercase array: the family's union. What one
+    /// checkpoint of it does (its resolved variant) is <see cref="HartsyInferenceGetModelFeatures"/>'s answer.</summary>
     private static JArray DescribeFeatures(string arch)
     {
         ModelSupport.Family family = ModelSupport.Resolve(arch);
-        string flags = family?.Kind switch
+        return FlagNames(family?.Kind switch
         {
             ModelSupport.Kind.Image => ModelSupport.SupportedFeatures(arch).ToString(),
             ModelSupport.Kind.Video => ModelSupport.SupportedVideoFeatures(arch).ToString(),
             _ => "None",
-        };
+        });
+    }
+
+    /// <summary>A <c>[Flags]</c> enum's <c>ToString()</c> as lowercase names, empty for <c>None</c>.</summary>
+    private static JArray FlagNames(string flags)
+    {
         JArray result = [];
         if (flags == "None")
         {
@@ -223,24 +216,68 @@ public static class HartsyInferenceWebAPI
         return result;
     }
 
+    /// <summary>POST /API/HartsyInferenceGetModelFeatures — the features ONE model's resolved variant has, plus which
+    /// variant the engine resolved it to and from what evidence. Checkpoints that share a compat class can differ
+    /// (a base Qwen-Image has no reference editing; its Edit builds do; Wan-Animate takes a driving video), so the
+    /// gen-page script asks this per selected model instead of trusting the per-class map.</summary>
+    public static async Task<JObject> HartsyInferenceGetModelFeatures(Session session, string model_name)
+    {
+        await Task.CompletedTask;
+        if (!TryFindModel(model_name, out T2IModel model, out JObject error))
+        {
+            return error;
+        }
+        ModelSupport.Family family = ModelSupport.Resolve(model.ModelClass?.CompatClass?.ID);
+        ResolvedModelVariant variant = ModelSupport.ResolveVariant(model);
+        return new JObject
+        {
+            ["success"] = true,
+            ["model_name"] = model.Name,
+            ["features"] = FlagNames(family?.Kind switch
+            {
+                ModelSupport.Kind.Image => ModelSupport.SupportedFeatures(model).ToString(),
+                ModelSupport.Kind.Video => ModelSupport.SupportedVideoFeatures(model).ToString(),
+                _ => "None",
+            }),
+            ["variant"] = variant?.Id,
+            ["variant_name"] = variant?.Variant.DisplayName,
+            ["variant_source"] = variant?.Source.ToString().ToLowerInvariant(),
+        };
+    }
+
+    /// <summary>Looks up a Stable-Diffusion model by name, or builds the API error that says why it can't.</summary>
+    private static bool TryFindModel(string modelName, out T2IModel model, out JObject error)
+    {
+        model = null;
+        error = null;
+        if (string.IsNullOrWhiteSpace(modelName))
+        {
+            error = new JObject { ["success"] = false, ["error"] = "No model_name provided." };
+            return false;
+        }
+        if (!Program.T2IModelSets.TryGetValue("Stable-Diffusion", out T2IModelHandler handler))
+        {
+            error = new JObject { ["success"] = false, ["error"] = "Stable-Diffusion model set unavailable." };
+            return false;
+        }
+        model = handler.GetModel(modelName);
+        if (model is null)
+        {
+            error = new JObject { ["success"] = false, ["error"] = $"Model '{modelName}' not found." };
+            return false;
+        }
+        return true;
+    }
+
     /// <summary>POST /API/HartsyInferenceProbeModel — answer "will HartsyInference run this model, and how?"
     /// for a model by name, WITHOUT loading it. Resolves the model's architecture compat class and
     /// reports supported / pending / unsupported with the human-readable reason.</summary>
     public static async Task<JObject> HartsyInferenceProbeModel(Session session, string model_name)
     {
         await Task.CompletedTask;
-        if (string.IsNullOrWhiteSpace(model_name))
+        if (!TryFindModel(model_name, out T2IModel model, out JObject error))
         {
-            return new JObject { ["success"] = false, ["error"] = "No model_name provided." };
-        }
-        if (!Program.T2IModelSets.TryGetValue("Stable-Diffusion", out T2IModelHandler handler))
-        {
-            return new JObject { ["success"] = false, ["error"] = "Stable-Diffusion model set unavailable." };
-        }
-        T2IModel model = handler.GetModel(model_name);
-        if (model is null)
-        {
-            return new JObject { ["success"] = false, ["error"] = $"Model '{model_name}' not found." };
+            return error;
         }
         string compat = model.ModelClass?.CompatClass?.ID;
         bool supported = ModelSupport.IsArchitectureSupported(compat);

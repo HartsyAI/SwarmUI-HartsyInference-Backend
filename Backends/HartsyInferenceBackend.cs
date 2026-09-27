@@ -1354,7 +1354,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         Image maskImage = input.Get(T2IParamTypes.MaskImage);
         // Where the recipe edits from references rather than adapting to them, prompt images are those references —
         // the Init Image is the first, and these follow in the order the prompt refers to them.
-        bool refEditFamily = ((RecipeRegistry.Resolve(family.Id)?.Supports ?? ImageFeatures.None) & ImageFeatures.RefEdit) != 0;
+        bool refEditFamily = (ModelSupport.SupportedFeatures(input.Get(T2IParamTypes.Model)) & ImageFeatures.RefEdit) != 0;
         IReadOnlyList<ControlNetConditioning> controlNets = BuildControlNets(input, out List<(int Index, string UnionType)> unionTypes);
         return new ImageRequest
         {
@@ -1952,7 +1952,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         T2IModel model = input.Get(T2IParamTypes.Model);
         string compat = model?.ModelClass?.CompatClass?.ID;
         return compat is not null && compat.StartsWith("wan-2", StringComparison.Ordinal)
-            && (ModelSupport.SupportedVideoFeatures(compat, model.RawFilePath) & VideoFeatures.DrivingVideo) != 0;
+            && (ModelSupport.SupportedVideoFeatures(model) & VideoFeatures.DrivingVideo) != 0;
     }
 
     /// <summary>Reference media caps the model was trained under, mirroring what the reference node accepts.</summary>
@@ -2532,7 +2532,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         // Init/end-frame conditioning is per-family. Without this check the Engine used to accept the image and
         // silently generate text-to-video, which looks like a working generation and is not. Checkpoint-aware:
         // Wan's Animate/VACE/S2V variants share the family compat classes (header-sniffed engine-side).
-        VideoFeatures videoSupported = ModelSupport.SupportedVideoFeatures(compat, input.Get(T2IParamTypes.Model)?.RawFilePath);
+        VideoFeatures videoSupported = ModelSupport.SupportedVideoFeatures(input.Get(T2IParamTypes.Model));
         // LTX-2.5 ships split across four files and must be handed to the Engine as a folder. ModelSupport resolves
         // those companions through Swarm's normal CommonModels/download path during construction, just as Comfy does.
         // Reference media rides the prompt box (core's internal PromptImages/Audios/Videos carriers), so these read
@@ -2633,7 +2633,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                         $"HartsyInference: refiner model '{refModel.Name}' has no image-family mapping, so it can't run a refine pass.");
                     return false;
                 }
-                ImageFeatures refFeatures = ModelSupport.SupportedFeatures(refModel.ModelClass?.CompatClass?.ID);
+                ImageFeatures refFeatures = ModelSupport.SupportedFeatures(refModel);
                 if ((refFeatures & (ImageFeatures.Img2Img | ImageFeatures.RefEdit)) == 0)
                 {
                     input.RefusalReasons.Add(
@@ -2643,7 +2643,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 }
             }
         }
-        ImageFeatures supported = ModelSupport.SupportedFeatures(compat);
+        ImageFeatures supported = ModelSupport.SupportedFeatures(input.Get(T2IParamTypes.Model));
         List<(ImageFeatures Feature, string Name, bool Requested)> checks =
         [
             (ImageFeatures.Lora, "LoRAs", input.TryGet(T2IParamTypes.Loras, out List<string> loras) && loras is not null && loras.Count > 0),
@@ -2699,46 +2699,38 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         return ValidateImageInputs(input, compat, family, supported);
     }
 
-    /// <summary>Refuses image inputs the family would otherwise drop or misuse: reference editing on a base Qwen-Image
-    /// checkpoint (runs, returns a wrong image), prompt images on a family that only edits the Init Image and has none
-    /// (returns plain text-to-image), and more images than the family reads (the extras used to be cut silently).
-    /// Limits come from <see cref="ImageInputs"/>, the same source the <c>HartsyInferenceGetImageInputs</c> route
-    /// answers from.</summary>
+    /// <summary>Refuses image inputs the model's resolved variant would otherwise drop: prompt images on a family that
+    /// only edits the Init Image and has none, and more images than it reads. Limits are the engine's own
+    /// (<see cref="ImageInputs.LimitsFor"/>), the same the <c>HartsyInferenceGetImageInputs</c> route answers from.</summary>
+    /// <remarks>Reference editing on a base Qwen-Image build needs no check here: its variant does not declare
+    /// <see cref="ImageFeatures.RefEdit"/>, so the feature and mode checks above already refuse it.</remarks>
     private static bool ValidateImageInputs(T2IParamInput input, string compat, ModelSupport.Family family, ImageFeatures supported)
     {
         T2IModel model = input.Get(T2IParamTypes.Model);
-        string modelClass = model?.ModelClass?.ID;
+        if (model is null)
+        {
+            return true;
+        }
         bool hasInit = input.Get(T2IParamTypes.InitImage) is not null;
-        // Prompt images only count as image inputs where they become edit references; elsewhere they are IP-Adapter
-        // input with its own gate above.
-        int promptImages = ImageInputs.PromptImagesAreReferences(supported)
+        // Prompt images count only where they become edit references; elsewhere they are IP-Adapter input, gated above.
+        int promptImages = (supported & ImageFeatures.RefEdit) != 0
             && input.TryGet(T2IParamTypes.PromptImages, out List<Image> imgs) && imgs is not null
             ? imgs.Count(i => i is not null) : 0;
-        bool referenceMode = hasInit && input.TryGet(SwarmUIHartsyInference.InitImageModeParam, out string mode) && mode == "reference";
-        if (ImageInputs.IsBaseQwen(family, modelClass) && (referenceMode || promptImages > 0))
-        {
-            input.RefusalReasons.Add(
-                $"HartsyInference: reference editing needs a Qwen Image Edit checkpoint, and '{model?.Name}' is classed as "
-                + $"base Qwen Image (architecture '{modelClass}'). If it is an Edit checkpoint, set its Architecture to "
-                + "'Qwen Image Edit' or 'Qwen Image Edit Plus' in the model's metadata. Otherwise remove the prompt images "
-                + "and set Init Image Mode to denoise or auto.");
-            return false;
-        }
-        if (!hasInit && promptImages > 0 && ImageInputs.ReferencesRequireInitImage(family))
+        ImageInputLimits limits = ImageInputs.LimitsFor(model, family);
+        if (!hasInit && promptImages > 0 && limits.ReferencesRequireInitImage)
         {
             input.RefusalReasons.Add(
                 $"HartsyInference: '{compat}' (engine family '{family.Id}') edits the Init Image and never reads prompt "
                 + "images on their own. Attach the image as the Init Image instead.");
             return false;
         }
-        int maxImages = ImageInputs.MaxImages(family, modelClass, supported);
         int images = (hasInit ? 1 : 0) + promptImages;
-        if (images > maxImages)
+        if (images > limits.MaxImages)
         {
             input.RefusalReasons.Add(
-                $"HartsyInference: '{compat}' (engine family '{family.Id}') reads at most {maxImages} input "
-                + $"image{(maxImages == 1 ? "" : "s")} (Init Image plus prompt images); this request has {images}. "
-                + $"Remove {images - maxImages}.");
+                $"HartsyInference: '{compat}' (engine family '{family.Id}') reads at most {limits.MaxImages} input "
+                + $"image{(limits.MaxImages == 1 ? "" : "s")} (Init Image plus prompt images); this request has {images}. "
+                + $"Remove {images - limits.MaxImages}.");
             return false;
         }
         return true;

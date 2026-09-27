@@ -9,6 +9,7 @@ using SwarmUI.Utils;
 using HartsyInference.Engine;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Recipes;
+using HartsyInference.Engine.Variants;
 using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.SafeTensors;
 
@@ -153,35 +154,48 @@ public static class ModelSupport
         return RecipeRegistry.Resolve(family.Id)?.Supports ?? ImageFeatures.None;
     }
 
+    /// <summary>The composition features the Engine applies to <paramref name="model"/>'s resolved variant — what
+    /// <see cref="SupportedFeatures(string)"/> answers for the family, narrowed to this checkpoint (a base Qwen-Image
+    /// has no reference editing; its Edit builds do). <see cref="ImageFeatures.None"/> for non-image models.</summary>
+    public static ImageFeatures SupportedFeatures(SwarmUI.Text2Image.T2IModel model)
+    {
+        Family family = Resolve(model?.ModelClass?.CompatClass?.ID);
+        return family is null || family.Kind != Kind.Image
+            ? ImageFeatures.None
+            : ModelCapabilities.ImageFeaturesFor(BuildSpec(model, family, stageBundles: false));
+    }
+
     /// <summary>The conditioning the Engine's video recipe for <paramref name="compatClass"/> declares it can apply.
     /// <see cref="VideoFeatures.None"/> for image/music/unmapped families. Asked of the Engine's registry at call time,
-    /// exactly like <see cref="SupportedFeatures"/>, so it cannot drift from what the pipeline will really do.</summary>
-    public static VideoFeatures SupportedVideoFeatures(string compatClass) => SupportedVideoFeatures(compatClass, null);
-
-    /// <summary>Checkpoint-aware overload: Wan's VACE/Animate/S2V variants share the family compat classes and are
-    /// only detectable from the checkpoint header, so pass <paramref name="checkpointPath"/> when the model is known
-    /// (a driving video on an Animate checkpoint under <c>wan-21-14b</c> would otherwise be refused).</summary>
-    public static VideoFeatures SupportedVideoFeatures(string compatClass, string checkpointPath)
+    /// exactly like <see cref="SupportedFeatures(string)"/>, so it cannot drift from what the pipeline will really do.</summary>
+    public static VideoFeatures SupportedVideoFeatures(string compatClass)
     {
         Family family = Resolve(compatClass);
+        return family is null || family.Kind != Kind.Video
+            ? VideoFeatures.None
+            : VideoRecipeRegistry.Resolve(family.Id)?.Supports ?? VideoFeatures.None;
+    }
+
+    /// <summary>The conditioning the Engine applies to <paramref name="model"/>'s resolved variant: Wan's VACE/Animate/S2V
+    /// builds share the family compat classes and are told apart engine-side, so a driving video on an Animate
+    /// checkpoint under <c>wan-21-14b</c> is accepted. <see cref="VideoFeatures.None"/> for non-video models.</summary>
+    public static VideoFeatures SupportedVideoFeatures(SwarmUI.Text2Image.T2IModel model)
+    {
+        Family family = Resolve(model?.ModelClass?.CompatClass?.ID);
         if (family is null || family.Kind != Kind.Video)
         {
             return VideoFeatures.None;
         }
-        IVideoRecipe recipe = VideoRecipeRegistry.Resolve(family.Id);
-        return recipe switch
-        {
-            null => VideoFeatures.None,
-            // End frames are verified on Wan2.2 TI2V-5B only. The 14B class covers T2V and concat-I2V checkpoints,
-            // neither run with an end frame, and none of its VACE/Animate/S2V variants declare one. Engine builds
-            // after alpha.184 stop claiming it themselves; this strip is a no-op once the pin moves past that.
-            HartsyInference.Engine.Recipes.Video.WanVideoRecipe wan when family.Id == "wan-21-14b"
-                => wan.SupportsFor(checkpointPath) & ~VideoFeatures.EndFrame,
-            HartsyInference.Engine.Recipes.Video.WanVideoRecipe wan => wan.SupportsFor(checkpointPath),
-            HartsyInference.Engine.Recipes.Video.LtxVideoRecipe ltx => ltx.SupportsFor(checkpointPath),
-            _ when family.Id == "minimax-h3" => MiniMaxH3TaskFeatures(recipe.Supports, checkpointPath),
-            _ => recipe.Supports,
-        };
+        VideoFeatures features = ModelCapabilities.VideoFeaturesFor(BuildSpec(model, family, stageBundles: false));
+        return family.Id == "minimax-h3" ? MiniMaxH3TaskFeatures(features, model.RawFilePath) : features;
+    }
+
+    /// <summary>The variant the Engine resolves <paramref name="model"/> to, with the evidence that decided it; null for
+    /// an unmapped model or a family that declares no variants.</summary>
+    public static ResolvedModelVariant ResolveVariant(SwarmUI.Text2Image.T2IModel model)
+    {
+        Family family = Resolve(model?.ModelClass?.CompatClass?.ID);
+        return family is null ? null : ModelCapabilities.ResolveVariant(BuildSpec(model, family, stageBundles: false));
     }
 
     /// <summary>MiniMax-H3 ships fl2va (first/last-frame) and ref2va (references) as SEPARATE checkpoints, and the
@@ -190,7 +204,7 @@ public static class ModelSupport
     /// the reference rather than as the wrong checkpoint being loaded.
     /// <para>By FILENAME, unavoidably: the two builds have byte-identical key sets and tensor shapes (verified
     /// 2026-08-08 across all 1082 tensors of both pruned fp8 builds), so no header sniff can tell them apart the way
-    /// <c>WanVideoRecipe.SupportsFor</c> can for Wan's variants. A name matching neither keeps the full union rather
+    /// the engine's variant resolver can for Wan's. A name matching neither keeps the full union rather
     /// than guessing — refusing on an unrecognized name would break renamed-but-valid checkpoints.</para></summary>
     private static VideoFeatures MiniMaxH3TaskFeatures(VideoFeatures declared, string checkpointPath)
     {
@@ -703,7 +717,7 @@ public static class ModelSupport
             Kind.Music => Modality.Music,
             _ => Modality.Image,
         };
-        string familyId = Ltx25DistilledFamilyOr(model, family.Id);
+        string familyId = family.Id;
         if (familyId == "minimaxmusic3")
         {
             familyId = MiniMaxMusicFamily(model, input);
@@ -725,6 +739,9 @@ public static class ModelSupport
             Requested = familyId,
             Modality = modality,
             LocalPath = localPath,
+            // The model class carries what the checkpoint cannot: a user-picked or modelspec-stamped variant
+            // (qwen-image-edit). The engine ignores a class that names no variant of the family.
+            Variant = model.ModelClass?.ID,
             Catalog = new CatalogEntry
             {
                 Id = familyId,
@@ -765,26 +782,6 @@ public static class ModelSupport
             }
         }
         return "minimaxmusic3";
-    }
-
-    /// <summary>Routes an LTX-2.5 <b>distilled</b> checkpoint to the Engine's <c>ltx-2.5-distilled</c> family, which
-    /// carries the baked 8-sigma schedule at guidance 1; everything else keeps <paramref name="familyId"/>.</summary>
-    /// <remarks>Both 2.5 transformers report the same compat class, so the compat-class table alone maps distilled
-    /// onto the DEV recipe and the distilled family is simply unreachable — it has a registered recipe that nothing
-    /// can select. The variant genuinely cannot be read from the checkpoint (see <c>LtxVideo2Recipe</c>'s own note:
-    /// dev and distilled share a model version), so the name is the only signal there is. Getting this wrong is
-    /// expensive in one direction only: driving the distilled weights on the dev contract runs 40 CFG-paired steps
-    /// on a schedule whose sigmas were baked for 8 unguided ones.</remarks>
-    private static string Ltx25DistilledFamilyOr(SwarmUI.Text2Image.T2IModel model, string familyId)
-    {
-        if (familyId != "ltx-video-2" || !IsLtx25(model))
-        {
-            return familyId;
-        }
-        // Match on the file name, not the display name: Swarm's display name is folder-relative and a user can
-        // rename a folder, but "distilled" is carried by every official build of these weights.
-        string file = Path.GetFileName(model.RawFilePath ?? model.Name ?? "");
-        return file.Contains("distilled", StringComparison.OrdinalIgnoreCase) ? "ltx-2.5-distilled" : familyId;
     }
 
     /// <summary>Kept for the extension entry point's call order; the Engine's registries are self-registering, so

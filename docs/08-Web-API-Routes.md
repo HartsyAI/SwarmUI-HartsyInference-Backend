@@ -21,6 +21,7 @@ public static void Register()
 {
     API.RegisterAPICall(HartsyInferenceGetSupportedArchs, false, HartsyInferencePermissions.PermUseHartsyInference);
     API.RegisterAPICall(HartsyInferenceProbeModel, false, HartsyInferencePermissions.PermUseHartsyInference);
+    API.RegisterAPICall(HartsyInferenceGetModelFeatures, false, HartsyInferencePermissions.PermUseHartsyInference);
     API.RegisterAPICall(HartsyInferenceGetImageInputs, false, HartsyInferencePermissions.PermUseHartsyInference);
     API.RegisterAPICall(HartsyInferenceListLoadedPipelines, false, HartsyInferencePermissions.PermAdminHartsyInference);
     API.RegisterAPICall(HartsyInferenceGetDeviceInfo, false, HartsyInferencePermissions.PermAdminHartsyInference);
@@ -73,6 +74,37 @@ the `WhyNotSupported` reason string, for classes that are mapped to a family
 but have no registered recipe yet. The exact contents of both depend on which
 recipes are registered in the running build; see `Generation/ModelSupport.cs`.
 
+### `HartsyInferenceGetModelFeatures`
+
+`Task<JObject> HartsyInferenceGetModelFeatures(Session session, string model_name)`
+
+Returns the features of **one** model's resolved variant, plus which variant the engine
+resolved it to and from what evidence. Checkpoints that share a compat class can differ: a
+base Qwen-Image has no reference editing but its Edit builds do, and Wan-Animate takes a
+driving video. So `hartsy-params.js` asks this per selected model, and the per-class map
+from `HartsyInferenceGetSupportedArchs` only covers the moment before it answers.
+
+| | |
+|---|---|
+| Method | POST |
+| Path | `/API/HartsyInferenceGetModelFeatures` |
+| Permission | `use_hartsyinference` |
+| Mutating | false |
+
+**Returns (success):**
+```json
+{
+  "success": true,
+  "model_name": "qwen_image_edit_2509_fp8_e4m3fn.safetensors",
+  "features": ["img2img", "inpaint", "refedit", "lora", "controlnet"],
+  "variant": "edit-plus",
+  "variant_name": "Qwen-Image-Edit-Plus",
+  "variant_source": "callerhint"
+}
+```
+`variant` is null for a family that declares no variants. `variant_source` is one of `structure`,
+`callerhint`, `metadata`, `filename` (a guess) or `default`.
+
 ### `HartsyInferenceProbeModel`
 
 `Task<JObject> HartsyInferenceProbeModel(Session session, string model_name)`
@@ -121,12 +153,11 @@ set isn't registered, or the named model doesn't exist:
 
 `Task<JObject> HartsyInferenceGetImageInputs(Session session, string model_name = "", string arch_id = "")`
 
-What images a model takes as input, per Swarm model class rather than compat
-class. Qwen-Image is why: core files `qwen-image`, `qwen-image-edit` and
-`qwen-image-edit-plus` under one compat class, and only the Edit classes can
-reference-edit. The same limits (`Generation/ImageInputs.cs`) drive the
-backend's refusals, so a request sized from this answer is not refused for its
-images.
+What images a model takes as input, for the variant the engine resolves it to
+(`ModelCapabilities`), so Qwen-Image base and Edit builds, or Wan I2V and
+Animate checkpoints, are described as what they are. The same engine limits
+drive the backend's refusals, so a request sized from this answer is not
+refused for its images.
 
 | | |
 |---|---|
@@ -136,8 +167,9 @@ images.
 | Mutating | false |
 
 **Inputs** — `model_name` (preferred; Wan and MiniMax-H3 narrow per checkpoint
-file) or `arch_id`, a Swarm model class ID. A bare compat class ID is accepted
-as `arch_id`, but it cannot tell Qwen-Image base from Edit and answers for base.
+file) or `arch_id`, a Swarm model class ID, sent to the engine as the variant
+hint. A bare compat class ID is accepted as `arch_id` and answers for the
+family as a whole.
 ```json
 { "session_id": "...", "model_name": "qwen_image_edit_2511_fp8.safetensors" }
 ```
@@ -164,10 +196,10 @@ as `arch_id`, but it cannot tell Qwen-Image base from Edit and answers for base.
 
 | Field | Meaning |
 |---|---|
-| `need` | `none` (text only), `optional`, or `required` (Wan 14B image2video / flf2v classes). |
-| `modes` | What an attached image can be: `denoise` (Init Image + Creativity), `reference` (in-context edit reference: Init Image with `initimagemode=reference`, or prompt images), `init` (video first frame). |
+| `need` | `none` (text only), `optional`, or `required` (Wan 14B image2video / flf2v classes, and Wan-Animate's character image). |
+| `modes` | What an attached image can be: `denoise` (Init Image + Creativity), `reference` (in-context edit reference: Init Image with `initimagemode=reference`, or prompt images; on Wan-Animate, the character to animate), `init` (video first frame). |
 | `autoMode` | What `initimagemode=auto` does with an Init Image alone. Families offering both prefer `denoise`, so send `initimagemode=reference` for an edit on a Qwen Edit checkpoint. |
-| `maxImages` | Most images one request may carry: Init Image plus prompt images. Video counts the init frame plus reference images; the end frame is separate. |
+| `maxImages` | Most images one request may carry: Init Image plus prompt images. On video an init frame and reference images are separate tasks, so this is the larger of the two, not their sum; the end frame is separate. |
 | `mask` | Whether a Mask Image (inpainting) applies. |
 | `endFrame` | Whether a Video End Image applies. |
 
