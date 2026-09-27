@@ -244,7 +244,12 @@ is where each one is actually checked, if it's checked at all beyond just being 
 
 A family that doesn't support a per-family flag reports `ImageFeatures.None` for it
 (`ModelSupport.SupportedFeatures`), and `IsValidForThisBackend`'s `ValidateImageFeatures`
-step refuses the request early rather than letting it fail mid-generation. `freeu` and
+step refuses the request early rather than letting it fail mid-generation. The check is
+per **model**, not per compat class. `BuildSpec` sends the model class as `ModelSpec.Variant`,
+and the engine resolves the checkpoint's variant from it (Qwen-Image base vs Edit vs
+Edit-Plus, Wan vs Wan-Animate). So a base Qwen-Image refuses reference images while its Edit
+builds accept them. The gen page asks `HartsyInferenceGetModelFeatures` for the selected model
+and gates `hartsy_refedit_choice` / `hartsy_wan_animate` on its answer. `freeu` and
 `yolov8` are not advertised — the engine has no equivalent for the first, and YOLO
 post-processing belongs to a separate extension. (`seamless` *is* advertised as of the
 central `Conv2D` interception work; this list previously said otherwise.)

@@ -231,8 +231,16 @@
              SwarmUI's own ComfyUI backend does and what a user watching this backend refuse to load Z-Image over
              an absent ae.safetensors expects. alpha.181 also adds 18 ComfyUI samplers; this extension reads the
              list from SamplingCapabilities rather than hardcoding it, so they appear with no source change here.
-             A full Release build against this pin succeeds with no source change. -->
-        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.181" />
+             A full Release build against this pin succeeds with no source change.
+             2.0.0-alpha.190 = model variants, 2026-09-27 (alpha.181 -> alpha.190). API + BEHAVIOUR. The engine
+             resolves which variant a checkpoint is (Qwen-Image base / Edit / Edit-Plus, Wan VACE / Animate / S2V,
+             LTX-2.5 dev / distilled, the Turbo builds) from its weights, ModelSpec.Variant, modelspec metadata
+             and, last, its name; ModelSupport.BuildSpec now sends the model class as ModelSpec.Variant and asks
+             ModelCapabilities per model. That retires WanVideoRecipe.SupportsFor(path) and this extension's own
+             LTX-2.5 distilled filename routing. The gap also carries per-family input-image limits (alpha.189),
+             the Wan end-frame correction (alpha.188) and the Vulkan fp8 / cooperative-matrix-2 work. Built
+             against a local alpha.190 engine with UseLocalHartsy=true. -->
+        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.190" />
     </ItemGroup>
 
     <!-- LOCAL ENGINE: prebuilt DLLs from the HartsyInference Cli bin (its full runtime closure). Referenced
