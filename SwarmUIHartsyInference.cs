@@ -907,6 +907,7 @@ public class SwarmUIHartsyInference : Extension
 
         // 3. Register HTTP routes.
         HartsyInferenceWebAPI.Register();
+        HartsyQueueWebAPI.Register();
 
         // 4. Pre-register all built-in architecture handlers.
         Generation.ModelSupport.RegisterBuiltins();
