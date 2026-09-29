@@ -239,8 +239,14 @@
              ModelCapabilities per model. That retires WanVideoRecipe.SupportsFor(path) and this extension's own
              LTX-2.5 distilled filename routing. The gap also carries per-family input-image limits (alpha.189),
              the Wan end-frame correction (alpha.188) and the Vulkan fp8 / cooperative-matrix-2 work. Built
-             against a local alpha.190 engine with UseLocalHartsy=true. -->
-        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.190" />
+             against a local alpha.190 engine with UseLocalHartsy=true.
+             2.0.0-alpha.201 = SDXL at wide sizes, 2026-09-29 (alpha.190 -> alpha.201). BEHAVIOUR, and the reason
+             for the bump: before alpha.198 SDXL and SD1.5 returned a flat grey image, reported as a success, at
+             any size whose latent is not a multiple of 8 - 1280x720 and 720x1280, which the Discord bot offers
+             (HartsyAI/HartsyInference#173). The gap also carries the Ideogram 4 contrast fix (alpha.196), faster
+             Wan 2.2 and Ideogram 4 (alpha.194-200) and a CUDA 3-D conv VRAM fallback (alpha.201). No API change
+             this extension uses: a Release build against the nuget.org package succeeds with no source change. -->
+        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.201" />
     </ItemGroup>
 
     <!-- LOCAL ENGINE: prebuilt DLLs from the HartsyInference Cli bin (its full runtime closure). Referenced
