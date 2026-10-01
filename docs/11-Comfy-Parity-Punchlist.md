@@ -110,8 +110,10 @@ upstream (waiting on HartsyInference.Core).
   latent blend keeps the unmasked region on the source's noise/flow
   trajectory, plus a pixel-space recomposite at the end
   (`MaskBlendUtilities`, shared across pipelines). Mask handling covers
-  `MaskImage` + `MaskGrow` (dilation) + `MaskBlur` (Gaussian). Deferred:
-  `MaskShrinkGrow` (crop-to-bbox) and the dedicated 9-channel SDXL-Inpaint
+  `MaskImage` + `MaskGrow` (dilation) + `MaskBlur` (Gaussian) +
+  `MaskShrinkGrow` (inpaint-only-masked crop, done engine-side). Deferred:
+  `MaskBehavior` (differential diffusion), `UseInpaintingEncode`, `SaveSegmentMask`
+  (hidden in the UI until implemented) and the dedicated 9-channel SDXL-Inpaint
   checkpoint variant — blend-on-vanilla covers the common case without a
   specialized checkpoint.
 - [x] **ControlNet** — SD 1.5, SDXL, and Flux.1 carry `ImageFeatures.ControlNet`

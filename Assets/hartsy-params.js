@@ -198,14 +198,16 @@ const HartsyCoreGating = {
         'initimagenoise': ['img2img', 'refedit', 'initimage'],
         'initimageresettonorm': ['img2img', 'refedit', 'initimage'],
         'initimagerecompositemask': 'inpaint',
-        'maskbehavior': 'inpaint',
+        // Not implemented by the engine (always plain latent blending / no inpainting-model encode / no segment
+        // mask output), so no model has a feature to satisfy these and they hide while Hartsy is the only option.
+        'maskbehavior': 'unimplemented',
         'maskblur': 'inpaint',
         'maskcompositeunthresholded': 'inpaint',
         'maskgrow': 'inpaint',
         'maskimage': 'inpaint',
         'maskshrinkgrow': 'inpaint',
-        'savesegmentmask': 'inpaint',
-        'useinpaintingencode': 'inpaint',
+        'savesegmentmask': 'unimplemented',
+        'useinpaintingencode': 'unimplemented',
     },
 
     /** compat class -> array of lowercase feature names. Populated from the backend, empty until it answers. */
