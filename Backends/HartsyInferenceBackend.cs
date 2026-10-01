@@ -2325,14 +2325,14 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         {
             input.RefusalReasons.Add(
                 $"HartsyInference: {family.Id} samples with its own solver and takes no sampler or scheduler "
-                + "selection. Leave both unset, or use a ComfyUI backend for this generation.");
+                + "selection. Remove the Sampler and Scheduler settings and try again.");
             return false;
         }
         if (wantsSampler && !support.Samplers.Contains(sampler, StringComparer.OrdinalIgnoreCase))
         {
             input.RefusalReasons.Add(
                 $"HartsyInference: the '{sampler}' sampler isn't available on {family.Id} (it has "
-                + $"{string.Join(", ", support.Samplers)}). Pick one of those, or use a ComfyUI backend.");
+                + $"{string.Join(", ", support.Samplers)}). Pick one of those.");
             return false;
         }
         if (wantsSchedule && !support.Schedules.Contains(schedule, StringComparer.OrdinalIgnoreCase))
@@ -2342,7 +2342,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 : $"it has {string.Join(", ", support.Schedules)}";
             input.RefusalReasons.Add(
                 $"HartsyInference: the '{schedule}' scheduler isn't available on {family.Id} ({available}). "
-                + "Use a ComfyUI backend for this generation.");
+                + "Pick one it has, or leave the scheduler unset.");
             return false;
         }
         // A re-spaced schedule cannot be combined with img2img or inpaint on any family: the init latent is noised at
@@ -2353,7 +2353,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             input.RefusalReasons.Add(
                 $"HartsyInference: the '{schedule}' scheduler can't be combined with an init image or mask — the init "
                 + "latent is noised at the model's own sigma, so a re-spaced schedule would start from the wrong "
-                + "noise level. Drop the scheduler, or use a ComfyUI backend.");
+                + "noise level. Drop the scheduler.");
             return false;
         }
         return true;
@@ -2413,7 +2413,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 string tag = match.Value.TrimStart('<').TrimEnd(':', '>', ' ');
                 input.RefusalReasons.Add(
                     $"HartsyInference: the '<{tag}:...>' prompt syntax isn't supported (no equivalent on the engine's request contract). "
-                    + "Remove the tag, or use a ComfyUI backend for this generation.");
+                    + "Remove the tag and try again.");
                 return false;
             }
         }
@@ -2614,8 +2614,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         {
             input.RefusalReasons.Add(
                 $"HartsyInference: the '{upscaleMethod}' upscale method needs a refiner model's latent pass. Without a "
-                + "refiner this backend upscales in pixel space — pick a Pixel, Model, Real-ESRGAN or SeedVR2 method, "
-                + "or use a ComfyUI backend for this generation.");
+                + "refiner this backend upscales in pixel space — pick a Pixel, Model, Real-ESRGAN or SeedVR2 method.");
             return false;
         }
         // A refiner MODEL must come from a family whose recipe can consume an init image — that is the PostApply
@@ -2771,8 +2770,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             if (setParams.TryGetValue(wfKey, out object wfVal) && !string.IsNullOrWhiteSpace($"{wfVal}"))
             {
                 input.RefusalReasons.Add(
-                    "HartsyInference: custom ComfyUI workflows aren't supported by this backend. "
-                    + "Use a ComfyUI backend for this generation.");
+                    "HartsyInference: custom workflows aren't supported by this engine. "
+                    + "Remove the custom workflow and try again.");
                 return false;
             }
         }
@@ -2797,8 +2796,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 continue;
             }
             input.RefusalReasons.Add(
-                $"HartsyInference: the '{pType.Name}' parameter is a ComfyUI-only feature this backend "
-                + "can't service. Remove it, or use a ComfyUI backend for this generation.");
+                $"HartsyInference: the '{pType.Name}' setting isn't supported by this engine. "
+                + "Remove it and try again.");
             return false;
         }
         return true;

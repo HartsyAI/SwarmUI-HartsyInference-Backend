@@ -241,7 +241,7 @@ public static class ModelSupport
             : string.Join(", ", RecipeRegistry.RegisteredNames);
         return $"Architecture '{compatClass}' maps to HartsyInference family '{family.Id}', but no "
             + $"{family.Kind.ToString().ToLowerInvariant()} recipe is registered for it in this engine build. "
-            + $"Currently drivable: {drivable}. Use the ComfyUI backend for this architecture in the meantime.";
+            + $"Currently drivable: {drivable}.";
     }
 
     /// <summary>Compat classes the Engine can drive right now.</summary>
