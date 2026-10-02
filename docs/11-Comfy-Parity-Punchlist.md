@@ -157,8 +157,8 @@ upstream (waiting on HartsyInference.Core).
   extension's Restore / Upscale group) both ship, and since 2026-09-09 the
   image-side "Refiner Upscale" / "Refiner Upscale Method" pair drives them
   without a refiner model (see P2). The latent methods remain P2.
-- [x] **Remove Background** (core `removebackground`, "internally uses RemBG")
- , 2026-09-09: after every other pass, the engine's RMBG-1.4 matte over the
+- [x] **Remove Background** (core `removebackground`, "internally uses RemBG").
+  2026-09-09: after every other pass, the engine's RMBG-1.4 matte over the
   finished pixels becomes an RGBA PNG (`RgbToImage.FromHwcRgba`). Runs at Init
   Image Creativity 0 too, since the engine's init-image short-circuit happens
   before the post passes. Weights (`briaai/RMBG-1.4`, gated on HF) fetch on
@@ -204,8 +204,8 @@ upstream (waiting on HartsyInference.Core).
   HunyuanVideo, Kandinsky-5 video, and Lance all have recipes registered in
   `VideoRecipeRegistry.BuildDefaults()`; `VideoOutputEncoder` (ffmpeg mux)
   handles FPS/format/boomerang/trim for all of them. MiniMax-H3 is also
-  registered but `Construct()` throws until MiniMax publishes the checkpoint
- , registered isn't usable there. Mochi, SVD, and Cosmos video have no
+  registered but `Construct()` throws until MiniMax publishes the checkpoint;
+  registered isn't usable there. Mochi, SVD, and Cosmos video have no
   family mapping at all, check `ModelSupport.cs` before assuming a video
   architecture is unsupported.
 - [ ] **Textual inversion embeddings**, needs tokenizer token-injection; not
@@ -246,8 +246,8 @@ table, or query `SupportedArchitectures` / `PendingArchitectures`.
 
 ## Upstream-blocked items: file these as HartsyInference issues
 
-1. Tiled `VaeEncoder` + latent-upscale-and-redenoise loop for hires-fix (P2)
-  , pixel-space upscale already ships; this is the missing 2-pass path.
+1. Tiled `VaeEncoder` + latent-upscale-and-redenoise loop for hires-fix (P2).
+  Pixel-space upscale already ships; this is the missing 2-pass path.
 2. `ImageFeatures.Regional` support in at least one image recipe, to light up
    the `<region:>` / `<segment:>` plumbing that already exists (P5).
 3. Textual inversion token injection.
