@@ -200,12 +200,11 @@ const HartsyCoreGating = {
         'initimagecreativity': ['img2img', 'refedit', 'initimage'],
         'initimagenoise': ['img2img', 'refedit', 'initimage'],
         'initimageresettonorm': ['img2img', 'refedit', 'initimage'],
-        // Not read by this backend yet: Mask Behavior (always plain latent blending), Use Inpainting Encode, Save
-        // Segment Mask, and the two recomposite controls (unhide those two when the engine fields are wired).
-        'initimagerecompositemask': HARTSY_UNIMPLEMENTED,
+        'initimagerecompositemask': 'inpaint',
+        // Not read by this backend: Mask Behavior (always plain latent blending), Use Inpainting Encode, Save Segment Mask.
         'maskbehavior': HARTSY_UNIMPLEMENTED,
         'maskblur': 'inpaint',
-        'maskcompositeunthresholded': HARTSY_UNIMPLEMENTED,
+        'maskcompositeunthresholded': 'inpaint',
         'maskgrow': 'inpaint',
         'maskimage': 'inpaint',
         'maskshrinkgrow': 'inpaint',
