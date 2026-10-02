@@ -1406,7 +1406,11 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 Grow = input.Get(T2IParamTypes.MaskGrow, 0),
                 Blur = input.Get(T2IParamTypes.MaskBlur, 0),
                 ShrinkGrow = input.Get(T2IParamTypes.MaskShrinkGrow, 0),
+                // Shrink Grow is a toggle: on at 0 crops tight to the mask, which ShrinkGrow alone cannot say.
+                CropToMask = input.TryGet(T2IParamTypes.MaskShrinkGrow, out int _),
+                RecompositeMask = input.Get(T2IParamTypes.InitImageRecompositeMask, true),
             },
+            MaskCompositeUnthresholded = input.Get(T2IParamTypes.MaskCompositeUnthresholded, false),
             Regional = BuildRegional(input, prompt),
             VariationSeed = BuildVariationSeed(input),
             Extra = BuildImageExtra(input, family, initImage, unionTypes),
