@@ -1595,7 +1595,9 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             // (not 0) when the toggle is off, and the documented defaults are 16 and 10.
             MaskGrow = input.Get(T2IParamTypes.SegmentMaskGrow, 16),
             MaskBlur = input.Get(T2IParamTypes.SegmentMaskBlur, 10),
-            MaskOversize = input.Get(T2IParamTypes.SegmentMaskOversize, 0),
+            // Exact so a toggled-on 0 crops tight, as in core; absent means core's default of 16.
+            MaskOversize = input.Get(T2IParamTypes.SegmentMaskOversize, 16),
+            ExactMaskOversize = true,
             Steps = NullableInt(input, T2IParamTypes.SegmentSteps),
             CfgScale = input.TryGet(T2IParamTypes.SegmentCFGScale, out double segCfg) ? segCfg : null,
         };
