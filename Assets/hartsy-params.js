@@ -133,6 +133,9 @@ const HartsyModelFeatures = {
  * These are core's params, not ours, so they can't be handled by adding/removing a flag — the AudioLab /
  * API-Backends approach of swapping param.feature_flag and restoring it is used instead.
  */
+/** Feature name no model advertises: a param gated on it hides while Hartsy is the only backend option. */
+const HARTSY_UNIMPLEMENTED = 'unimplemented';
+
 const HartsyCoreGating = {
     /** param id -> engine feature flag it needs. Ids verified against a live ListT2IParams response. */
     requires: {
@@ -197,17 +200,17 @@ const HartsyCoreGating = {
         'initimagecreativity': ['img2img', 'refedit', 'initimage'],
         'initimagenoise': ['img2img', 'refedit', 'initimage'],
         'initimageresettonorm': ['img2img', 'refedit', 'initimage'],
-        'initimagerecompositemask': 'inpaint',
-        // Not implemented by the engine (always plain latent blending / no inpainting-model encode / no segment
-        // mask output), so no model has a feature to satisfy these and they hide while Hartsy is the only option.
-        'maskbehavior': 'unimplemented',
+        // Not read by this backend yet: Mask Behavior (always plain latent blending), Use Inpainting Encode, Save
+        // Segment Mask, and the two recomposite controls (unhide those two when the engine fields are wired).
+        'initimagerecompositemask': HARTSY_UNIMPLEMENTED,
+        'maskbehavior': HARTSY_UNIMPLEMENTED,
         'maskblur': 'inpaint',
-        'maskcompositeunthresholded': 'inpaint',
+        'maskcompositeunthresholded': HARTSY_UNIMPLEMENTED,
         'maskgrow': 'inpaint',
         'maskimage': 'inpaint',
         'maskshrinkgrow': 'inpaint',
-        'savesegmentmask': 'unimplemented',
-        'useinpaintingencode': 'unimplemented',
+        'savesegmentmask': HARTSY_UNIMPLEMENTED,
+        'useinpaintingencode': HARTSY_UNIMPLEMENTED,
     },
 
     /** compat class -> array of lowercase feature names. Populated from the backend, empty until it answers. */
