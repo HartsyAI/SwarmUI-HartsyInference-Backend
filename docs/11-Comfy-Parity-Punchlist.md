@@ -1,4 +1,4 @@
-# 11 — Comfy Parity Punchlist
+# 11: Comfy Parity Punchlist
 
 Canonical "what's left to ship" list.
 
@@ -11,13 +11,13 @@ doc: `Generation/ModelSupport.cs` maps a SwarmUI compat class to an Engine
 family id, and `RecipeRegistry` / `VideoRecipeRegistry` decide whether that
 family has a recipe and which `ImageFeatures` / `VideoFeatures` it declares.
 `ModelSupport.SupportedArchitectures` / `PendingArchitectures` are the live
-answer to "what can this backend drive today" — check those instead of
+answer to "what can this backend drive today", check those instead of
 expecting a per-architecture table here to stay current.
 
 Per-arch facts below (`Supports`/`ImageFeatures`/`VideoFeatures` flags) come
 from the HartsyInference.Core engine repo. The extension consumes a *pinned*
 engine package (`HartsyInference` NuGet version in
-`SwarmUI-HartsyInference.csproj`, alpha.17 as of this refresh) — this repo has
+`SwarmUI-HartsyInference.csproj`, alpha.17 as of this refresh), this repo has
 a documented history of the extension silently dropping out when its source
 runs ahead of its pin. If the pin trails engine HEAD, re-check before
 assuming a HEAD-only feature is live in a shipped build. Facts sourced from
@@ -31,91 +31,93 @@ upstream (waiting on HartsyInference.Core).
 
 ## Production push (active order)
 
-- [x] **P1 — Sampler + scheduler + clip skip.** Comfy's shared `Sampler` AND
+- [x] **P1: Sampler + scheduler + clip skip.** Comfy's shared `Sampler` AND
   `Scheduler` params are both read and sent, as the two orthogonal selections
   they are; the Engine combines them (`dpmpp_2m` + `karras` →
   `dpmpp_2m_karras`). 9 samplers × 9 sigma schedules across every seam-carrying
   family. Clip skip reads Swarm's `T2IParamTypes.ClipStopAtLayer` straight into
-  `ImageRequest.ClipSkip` — no separate upstream param was needed.
+  `ImageRequest.ClipSkip`, no separate upstream param was needed.
   **Retracted (2026-08-22):** this entry previously called scheduler-type
   selection "a real, permanent gap, not a TODO", on the strength of the
-  `Scheduler = null` comment at the request-builder call site. That was wrong —
+  `Scheduler = null` comment at the request-builder call site. That was wrong,
   it described a wiring omission, not a limit. Engine alpha.34 threads the
   selection to every recipe and `SamplingCapabilities` reports per family what
   is accepted. Batch size > 1 IS still a genuine gap: `Batch = 1` always, with
-  "Swarm drives batching itself: one Generate call per image" — there is no
+  "Swarm drives batching itself: one Generate call per image", there is no
   latent-batched generation path.
-- [ ] **P2 — Hires fix / 2-pass upscale (`RefinerUpscale != 1` WITH a refiner
+- [ ] **P2: Hires fix / 2-pass upscale (`RefinerUpscale != 1` WITH a refiner
   model).** The value is read (`Refiner.Upscale`) and passed through, but
-  `SdxlRecipePipeline` logs a warning and ignores it on StepSwap — only the
+  `SdxlRecipePipeline` logs a warning and ignores it on StepSwap, only the
   PostApply hand-off resizes. Needs a tiled `VaeEncoder` (`EncodeTiled`) plus a
   latent-upscale-and-redenoise pass; the `latent-*` upscale methods are refused
   without a refiner model for the same reason. **Done 2026-09-09, the other
   half:** `RefinerUpscale` with NO refiner model is honored as a pixel-space
-  pass over the finished image (`UpscaleStill`) — Real-ESRGAN x2plus/x4plus/
+  pass over the finished image (`UpscaleStill`), Real-ESRGAN x2plus/x4plus/
   anime6b through the engine's `VisionMode.Upscale` (fit to width×factor, at
-  most two model passes then a downsize), or SeedVR2 via `engine.Restore` —
+  most two model passes then a downsize), or SeedVR2 via `engine.Restore`,
   and `refinerupscalemethod` is back in `HonoredComfyParams` with its own
   dropdown entries (`real-esrgan-*`, `seedvr2`; see `ResolveUpscaleModel`).
-- [x] **P3 — Graceful refusal of unsupported prompt syntax.** `<object:>`,
+- [x] **P3: Graceful refusal of unsupported prompt syntax.** `<object:>`,
   `<clear:>`, `<embed:>`, `<break>` are hard-refused at validation
-  (`UnsupportedPromptSyntax` regex) — the Engine has no conditioning contract
+  (`UnsupportedPromptSyntax` regex), the Engine has no conditioning contract
   for them at all. `<region:>` / `<segment:>` are no longer regex-blocked:
   the extension builds a real `Regional` request (`BuildRegional` /
   `HasRegionalSyntax`) and lets the Engine's own per-family gate refuse it
   with a precise reason instead of a blanket "unsupported syntax" message.
-- [ ] **P5 — `<segment:face>` via YOLO.** Still refused end-to-end: no image
+- [ ] **P5: `<segment:face>` via YOLO.** Still refused end-to-end: no image
   recipe declares `ImageFeatures.Regional` yet, so the `Regional` request P3
   builds is rejected for every architecture today. What's changed since the
   original plan: the vision runtime it needs already exists in the Engine, in
-  pure C# — YOLO detection/pose/face, SAM2 mask refinement, text segmentation
-  (`HartsyInference.Vision`) — so the ONNX-vs-native runtime decision is
+  pure C#, YOLO detection/pose/face, SAM2 mask refinement, text segmentation
+  (`HartsyInference.Vision`), so the ONNX-vs-native runtime decision is
   already made (native) and there's no new model-download infrastructure to
   build. The remaining work is one image recipe opting into
   `ImageFeatures.Regional`, not new infrastructure.
-- [x] **P4 — Variation seed.** `BuildVariationSeed` slerps
+- [x] **P4: Variation seed.** `BuildVariationSeed` slerps
   `SeedGenerator.CreateNoise(seed)` with the variation seed at the given
   strength, gated by `ImageFeatures.VariationSeed` (SD 1.5, SDXL, Flux.1).
-- [~] **P6 — Architecture long-tail.** Wan 2.1 14B now has a registered
+- [~] **P6: Architecture long-tail.** Wan 2.1 14B now has a registered
   recipe (`WanVideoRecipe` selects its preset by compat-class id, same as the
   5B/1.3B variants); Wan also has VACE, Animate, and S2V recipes gated by
   checkpoint header. Qwen-Image gained `ImageFeatures.RefEdit` (in-context
-  reference editing on the same checkpoint) — verify whether that already
+  reference editing on the same checkpoint), verify whether that already
   covers the "Qwen Image Edit" ask before treating it as separate work.
   `ModelSupport._families` is the source of truth for what's mapped; don't
   re-enumerate it here.
-- [~] **P7 — Ideogram 4.** Loader, Steps→preset mapping, chat-template
+- [~] **P7: Ideogram 4.** Loader, Steps→preset mapping, chat-template
   tokenize, and the VRAM gate all shipped. Magic-prompt expansion (LLM
   rewrite of a plain prompt into Ideogram's structured JSON caption) is fully
   implemented in `Ideogram4MagicPrompt.cs` but compiled out behind
   `#if HARTSY_LLM_CORE`, pending SwarmUI core's expanded LLM API
   (`LLMParamInput.SystemPrompt`/`Temperature`/`Stream`,
-  `AbstractLLMBackend.ListModels`) landing in the target core branch —
+  `AbstractLLMBackend.ListModels`) landing in the target core branch,
   without that symbol `Expand()` is a no-op and the plain prompt is sent
   as-is (Ideogram 4 accepts plain text; it's just out-of-distribution for its
   safety head). A no-LLM fallback (`WrapPlainAsJson`) exists in the same file
   but has no caller today; its own code comment notes that mechanically
   wrapping a short prompt in the JSON schema doesn't reliably clear the
-  safety filter — only a genuinely elaborated caption does, which needs the
+  safety filter, only a genuinely elaborated caption does, which needs the
   LLM path. **Remaining:** E2E verify on a ≥24 GB host; wire `WrapPlainAsJson`
-  in or drop it. License is "Ideogram 4 Non-Commercial" — keep surfacing that
+  in or drop it. License is "Ideogram 4 Non-Commercial", keep surfacing that
   in the model description.
 
 ---
 
-## Tier 1 — High-impact core features
+## Tier 1: High-impact core features
 
-- [x] **Inpainting / masks** — SDXL, Flux.1, SD3, SD 1.5, and Z-Image all
+- [x] **Inpainting / masks**, SDXL, Flux.1, SD3, SD 1.5, and Z-Image all
   blend-on-vanilla (`ImageFeatures.Inpaint` on all five recipes): per-step
   latent blend keeps the unmasked region on the source's noise/flow
   trajectory, plus a pixel-space recomposite at the end
   (`MaskBlendUtilities`, shared across pipelines). Mask handling covers
-  `MaskImage` + `MaskGrow` (dilation) + `MaskBlur` (Gaussian). Deferred:
-  `MaskShrinkGrow` (crop-to-bbox) and the dedicated 9-channel SDXL-Inpaint
-  checkpoint variant — blend-on-vanilla covers the common case without a
+  `MaskImage` + `MaskGrow` (dilation) + `MaskBlur` (Gaussian) +
+  `MaskShrinkGrow` (inpaint-only-masked crop, done engine-side). Deferred:
+  `MaskBehavior` (differential diffusion), `UseInpaintingEncode`, `SaveSegmentMask`,
+  `InitImageRecompositeMask` and `MaskCompositeUnthresholded` (hidden in the UI until implemented) and the dedicated 9-channel SDXL-Inpaint
+  checkpoint variant, blend-on-vanilla covers the common case without a
   specialized checkpoint.
-- [x] **ControlNet** — SD 1.5, SDXL, and Flux.1 carry `ImageFeatures.ControlNet`
-  (SD3, Flux.2, and the rest don't — no CN checkpoints exist for them). SDXL
+- [x] **ControlNet**, SD 1.5, SDXL, and Flux.1 carry `ImageFeatures.ControlNet`
+  (SD3, Flux.2, and the rest don't, no CN checkpoints exist for them). SDXL
   union-type (`SdxlUnionControlType`) and per-slot start/end step-fraction
   gating (`ControlNetConditioning.StartFraction/EndFraction`) are both live,
   not full-range-only. Preprocessors are pure C#, no ONNX: Canny, Depth,
@@ -123,10 +125,10 @@ upstream (waiting on HartsyInference.Core).
   (`ControlNetPreprocessing.cs` dispatch). Stacking sums residuals (matches
   diffusers); CFG runs ControlNet once with the cond text embedding and
   shares residuals across both branches (`guess_mode=True` semantics) rather
-  than a strict per-branch pass — an accuracy/perf tradeoff, not a bug.
-- [x] **IP-Adapter** — SD 1.5 + SDXL carry the full set: standard, Plus,
+  than a strict per-branch pass, an accuracy/perf tradeoff, not a bug.
+- [x] **IP-Adapter**, SD 1.5 + SDXL carry the full set: standard, Plus,
   Plus-Face, and FaceID / FaceID-Plus / FaceID-PlusV2, the last three via a
-  pure-C# ArcFace IR-50 implementation — no InsightFace runtime dependency.
+  pure-C# ArcFace IR-50 implementation, no InsightFace runtime dependency.
   Weight-type math: "prompt is more important" scales encoder+mid cross-attn
   layers to 0.4× base while decoder stays at full base (prompt drives
   composition, IPA mainly contributes style at decode); "style transfer"
@@ -134,7 +136,7 @@ upstream (waiting on HartsyInference.Core).
   base (approximates Cubiq's block_3/4 SDXL schedule). Multi-image
   references average the CLIP-Vision embeddings pre-projection and run the
   projection once on the centroid rather than once per image. Flux gets
-  image-prompting through **Redux** instead of classic IP-Adapter — a real
+  image-prompting through **Redux** instead of classic IP-Adapter, a real
   IPA checkpoint is explicitly refused on Flux with a message pointing at
   Redux, because Flux's DiT has no cross-attention K/V slot for IPA's image
   tokens. **Still refused, real blockers:** Flux classic IP-Adapter (would
@@ -142,92 +144,92 @@ upstream (waiting on HartsyInference.Core).
   cross-attention); other architectures (SD3, Z-Image, Flux.2, AuraFlow,
   Chroma, F-Lite, Ernie) have no published IPA checkpoints to load;
   multi-adapter stacking (Swarm's UI exposes one IPA slot).
-- [x] **Refiner StepSwap** — SDXL only (`ImageFeatures.Refiner`). Swaps
+- [x] **Refiner StepSwap**, SDXL only (`ImageFeatures.Refiner`). Swaps
   base→refiner UNet at `(1-Strength)*totalSteps`, rebuilds ADM per branch
   (base cond=6.0/uncond=2.5 vs. the refiner's 5-value aesthetic-score-only
   ADM, since CrossAttentionDim differs: 2048 concat vs. refiner's 1280
   CLIP-G-only). ControlNet and IP-Adapter are both disabled during the
-  refiner phase — their conditioning is sized for the base UNet, not the
+  refiner phase, their conditioning is sized for the base UNet, not the
   4-level refiner. `StepSwapNoisy` (re-noise at the swap point) stays
   deferred as a minor variant.
-- [x] **Upscaling** — `HartsyInference.Vision/Upscale` (Real-ESRGAN, image)
+- [x] **Upscaling**, `HartsyInference.Vision/Upscale` (Real-ESRGAN, image)
   and SeedVR2 restoration (`engine.Restore`, video+image, wired into this
   extension's Restore / Upscale group) both ship, and since 2026-09-09 the
   image-side "Refiner Upscale" / "Refiner Upscale Method" pair drives them
   without a refiner model (see P2). The latent methods remain P2.
-- [x] **Remove Background** (core `removebackground`, "internally uses RemBG")
-  — 2026-09-09: after every other pass, the engine's RMBG-1.4 matte over the
+- [x] **Remove Background** (core `removebackground`, "internally uses RemBG").
+  2026-09-09: after every other pass, the engine's RMBG-1.4 matte over the
   finished pixels becomes an RGBA PNG (`RgbToImage.FromHwcRgba`). Runs at Init
   Image Creativity 0 too, since the engine's init-image short-circuit happens
   before the post passes. Weights (`briaai/RMBG-1.4`, gated on HF) fetch on
   first use through `ResolveAuxModel`, which needs `HF_TOKEN` in SwarmUI's
   environment for that repo.
 
-## Tier 2 — Sampling / quality
+## Tier 2: Sampling / quality
 
-- [x] **Scheduler-type selection (karras / exponential / …)** — done in engine
+- [x] **Scheduler-type selection (karras / exponential / …)**, done in engine
   alpha.34. The "permanent gap" claim here was a misreading of a wiring
   omission; see the retraction in P1.
-- [!] **Batch size > 1** — still a real gap, and unlike the above it is a
+- [!] **Batch size > 1**, still a real gap, and unlike the above it is a
   missing capability rather than missing wiring: there is no latent-batched
   generation path, so `Batch = 1` always.
-- [x] **Per-arch sampler & scheduler registry** — `SamplingCapabilities` in the
+- [x] **Per-arch sampler & scheduler registry**, `SamplingCapabilities` in the
   Engine (not `ModelSupport.cs`: the answer has to come from the same place the
   pipelines live or it drifts from them). `ValidateSamplingChoice` refuses an
   unrunnable pick pre-generation so Swarm routes it to Comfy, and
   `HartsyInferenceGetSupportedArchs` serves the per-arch lists to the gen-page
   script, which hides both controls on the families that take no selection.
-- [ ] **CFG Rescaling / RenormCFG / CFGZeroStar / TCFG** — guidance-math
+- [ ] **CFG Rescaling / RenormCFG / CFGZeroStar / TCFG**, guidance-math
   variants, each a small loop tweak.
   ([Comfy ref: `WorkflowGeneratorSteps.cs:177-210`](../../../BuiltinExtensions/ComfyUIBackend/WorkflowGeneratorSteps.cs#L177-L210))
-- [ ] **PAG (Perturbed-Attention Guidance)** — attention-hook based. Swarm
+- [ ] **PAG (Perturbed-Attention Guidance)**, attention-hook based. Swarm
   already exposes the param; ignored today.
-- [ ] **SAG (Self-Attention Guidance)** — same shape as PAG, same status.
+- [ ] **SAG (Self-Attention Guidance)**, same shape as PAG, same status.
 
-## Tier 3 — Ecosystem
+## Tier 3: Ecosystem
 
-- [ ] **Side-model registry expansion** — Comfy auto-downloads ~40 encoder
+- [ ] **Side-model registry expansion**, Comfy auto-downloads ~40 encoder
   variants; pure additions as new architectures need them.
-- [ ] **SD3 LoRA path** — scaffolded upstream but untested (`Sd3Recipe` does
+- [ ] **SD3 LoRA path**, scaffolded upstream but untested (`Sd3Recipe` does
   not declare `ImageFeatures.Lora`).
-- [ ] **TensorRT compile WebAPI endpoint** — replicate `DoTensorRTCreateWS`
+- [ ] **TensorRT compile WebAPI endpoint**, replicate `DoTensorRTCreateWS`
   against HartsyInference's TRT path.
-- [ ] **LoRA extraction utility** — diff two checkpoints, write a LoRA. New
+- [ ] **LoRA extraction utility**, diff two checkpoints, write a LoRA. New
   endpoint in `HartsyInferenceWebAPI.cs`.
 
-## Tier 4 — Niche / advanced
+## Tier 4: Niche / advanced
 
-- [x] ~~**Video architecture breadth**~~ — Wan (all mapped sizes plus
+- [x] ~~**Video architecture breadth**~~, Wan (all mapped sizes plus
   VACE/Animate/S2V checkpoint-header variants), LTX-Video 0.9 + 2,
   HunyuanVideo, Kandinsky-5 video, and Lance all have recipes registered in
   `VideoRecipeRegistry.BuildDefaults()`; `VideoOutputEncoder` (ffmpeg mux)
   handles FPS/format/boomerang/trim for all of them. MiniMax-H3 is also
-  registered but `Construct()` throws until MiniMax publishes the checkpoint
-  — registered isn't usable there. Mochi, SVD, and Cosmos video have no
-  family mapping at all — check `ModelSupport.cs` before assuming a video
+  registered but `Construct()` throws until MiniMax publishes the checkpoint;
+  registered isn't usable there. Mochi, SVD, and Cosmos video have no
+  family mapping at all, check `ModelSupport.cs` before assuming a video
   architecture is unsupported.
-- [ ] **Textual inversion embeddings** — needs tokenizer token-injection; not
+- [ ] **Textual inversion embeddings**, needs tokenizer token-injection; not
   present in any text encoder today.
-- [ ] **Seamless tiling** — no padding-mode hooks in the conv path.
-- [ ] **TeaCache / EasyCache step-skipping** — latent cache intercept points
+- [ ] **Seamless tiling**, no padding-mode hooks in the conv path.
+- [ ] **TeaCache / EasyCache step-skipping**, latent cache intercept points
   in the diffusion loop. Low ROI vs. quality tradeoff.
-- [ ] **NAG (Normalized Attention Guidance)** — same shape as PAG; low demand.
-- [ ] **GLIGEN spatial conditioning** — SD 1.5-only, superseded by ControlNet.
+- [ ] **NAG (Normalized Attention Guidance)**, same shape as PAG; low demand.
+- [ ] **GLIGEN spatial conditioning**, SD 1.5-only, superseded by ControlNet.
   Low priority.
 
 ## FLUX.1 Tools (BFL's official Flux conditioning suite)
 
-- [x] **FLUX.1 Canny** — detected from `x_embedder.weight` input-dim shape
+- [x] **FLUX.1 Canny**, detected from `x_embedder.weight` input-dim shape
   (128 vs. 64) plus filename keyword; shares the `flux-1` family with vanilla
   Flux, no separate compat class.
-- [x] **FLUX.1 Redux** — image-prompt adapter via SigLIP encoder + token-concat
+- [x] **FLUX.1 Redux**, image-prompt adapter via SigLIP encoder + token-concat
   (not cross-attention K/V). `redux.*` Extra keys (`ReduxStyleModel`,
   `ReduxMultiply`, `ReduxMerge`, `ReduxApplyStart`) map from Comfy's
   style-model params.
-- [ ] **FLUX.1 Depth** — detected at load time but refused: needs the
+- [ ] **FLUX.1 Depth**, detected at load time but refused: needs the
   existing ControlNet Depth preprocessor threaded through the Flux path
   specifically. Same pipeline shape as Canny otherwise.
-- [ ] **FLUX.1 Fill** — detected at load time but refused: needs masked-image
+- [ ] **FLUX.1 Fill**, detected at load time but refused: needs masked-image
   + mask preprocessing wired through the dedicated 32-channel input
   (different from the blend-on-vanilla mask path used elsewhere).
 
@@ -238,17 +240,17 @@ ControlNet, and IP-Adapter per the arch coverage above; refiner PostApply +
 StepSwap; FLUX.1 Canny + Redux; tiled VAE decode; Real-ESRGAN + SeedVR2
 upscale/restore; side-model auto-download; TAESD/latent2rgb live previews;
 CUDA + Vulkan + CPU backends; cancellation; model hot-swap; pipeline cache.
-For the current image/video/music architecture list — which grows
-independently of this doc — read `Generation/ModelSupport.cs`'s `_families`
+For the current image/video/music architecture list, which grows
+independently of this doc, read `Generation/ModelSupport.cs`'s `_families`
 table, or query `SupportedArchitectures` / `PendingArchitectures`.
 
-## Upstream-blocked items — file these as HartsyInference issues
+## Upstream-blocked items: file these as HartsyInference issues
 
-1. Tiled `VaeEncoder` + latent-upscale-and-redenoise loop for hires-fix (P2)
-   — pixel-space upscale already ships; this is the missing 2-pass path.
+1. Tiled `VaeEncoder` + latent-upscale-and-redenoise loop for hires-fix (P2).
+  Pixel-space upscale already ships; this is the missing 2-pass path.
 2. `ImageFeatures.Regional` support in at least one image recipe, to light up
    the `<region:>` / `<segment:>` plumbing that already exists (P5).
 3. Textual inversion token injection.
 4. Seamless tiling hooks in the latent loop.
-5. FP4 GEMM in CudaBackend — unblocks Flux.2 Klein 9B / Dev with Comfy's
+5. FP4 GEMM in CudaBackend, unblocks Flux.2 Klein 9B / Dev with Comfy's
    canonical fp4-mixed encoders, and the Ideogram 4 nf4 checkpoint variant.
