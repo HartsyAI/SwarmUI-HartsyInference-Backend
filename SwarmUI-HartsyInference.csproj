@@ -245,8 +245,12 @@
              any size whose latent is not a multiple of 8 - 1280x720 and 720x1280, which the Discord bot offers
              (HartsyAI/HartsyInference#173). The gap also carries the Ideogram 4 contrast fix (alpha.196), faster
              Wan 2.2 and Ideogram 4 (alpha.194-200) and a CUDA 3-D conv VRAM fallback (alpha.201). No API change
-             this extension uses: a Release build against the nuget.org package succeeds with no source change. -->
-        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.201" />
+             this extension uses: a Release build against the nuget.org package succeeds with no source change.
+             2.0.0-alpha.270 = 2026-10-07 (alpha.201 -> alpha.270), and a build fix: the extension source already used
+             the mask options added after alpha.201 (Inpaint.CropToMask / RecompositeMask, ImageRequest.MaskCompositeUnthresholded,
+             Regional.ExactMaskOversize), so a Release build against alpha.201 failed (CS0117) and SwarmUI skipped the
+             backend type on startup. Builds clean against alpha.270 with no source change. -->
+        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.270" />
     </ItemGroup>
 
     <!-- LOCAL ENGINE: prebuilt DLLs from the HartsyInference Cli bin (its full runtime closure). Referenced
