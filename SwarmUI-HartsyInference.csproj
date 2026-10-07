@@ -250,8 +250,8 @@
              the mask options added after alpha.201 (Inpaint.CropToMask / RecompositeMask, ImageRequest.MaskCompositeUnthresholded,
              Regional.ExactMaskOversize), so a Release build against alpha.201 failed (CS0117) and SwarmUI skipped the
              backend type on startup. Builds clean against alpha.270 with no source change. -->
-        <!-- Floating: resolves to the newest published 2.0.0-alpha.N on nuget.org whenever the extension is built (user decision 2026-10-07). Restart with force=true so every extension rebuilds on the same engine. -->
-        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.*" />
+        <!-- Exact pin on purpose: a floating alpha.* resolves to the stale alpha.NNN-local.M builds in the hartsy-local feed (NuGet ranks the alphanumeric label above numeric ones), which broke every extension build on 2026-10-07. -->
+        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.270" />
     </ItemGroup>
 
     <!-- LOCAL ENGINE: prebuilt DLLs from the HartsyInference Cli bin (its full runtime closure). Referenced
