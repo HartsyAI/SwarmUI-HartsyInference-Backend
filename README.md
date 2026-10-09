@@ -123,7 +123,7 @@ The finished result appears in the normal SwarmUI history. Select it to view the
 
 ### Create images from a prompt
 
-Generate with families such as Stable Diffusion 1.5, SDXL, SD3, SD3.5, FLUX.1, FLUX.2, Qwen-Image, Z-Image, Krea 2, Chroma, AuraFlow, Anima, F-Lite, Ideogram 4, HunyuanImage, ERNIE-Image, and Boogu.
+Generate with families such as Stable Diffusion 1.5, SDXL, SD3, SD3.5, FLUX.1, FLUX.2, Qwen-Image, Qwen-Image 2.1 (and its 8-step Turbo build), Z-Image, Krea 2, Chroma, AuraFlow, Anima, F-Lite, Ideogram 4, HunyuanImage, ERNIE-Image, and Boogu.
 
 ### Edit and repair images
 
