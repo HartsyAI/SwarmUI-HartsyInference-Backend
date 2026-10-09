@@ -242,6 +242,8 @@ is where each one is actually checked, if it's checked at all beyond just being 
 | `variation_seed` | Second seed for blended noise | per-family, `ImageFeatures.VariationSeed` |
 | `video` | Video models: Wan (T2V/I2V/VACE/Animate/S2V), LTX-Video, LTX-2 (2.3 and 2.5), Lance Video, MiniMax-H3 | per-family, `ValidateVideo` against `VideoFeatures` (a separate enum from `ImageFeatures`) |
 
+Qwen-Image 2.1 Turbo needs no extension code. Core classifies the file as `qwen-image-2.1` from its keys, and the engine's `QwenImage21Variants` picks Turbo from a `turbo` token in the file name. That selects the fixed 8-step sigma schedule, with steps and CFG pinned to 8 and 1. The Turbo repo ships as two diffusers shards; the engine finds the sibling shard from either one, but SwarmUI's model list shows each shard as its own entry. Use the single-file build named with `turbo` for Swarm.
+
 A family that doesn't support a per-family flag reports `ImageFeatures.None` for it
 (`ModelSupport.SupportedFeatures`), and `IsValidForThisBackend`'s `ValidateImageFeatures`
 step refuses the request early rather than letting it fail mid-generation. The check is
