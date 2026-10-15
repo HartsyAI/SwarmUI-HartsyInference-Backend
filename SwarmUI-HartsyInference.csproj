@@ -251,7 +251,7 @@
              Regional.ExactMaskOversize), so a Release build against alpha.201 failed (CS0117) and SwarmUI skipped the
              backend type on startup. Builds clean against alpha.270 with no source change. -->
         <!-- Exact pin on purpose: a floating alpha.* resolves to the stale alpha.NNN-local.M builds in the hartsy-local feed (NuGet ranks the alphanumeric label above numeric ones), which broke every extension build on 2026-10-07. -->
-        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.270" />
+        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.368" />
     </ItemGroup>
 
     <!-- LOCAL ENGINE: prebuilt DLLs from the HartsyInference Cli bin (its full runtime closure). Referenced
