@@ -249,9 +249,12 @@
              2.0.0-alpha.270 = 2026-10-07 (alpha.201 -> alpha.270), and a build fix: the extension source already used
              the mask options added after alpha.201 (Inpaint.CropToMask / RecompositeMask, ImageRequest.MaskCompositeUnthresholded,
              Regional.ExactMaskOversize), so a Release build against alpha.201 failed (CS0117) and SwarmUI skipped the
-             backend type on startup. Builds clean against alpha.270 with no source change. -->
+             backend type on startup. Builds clean against alpha.270 with no source change.
+             2.0.0-alpha.373 = 2026-10-16 (alpha.368 -> alpha.373), in lockstep with SwarmUI-AudioLab. Carries FLUX.3 Klein
+             (family flux3, alpha.372), which ModelSupport now maps from core's flux-3-klein compat class, and Fish Audio
+             Drama 3 (alpha.373, an AudioLab provider). No source change needed beyond that mapping. -->
         <!-- Exact pin on purpose: a floating alpha.* resolves to the stale alpha.NNN-local.M builds in the hartsy-local feed (NuGet ranks the alphanumeric label above numeric ones), which broke every extension build on 2026-10-07. -->
-        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.368" />
+        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.373" />
     </ItemGroup>
 
     <!-- LOCAL ENGINE: prebuilt DLLs from the HartsyInference Cli bin (its full runtime closure). Referenced
