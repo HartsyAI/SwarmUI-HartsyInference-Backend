@@ -57,9 +57,9 @@ public static class ModelSupport
         ["flux-2"] = new("flux2", Kind.Image),
         ["flux-2-klein-4b"] = new("flux2", Kind.Image),
         ["flux-2-klein-9b"] = new("flux2", Kind.Image),
-        // Core owns the flux-3-klein compat class (T2IModelClassSorter, "Adds Klein3 support" #1570) along with its
-        // model class — this maps it, it must not re-register it. Keyed off core's own registration, like the others.
-        [T2IModelClassSorter.CompatFlux3Klein.ID] = new("flux3", Kind.Image),
+        // Core owns the FLUX.3 Image Klein compat class (T2IModelClassSorter, "Adds Klein3 support" #1570, renamed to
+        // CompatFlux3ImageKlein by core 9745d0c4) along with its model class — this maps it, it must not re-register it.
+        [T2IModelClassSorter.CompatFlux3ImageKlein.ID] = new("flux3", Kind.Image),
         ["chroma"] = new("chroma", Kind.Image),
         ["chroma-radiance"] = new("chroma-radiance", Kind.Image),
         ["zeta-chroma"] = new("zeta-chroma", Kind.Image),
