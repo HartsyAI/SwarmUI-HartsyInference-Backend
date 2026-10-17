@@ -28,28 +28,32 @@ using HartsyInference.Engine.Registry;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
 using EngineImage = HartsyInference.Engine.Requests.ImageData;
+using EngineLogLevel = HartsyInference.Core.Logging.LogLevel;
+using EngineControlNetMode = HartsyInference.Diffusion.Adapters.ControlNetMode;
+using EngineExtras = HartsyInference.Engine.Features.RequestExtras;
+using EngineWanAnimate = HartsyInference.Engine.Recipes.Video.WanAnimateRecipePipeline;
+using EngineH3ChainPlanner = HartsyInference.Engine.Recipes.Video.MiniMaxH3ChainPlanner;
+using EngineH3Geometry = HartsyInference.Diffusion.Models.Denoisers.MiniMaxH3Geometry;
 
 namespace Hartsy.Extensions.HartsyInferenceBackend.Backends;
 
-/// <summary>
-/// SwarmUI backend that runs inference in-process through <c>HartsyInference.Engine</c>.
+/// <summary>SwarmUI backend that runs inference in-process through <c>HartsyInference.Engine</c>.
 ///
 /// <para>This class is a <b>thin mapper</b> and nothing more. The Engine is the single source of truth for
 /// "load a model + generate": it owns architecture detection, per-family recipes, pipeline caching, side-model
 /// download, composition (LoRA / ControlNet / IP-Adapter / refiner / img2img / inpaint / regional) and sampling
 /// defaults. The four things that remain SwarmUI's problem, and therefore ours, are:</para>
 /// <list type="number">
-/// <item><b>Load</b> — resolve a <see cref="T2IModel"/> to a checkpoint path and an Engine <see cref="ModelSpec"/>.</item>
-/// <item><b>Map request</b> — the only place <c>input.Get(T2IParamTypes.*)</c> is read; produces an
+/// <item><b>Load</b>: resolve a <see cref="T2IModel"/> to a checkpoint path and an Engine <see cref="ModelSpec"/>.</item>
+/// <item><b>Map request</b>: the only place <c>input.Get(T2IParamTypes.*)</c> is read; produces an
 /// <see cref="ImageRequest"/> / <see cref="VideoRequest"/> / <see cref="MusicRequest"/>.</item>
-/// <item><b>Stream progress</b> — bridge <see cref="StepPreview"/> onto Swarm's <c>takeOutput</c> contract.</item>
-/// <item><b>Map result</b> — Engine pixels/frames/samples back into a SwarmUI <see cref="Image"/>.</item>
+/// <item><b>Stream progress</b>: bridge <see cref="StepPreview"/> onto Swarm's <c>takeOutput</c> contract.</item>
+/// <item><b>Map result</b>: Engine pixels/frames/samples back into a SwarmUI <see cref="Image"/>.</item>
 /// </list>
 /// </summary>
 public class HartsyInferenceBackend : AbstractT2IBackend
 {
-    /// <summary>Settings persisted to Data/Backends.fds. Must be nested inside the
-    /// backend class so BackendHandler.RegisterBackendType discovers it via reflection.</summary>
+    /// <summary>Settings saved to Data/Backends.fds. Nested in the backend class so BackendHandler.RegisterBackendType can find it by reflection.</summary>
     public class HartsyInferenceBackendSettings : AutoConfiguration
     {
         [ConfigComment("Compute backend to use.\n'Auto' (default) tries CUDA, then Vulkan, then CPU. Vulkan is how a non-NVIDIA GPU (AMD, Intel) gets used, so 'Auto' does not mean 'CUDA or nothing'.\nOnly options this machine can actually use are offered here: 'Cuda' only appears when an NVIDIA GPU is present AND a real test computation on it succeeds, not just that a driver reports a device (this catches a kernel built for the wrong GPU architecture, a missing PTX directory, or a driver/toolkit mismatch, before it surfaces mid-generation instead of here).\n'Vulkan' only appears when a real Vulkan GPU is present. Software rasterizers such as Mesa's lavapipe enumerate as Vulkan devices but are CPU implementations of it, slower than the CPU backend, so they do not count as a GPU here.\nThis list is built once per SwarmUI process start. If you plug in a GPU or fix a driver, restart SwarmUI to see it here.")]
@@ -93,22 +97,13 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         public string AutoUpdate = "false";
     }
 
-    /// <summary>Builds the ComputeBackend dropdown from whatever kinds the engine reports
-    /// (<see cref="BackendFactory.ValidSelectors"/>) rather than a hardcoded list, filtered to what this machine
-    /// can actually use: 'auto' and 'cpu' always qualify, 'vulkan' can't be cheaply probed ahead of time so it
-    /// always qualifies too, and 'cuda' only qualifies when <see cref="BackendFactory.ProbeCuda"/> runs a real
-    /// test computation on the GPU and gets the right answer, not just that a driver reports a device exists.
-    /// Mirrors AudioLab's AudioDeviceOptions, minus the per-GPU-ordinal expansion: this backend already has its
-    /// own separate GPU_ID setting for picking a device, so ComputeBackend only needs to offer the KIND.
-    /// Evaluated once and cached for the process lifetime: a probe is a real GPU context and kernel launch, and
-    /// the answer cannot change without a restart.</summary>
+    /// <summary>Builds the ComputeBackend dropdown from the kinds this machine can use, using <see cref="BackendFactory.ValidSelectors"/>.</summary>
+    /// <remarks>Offers kinds only: GPU_ID already picks the device. Cached for the process, since a probe creates a real GPU context.</remarks>
     public class ComputeBackendOptions : SettingsOptionsAttribute.AbstractImpl
     {
         private static readonly Lazy<(string[] Vals, string[] Names)> _options = new(Build);
 
-        /// <summary>Friendly labels for the kinds we know about today. Anything the engine adds later (Metal,
-        /// AMD/ROCm, Arc/oneAPI, ...) falls back to its own token, so an unknown kind is still selectable, just
-        /// plainly named, with no change needed here.</summary>
+        /// <summary>Friendly labels for known kinds. Any other kind is shown under the engine's own token.</summary>
         private static readonly Dictionary<string, string> KindLabels = new(StringComparer.OrdinalIgnoreCase)
         {
             ["auto"] = "Auto (recommended)",
@@ -132,7 +127,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             }
             if (vals.Count == 0)
             {
-                // Nothing validated (e.g. engine assemblies not resolvable yet). 'auto' always resolves
+                // Nothing validated (e.g. engine assemblies not resolvable). 'auto' always resolves
                 // (falls back to CPU), so never ship an empty dropdown.
                 vals.Add("auto");
                 names.Add(KindLabels["auto"]);
@@ -140,13 +135,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             return ([.. vals], [.. names]);
         }
 
-        /// <summary>'cuda' gets the strong check (an actual GPU computation, not just driver presence, per the
-        /// engine's "ask whether the GPU works, not whether one exists" probe). Every other kind gets
-        /// <see cref="BackendFactory.Validate"/>, which is not merely syntactic any more: since alpha.158 it asks
-        /// Vulkan for a real device and excludes software rasterizers, so 'vulkan' no longer needs its own
-        /// <c>ProbeVulkan</c> branch here to stop being offered on a machine that has no Vulkan GPU. A device that
-        /// enumerates but cannot meet the engine's shader requirements would still be listed; that is the gap a
-        /// ProbeVulkan branch would close, and it is narrower than the one Validate now covers.</summary>
+        /// <summary>'cuda' needs a real GPU computation, not just driver presence. Other kinds use <see cref="BackendFactory.Validate"/>.</summary>
         private static bool IsUsable(string kind)
         {
             if (!kind.Equals("cuda", StringComparison.OrdinalIgnoreCase))
@@ -158,16 +147,13 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             {
                 // Warning, not Debug: hiding an option the user would otherwise expect deserves a visible reason.
                 string why = Guard(() => BackendFactory.CudaProbeFailureReason, "CUDA probe reason") ?? "no reason reported";
-                Logs.Warning($"[HartsyInference] ComputeBackend dropdown: excluding 'cuda': {why}");
+                HartsyLogs.Warning($"ComputeBackend dropdown: excluding 'cuda': {why}");
             }
             return ok;
         }
 
-        /// <summary>Enriches the CUDA label with the actual card name via the engine's own <see cref="CudaTopology"/>.
-        /// Deliberately NOT SwarmUI's <see cref="NvidiaUtil"/> (nvidia-smi): this file's own GPU_ID remark records
-        /// ordinal 0 as the 4090 while nvidia-smi index 0 is the 3060 on the dev box, so naming the card from
-        /// nvidia-smi output would name the WRONG physical GPU whenever the two orderings disagree. CudaTopology is
-        /// ordinal-ordered, matching what ComputeBackend+GPU_ID actually selects.</summary>
+        /// <summary>Names the CUDA card from the engine's <see cref="CudaTopology"/>, which is in CUDA ordinal order.</summary>
+        /// <remarks>Not <see cref="NvidiaUtil"/>: nvidia-smi index order can differ from CUDA ordinals, so it could name the wrong card.</remarks>
         private static string Label(string kind)
         {
             string baseLabel = KindLabels.TryGetValue(kind, out string label) ? label : kind;
@@ -185,9 +171,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             return $"CUDA ({detected})";
         }
 
-        /// <summary>Runs a probe that must never take the whole settings schema down with it: a throw here (no
-        /// engine loaded, no driver, a probe timeout) is the answer "not usable", not a fault worth surfacing to
-        /// the user. Returns default on failure.</summary>
+        /// <summary>Runs a probe. A throw (no engine, no driver, timeout) means "not usable", so this returns default instead.</summary>
         private static T Guard<T>(Func<T> probe, string what)
         {
             try
@@ -196,7 +180,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             }
             catch (Exception ex)
             {
-                Logs.Debug($"[HartsyInference] ComputeBackend dropdown: {what} failed ({ex.Message}).");
+                HartsyLogs.Debug($"ComputeBackend dropdown: {what} failed ({ex.Message}).");
                 return default;
             }
         }
@@ -211,10 +195,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     /// <summary>The Engine facade. Owns the compute backend, every loaded pipeline, and all generation.</summary>
     private InferenceEngine _engine;
 
-    /// <summary>Device used by the model-driven ControlNet annotators (Depth / OpenPose / SoftEdge / …). Normally
-    /// borrowed from the Engine (<c>InferenceEngine.ComputeBackend</c>) — a second backend on the same device would
-    /// collide with the Engine's per-context CUDA state and its disposal would evict the Engine's resident weights.
-    /// Only when no Engine exists is a standalone device created (and then owned + disposed by us).</summary>
+    /// <summary>Device for the ControlNet annotators: borrowed from the Engine when one exists, else created and owned here.</summary>
+    /// <remarks>Borrowing avoids a second CUDA context on the same device, which would collide with the Engine's state.</remarks>
     private IBackend _preprocessBackend;
     private bool _ownsPreprocessBackend;
     private readonly object _preprocessBackendLock = new();
@@ -222,48 +204,29 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     /// <summary>Cancellation source for the in-flight generation.</summary>
     private CancellationTokenSource _cancelCts;
 
-    /// <summary>Serializes generations so a backend with <c>OverQueue &gt; 0</c> (MaxUsages &gt; 1) accepts
-    /// extra requests into a queue but still runs them ONE AT A TIME. The Engine's caches and device are shared
-    /// across a generation, so concurrent execution would collide — this lock makes the over-queue safe by holding
-    /// extra dispatched jobs here until the current one finishes.</summary>
+    /// <summary>Runs generations one at a time, even when OverQueue lets jobs wait here, since the Engine's caches and device are shared.</summary>
     private readonly SemaphoreSlim _genLock = new(1, 1);
 
-    /// <summary>This backend's physical device plus every setting that changes a memory verdict, as registered in
-    /// <see cref="BackendDeviceRegistry"/>. Backends sharing a key get one fit assessment per request between them.
-    /// Null until the first successful Init; kept across Shutdown so a reload that changes settings can forget the
-    /// out-of-memory evidence gathered under the old key.</summary>
+    /// <summary>The device plus every setting that changes a memory verdict, as registered in <see cref="BackendDeviceRegistry"/>. Null before the first successful Init.</summary>
+    /// <remarks>Backends sharing a key share one fit assessment. Kept across Shutdown, so a settings change can forget the old key's out-of-memory evidence.</remarks>
     public string FitProfileKey { get; private set; }
 
-    /// <summary>What <see cref="Init"/>'s probe resolved <c>ComputeBackend</c> to, so callers that build their own
-    /// device do not re-derive it through the cheap <see cref="BackendFactory.Resolve"/> and land somewhere else.
-    /// Null until a successful Init, which is why readers fall back to the raw setting.</summary>
-    /// <remarks>Volatile because <see cref="PreprocessBackend"/> reads it under its own lock while <see cref="Init"/>
-    /// writes it under none. Init finishes before any generation today, so this documents the ordering rather than
-    /// fixing a live race.</remarks>
+    /// <summary>The compute kind <see cref="Init"/>'s probe resolved, so device builders do not re-derive it via the cheaper <see cref="BackendFactory.Resolve"/>. Null before Init.</summary>
+    /// <remarks>Volatile: <see cref="PreprocessBackend"/> reads it under its own lock while Init writes it unlocked. Init completes before any generation.</remarks>
     private volatile string _resolvedComputeKind;
 
-    /// <summary>Every feature flag this backend advertises. Static so the startup self-check in
-    /// <c>SwarmUIHartsyInference</c> can compare it against the flags our registered params actually carry —
-    /// <see cref="T2IEngine"/> refuses any job whose required flags this set does not cover (unless the flag is in
-    /// <c>T2IEngine.DisregardedFeatureFlags</c>), and that refusal names no param, so a flag added to a param and
-    /// forgotten here is invisible until someone's generation stops working.</summary>
+    /// <summary>Every feature flag this backend advertises. Static so the startup self-check in <c>HartsyInference</c> can compare it with our registered params' flags.</summary>
+    /// <remarks><see cref="T2IEngine"/> refuses any job whose required flags this set does not cover (unless listed in <c>T2IEngine.DisregardedFeatureFlags</c>).
+    /// That refusal names no param, so a flag added to a param and missed here shows up only as a refused generation.</remarks>
     public static readonly IReadOnlyList<string> DeclaredFeatures =
     [
-        // We advertise "comfyui" so that, when a Comfy backend is ALSO configured, requests
-        // carrying Comfy-tagged params reach our validator instead of being pre-filtered out
-        // by T2IEngine's flag check. SwarmUI can't split one request across two backends, so
-        // a request that picked up both "comfyui" (from Comfy's shared params, eg Sampler) and
-        // "hartsyinference" would otherwise match NEITHER backend and refuse the generation
-        // entirely (Comfy lacks "hartsyinference", we lack "comfyui").
-        //
-        // Honesty is enforced one layer down: IsValidForThisBackend refuses any comfyui-only
-        // param we can't actually service, and every composition feature is checked against the
-        // Engine recipe's own declared ImageFeatures — so advertising a flag here never means
-        // "we silently serve everything tagged with it".
+        // "comfyui" lets Comfy-tagged params (e.g. Sampler) reach our validator. SwarmUI cannot split one request across
+        // backends, so a request carrying both flags would otherwise match neither. Advertising is not a promise:
+        // IsValidForThisBackend refuses comfyui-only params we cannot service, and composition features are checked per recipe.
         "hartsyinference",
         "comfyui",
         "text2image",
-        "flux-dev",       // in DisregardedFeatureFlags — informational
+        "flux-dev",       // listed in DisregardedFeatureFlags (informational)
         "lora",           // per-family; gated by the recipe's ImageFeatures.Lora
         "endstepsearly",  // ImageRequest.EndStepsEarly
         "refiners",       // per-family; gated by ImageFeatures.Refiner
@@ -274,9 +237,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         "variation_seed", // per-family; gated by ImageFeatures.VariationSeed
         "seamless",       // SeamlessTileable (shared core param, own flag); per-family, gated by ImageFeatures.SeamlessTiling
         "video",          // Wan (T2V/I2V + VACE / Animate / S2V) + LTX-Video + LTX-2 + Lance Video + MiniMax-H3
-        // Model-scoped UI flags. Granted/removed per selected model by Assets/hartsy-params.js; declared here
-        // because a param's flag is a hard requirement at backend-selection time (T2IEngine), so a flag the UI
-        // can set but we don't advertise refuses the generation with a message naming no param.
+        // Model-scoped UI flags, granted per selected model by Assets/hartsy-params.js. T2IEngine needs them declared here.
         "hartsy_ideogram4",
         "hartsy_acestep",
         "hartsy_minimaxmusic",
@@ -288,9 +249,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
 
     public override IEnumerable<string> SupportedFeatures => DeclaredFeatures;
 
-    /// <summary>Bridges HartsyInference's internal logger into Swarm's logging system so
-    /// diagnostics like the OOM probe in CudaMemory.Allocate appear in the main log file
-    /// instead of falling into Console.Error. Idempotent — safe to call multiple times.</summary>
+    /// <summary>Bridges HartsyInference's logger into Swarm's log, so engine diagnostics (such as the OOM probe) reach the main log file. Idempotent.</summary>
     private static int _loggerWired = 0;
 
     private static void EnsureLoggerWired()
@@ -299,19 +258,18 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         {
             return;
         }
-        // Don't double-filter: set HartsyInference's level to Verbose so every message reaches the
-        // bridge, and let Swarm's own MinimumLevel decide what actually appears.
-        SiLogs.MinLevel = HartsyInference.Core.Logging.LogLevel.Verbose;
+        // Pass everything through the bridge; Swarm's MinimumLevel does the filtering.
+        SiLogs.MinLevel = EngineLogLevel.Verbose;
         SiLogs.SetLogger((level, msg) =>
         {
             switch (level)
             {
-                case HartsyInference.Core.Logging.LogLevel.Verbose: Logs.Verbose(msg); break;
-                case HartsyInference.Core.Logging.LogLevel.Debug: Logs.Debug(msg); break;
-                case HartsyInference.Core.Logging.LogLevel.Info: Logs.Info(msg); break;
-                case HartsyInference.Core.Logging.LogLevel.Warning: Logs.Warning(msg); break;
-                case HartsyInference.Core.Logging.LogLevel.Error: Logs.Error(msg); break;
-                default: Logs.Info(msg); break;
+                case EngineLogLevel.Verbose: HartsyLogs.Verbose(msg, "Engine"); break;
+                case EngineLogLevel.Debug: HartsyLogs.Debug(msg, "Engine"); break;
+                case EngineLogLevel.Info: HartsyLogs.Info(msg, "Engine"); break;
+                case EngineLogLevel.Warning: HartsyLogs.Warning(msg, "Engine"); break;
+                case EngineLogLevel.Error: HartsyLogs.Error(msg, "Engine"); break;
+                default: HartsyLogs.Info(msg, "Engine"); break;
             }
         });
     }
@@ -321,16 +279,14 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     public override async Task Init()
     {
         EnsureLoggerWired();
-        // Swarm owns the model-root setting. Pin the in-process engine to that exact resolved directory so its
-        // side-model locator and downloader share files with Comfy even when Swarm is launched outside the engine repo.
+        // Swarm owns the model root. Pin the engine to that resolved directory so side-model files are shared with Comfy.
         KnobStore.Set(EngineKnobs.ModelsRoot, Program.ServerSettings.Paths.ActualModelRoot);
         if (await MaybeAutoUpdateEngine())
         {
-            // A newer engine was staged but can't hot-swap into this process. Fail loud instead of
-            // silently serving the stale in-process version — the user must restart to load it.
+            // A staged engine update cannot hot-swap into this process, so fail loudly rather than serve the old version.
             Status = BackendStatus.ERRORED;
             AddLoadStatus("Engine update staged — RESTART SwarmUI to load the new engine. This backend is disabled until you restart.");
-            Logs.Warning("[HartsyInference] Backend disabled: a newer engine is staged. Restart SwarmUI to load it (set AutoUpdate=aggressive to auto-restart).");
+            HartsyLogs.Warning("Backend disabled: a newer engine is staged. Restart SwarmUI to load it (set AutoUpdate=aggressive to auto-restart).");
             return;
         }
         try
@@ -339,9 +295,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             int? deviceOrdinal = ParseGpuId(Settings?.GPU_ID);
             VramPolicy? vramPolicy = ParseVramSetting(Settings?.LowVram);
 
-            // Kernels ship in our extension's own output dir, NOT Swarm's main runtime dir. The Engine's
-            // BackendFactory already resolves relative to the engine assemblies (which live beside us), so
-            // an override is only needed when the operator moved them.
+            // Kernels live in the extension's output dir. BackendFactory resolves them beside the engine assemblies,
+            // so the override is only for operators who moved them.
             if (!string.IsNullOrWhiteSpace(Settings?.KernelDirectory))
             {
                 BackendFactory.KernelDirOverride = Settings.KernelDirectory;
@@ -350,8 +305,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             string spvDir = BackendFactory.KernelDir(BackendFactory.SpirvDirName);
             AddLoadStatus($"Kernel paths: PTX={ptxDir} (exists={Directory.Exists(ptxDir)}), SPIR-V={spvDir} (exists={Directory.Exists(spvDir)})");
 
-            // Fail HERE (backend shows ERRORED with the reason) instead of on the first generation: the engine
-            // constructs its device lazily, so a bad GPU_ID would otherwise report RUNNING and die mid-request.
+            // Validate here so a bad device shows ERRORED now, not on the first generation (the engine builds its device lazily).
             BackendFactory.Validate(BackendFactory.WithOrdinal(requested, deviceOrdinal ?? 0));
 
             // Optional split placement: text encoders on their own GPU. Validated eagerly like the main device.
@@ -386,10 +340,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 AddLoadStatus($"CFG uncond branch placed on {cfgParallelSelector}, concurrent with cond on GPU {deviceOrdinal ?? 0}.");
             }
 
-            // Optional Phase 8 DiT sharding: a large DiT's block loop split across two GPUs to pool VRAM (not a
-            // latency win — sequential pipeline split). Mutually exclusive with CfgParallelGpuId; the Engine
-            // rejects a PlacementConfig with both set (InferenceEngine ctor → PlacementPlanner.ValidatePlacement),
-            // which surfaces here as this method's outer catch setting Status = ERRORED with the reason.
+            // Optional DiT sharding: the block loop is split across two GPUs to pool VRAM. Exclusive with CfgParallelGpuId;
+            // the Engine rejects a placement with both set, which the outer catch reports as ERRORED.
             int? ditShardOrdinal = ParseGpuId(Settings?.DitShardGpuId);
             string ditShardSelector = null;
             bool enableDitSharding = false;
@@ -444,13 +396,9 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             // disagree about which device this backend is talking about.
             int ordinal = deviceOrdinal ?? 0;
 
-            // ResolveProbed, not Resolve: Resolve only asks whether a driver can see a device, which is true on a
-            // machine whose CUDA is installed but broken (skewed toolkit, kernels built for another architecture).
-            // That machine used to report RUNNING here and then fail on its first generation. Probing also picks up
-            // the Vulkan step, so an AMD/Intel box lands on its GPU instead of being told it has none.
-            // A throw is treated as "no usable GPU" rather than escaping: the broken-driver machine is exactly what
-            // the probe is for, so it is the likeliest to throw, and the generic catch below would report a raw
-            // exception instead of the refusal message this path exists to produce.
+            // ResolveProbed, not Resolve: Resolve only checks that a driver sees a device, which a broken CUDA install still passes.
+            // Probing also tries Vulkan, so AMD/Intel boxes land on their GPU. A throw counts as no usable GPU, so the refusal below
+            // is reported instead of a raw exception.
             string resolved;
             try
             {
@@ -458,7 +406,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             }
             catch (Exception ex)
             {
-                Logs.Warning($"[HartsyInference] Backend probe threw, treating as no usable GPU: {ex.Message}");
+                HartsyLogs.Warning($"Backend probe threw, treating as no usable GPU: {ex.Message}");
                 resolved = "cpu";
             }
 
@@ -468,43 +416,36 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             if (resolved == "cpu" && BackendFactory.Kind(requested) != "cpu")
             {
                 Status = BackendStatus.ERRORED;
-                // Both reasons, not just CUDA's: on a non-NVIDIA box the CUDA line is noise and the Vulkan line is
-                // the actionable one, and naming only CUDA is what sent AMD users off to fix a driver they do not
-                // have. Bracketed because neither reason is guaranteed to end in punctuation, and this message is
-                // the whole user-facing payoff of the change.
+                // Both reasons are shown: on a non-NVIDIA box the Vulkan reason is the actionable one. Brackets, since neither reason ends in punctuation.
                 string msg = $"No usable GPU, so compute='{requested}' resolved to CPU, and this backend refuses to "
                     + "start on CPU. The CPU backend cannot run fp8/bf16 image models (it is F32-only and will "
                     + $"corrupt memory). CUDA: [{CudaReason()}] Vulkan: [{VulkanReason()}] "
                     + "Fix whichever of those is closest to working, or set this backend's ComputeBackend to 'cpu' "
                     + "explicitly to override.";
                 AddLoadStatus(msg);
-                Logs.Error($"[HartsyInference] Backend #{BackendData?.ID} refusing CPU fallback: {msg}");
+                HartsyLogs.Error($"Backend #{BackendData?.ID} refusing CPU fallback: {msg}");
                 return;
             }
             _resolvedComputeKind = resolved;
 
             AddLoadStatus($"Constructing HartsyInference.Engine (compute='{requested}' resolved to '{resolved}', device={deviceOrdinal?.ToString() ?? "auto"})...");
             EngineOptions engineOptions = new EngineOptions { VramPolicy = vramPolicy, Placement = placement };
-            // The RESOLVED kind, not the raw setting: InferenceEngine builds through BackendFactory.Create, which
-            // routes 'auto' through the cheap Resolve. Handing it 'auto' after probing would let it build a device
-            // the probe just rejected, on the machines the probe exists for.
+            // The RESOLVED kind, not the raw setting: BackendFactory.Create would re-resolve 'auto' cheaply and could build a device the probe rejected.
             _engine = deviceOrdinal.HasValue
                 ? new InferenceEngine(resolved, deviceOrdinal.Value, engineOptions)
                 : new InferenceEngine(resolved, engineOptions);
-            // Asked for, not assumed: a selector that names no device lets the engine rank them, so this is the only
-            // thing that knows which card we are on. It builds the backend, so an explicit selector this machine
-            // cannot honor fails here rather than on the first generation.
+            // Asked, not assumed: a selector with no ordinal lets the engine rank devices, so only this call knows the card.
+            // It also builds the backend, so an unusable explicit selector fails here.
             (string Key, string Name) device = EngineDeviceIdentity();
             AddLoadStatus($"Engine ready: {_engine.BackendDescription}{(device.Key is null ? "" : $" on {device.Name ?? device.Key} [{device.Key}]")}");
+            HartsyLogs.Info($"Using '{resolved}' compute on {device.Name ?? device.Key ?? "the engine's default device"}.");
             // Everything besides the device that changes what fits: the tier and where the components run.
             string fitSettings = $"vram={Settings?.LowVram?.Trim().ToLowerInvariant()}|te={teSelector}|vae={vaeSelector}"
                 + $"|cfg={cfgParallelSelector}|shard={(enableDitSharding ? ditShardSelector : "")}";
             RegisterDeviceUsage(resolved, ordinal, device, fitSettings);
 
-            // MaxUsages is what the scheduler checks to decide when to route a request to a different
-            // backend (BackendHandler: in-use once Usages >= MaxUsages). Mirror ComfyUI's model:
-            // MaxUsages = 1 (the live gen) + OverQueue (extra waiting slots). OverQueue = -1 → MaxUsages 0
-            // → UI-only (no gens). The _genLock keeps the extra slots queued rather than concurrent.
+            // MaxUsages = one live generation + OverQueue waiting slots, as in ComfyUI. OverQueue -1 gives MaxUsages 0 (UI-only).
+            // The scheduler routes elsewhere once Usages reaches MaxUsages; _genLock keeps the extra slots queued.
             int overQueue = Math.Max(-1, Settings?.OverQueue ?? 0);
             MaxUsages = 1 + overQueue;
 
@@ -512,22 +453,20 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             // unavailable", which would make BackendHandler skip us for routing.
             Status = BackendStatus.RUNNING;
             AddLoadStatus($"Ready. Drivable image families: {string.Join(", ", RecipeRegistry.RegisteredNames)}.");
-            Logs.Init($"[HartsyInference] Backend #{BackendData?.ID} live ({_engine.BackendDescription})");
+            HartsyLogs.Init($"Backend #{BackendData?.ID} live ({_engine.BackendDescription})");
         }
         catch (Exception ex)
         {
             Status = BackendStatus.ERRORED;
             AddLoadStatus($"Init failed: {ex.Message}");
-            Logs.Error($"[HartsyInference] Backend #{BackendData?.ID} init failed: {ex}");
+            HartsyLogs.Error($"Backend #{BackendData?.ID} init failed: {ex.Message}");
+            HartsyLogs.Debug($"Backend #{BackendData?.ID} init failed in detail: {ex}");
             throw;
         }
     }
 
-    /// <summary>Registers this backend's device and engine with <see cref="BackendDeviceRegistry"/> — which is what
-    /// memory-aware routing (<see cref="ModelFitGate"/>) reads — and notes the sharing tradeoffs when another backend
-    /// is on the same device: co-residency means both models must fit in that GPU's VRAM together, and the engine
-    /// serializes same-device generations (per-backend state is fully isolated; concurrent same-GPU execution arrives
-    /// with the DeviceGate flip).</summary>
+    /// <summary>Registers this backend's device with <see cref="BackendDeviceRegistry"/>, which memory-aware routing (<see cref="ModelFitGate"/>) reads.</summary>
+    /// <remarks>Backends sharing a device must co-fit in its VRAM, and the engine runs their generations on it one at a time.</remarks>
     /// <param name="kind">An ALREADY-RESOLVED backend kind, never <c>auto</c>. Re-resolving here is what this
     /// signature exists to prevent: the cheap <see cref="BackendFactory.Resolve"/> can disagree with the probe
     /// <see cref="Init"/> ran, and this keys the registry, so it would name a device the engine is not on.</param>
@@ -540,20 +479,17 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     {
         try
         {
-            // Idempotent. Init runs again on this same instance whenever its settings are edited; the registry is keyed
-            // by instance, so re-registering replaces the old entry instead of counting this backend twice.
+            // Idempotent: Init reruns on this instance when settings change, and the registry is keyed by instance.
             string previousProfile = FitProfileKey;
             ReleaseDeviceUsage();
             if (!BackendFactory.IsDeviceKind(kind))
             {
                 return;
             }
-            // The engine's own answer first. The composed selector is the fallback, and goes through the factory's
-            // grammar rather than being spelled here, so one device cannot acquire two spellings.
+            // The engine's key first. The composed fallback uses the factory's grammar, so a device has one spelling.
             string key = device.Key ?? BackendFactory.CanonicalDeviceKey(BackendFactory.WithOrdinal(kind, ordinal));
             FitProfileKey = $"{key}|{fitSettings}";
-            // Reconfigured: whatever ran out of memory under the old settings says nothing about the new ones. A
-            // restart with unchanged settings keeps the evidence, which other backends sharing the profile gathered too.
+            // A changed profile forgets its out-of-memory evidence. An unchanged one keeps it, including evidence other backends gathered.
             if (previousProfile is not null && previousProfile != FitProfileKey)
             {
                 ModelFitGate.ForgetProfile(previousProfile);
@@ -562,8 +498,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 new BackendDeviceEntry(key, device.Name, FitProfileKey, fitSettings, _engine));
             if (live > 1)
             {
-                // Named, not just keyed: a Vulkan key is a device UUID, and telling someone their backends share
-                // 'vulkan:6d65...' does not tell them which of their cards to stop pointing at.
+                // Name the device too: a Vulkan key is a UUID, which does not say which card is shared.
                 string named = string.IsNullOrWhiteSpace(device.Name) ? key : $"{device.Name} [{key}]";
                 string warning = $"{live} HartsyInference backends now share one physical device: {named}. Their models " +
                     "must co-fit in that GPU's VRAM, and generations on this device run one at a time (the engine " +
@@ -571,12 +506,12 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                     "different GPU_IDs expecting different cards, note that under Vulkan the ordinal is the loader's raw " +
                     "device index and software rasterizers occupy indices, so two different numbers can land on one card.";
                 AddLoadStatus($"WARNING: {warning}");
-                Logs.Warning($"[HartsyInference] {warning}");
+                HartsyLogs.Warning($"{warning}");
             }
         }
         catch (Exception ex)
         {
-            Logs.Error($"[HartsyInference] Device-usage registration failed (non-fatal): {ex.Message}");
+            HartsyLogs.Warning($"Device-usage registration failed; memory-aware routing may not account for this backend's device: {ex.Message}");
         }
     }
 
@@ -586,29 +521,23 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         BackendDeviceRegistry.Release(this);
     }
 
-    /// <summary>The device the engine actually bound to, as a key to count by and a name to show; both null when
-    /// this engine build cannot say.</summary>
-    /// <remarks>Reflective for the reason given on <see cref="VulkanReason"/>: the property is newer than this file's
-    /// compile-time floor. Worth asking at all, rather than composing a key from our own settings, because the two
-    /// stopped agreeing once the engine gained device ranking. A backend that asked for <c>vulkan</c> runs on whichever
-    /// device ranked best, so a composed <c>vulkan:0</c> can name a card it is not on.
-    ///
-    /// <para>Reading it constructs the engine's backend, which is the point: an explicit <c>cuda</c>/<c>vulkan</c>
-    /// selector is never probed, so this is where a machine that cannot honor one says so, at startup and with a
-    /// reason, rather than midway through someone's first generation. The throw is unwrapped and left to
-    /// <see cref="Init"/>'s own handler.</para></remarks>
+    /// <summary>The device the engine bound to, as a key and a display name. Both are null when this engine build cannot say.</summary>
+    /// <remarks>Reflective, because the property is newer than the compile-time floor (see <see cref="VulkanReason"/>).
+    /// The engine ranks devices, so a composed <c>vulkan:0</c> can name a card the backend is not on.
+    /// Reading the key builds the backend, so an unusable explicit <c>cuda</c>/<c>vulkan</c> selector fails here with a reason.
+    /// The throw is unwrapped for <see cref="Init"/>'s handler.</remarks>
     private (string Key, string Name) EngineDeviceIdentity()
     {
         PropertyInfo prop = _engine?.GetType().GetProperty("DeviceKey", BindingFlags.Public | BindingFlags.Instance);
         if (prop is null)
         {
-            // An older engine: leave the backend lazy rather than forcing it to learn nothing.
+            // Engine build without DeviceKey: report nothing and keep the backend lazy.
             return (null, null);
         }
         try
         {
             string key = prop.GetValue(_engine) as string;
-            // Free now: reading the key above built the backend, so this cannot be what forces construction.
+            // Reading the key above already built the backend, so this does not force construction.
             return (key, _engine.ComputeBackend?.Capabilities?.Name);
         }
         catch (TargetInvocationException ex) when (ex.InnerException is not null)
@@ -639,9 +568,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             return false;
         }
         _engine.FreeMemory();
-        // Annotator weights live on the Engine's backend (borrowed), so the engine free above covers them; dropping
-        // the reference here re-borrows a fresh backend next use in case the engine rebuilt its device. A standalone
-        // annotator device (no engine) is disposed outright.
+        // Annotator weights live on the borrowed Engine backend, so the engine free covers them. Dropping the reference
+        // re-borrows a fresh backend next use, in case the engine rebuilt its device. A standalone device is disposed.
         DisposePreprocessBackend();
         if (systemRam)
         {
@@ -660,23 +588,14 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     }
 
     /// <summary>Why the Engine did not use CUDA, as a display string.</summary>
-    /// <remarks>Referenced directly, not reflectively. The reflection below exists so a local engine checkout older
-    /// than the pin still builds, but that protection only reaches back as far as the oldest API this file already
-    /// names at compile time, and <see cref="ComputeBackendOptions.IsUsable"/> names
-    /// <see cref="BackendFactory.ProbeCuda"/> and <see cref="BackendFactory.CudaProbeFailureReason"/> directly
-    /// (<c>Guard</c> catches throws, not missing members). So the floor is already that era, and routing CUDA's
-    /// reasons through reflection would buy nothing while implying a tolerance this file does not have.</remarks>
+    /// <remarks>Direct references, not reflection: <c>ComputeBackendOptions</c> already names these members at compile time, so reflection here would imply a tolerance this file lacks.</remarks>
     private static string CudaReason()
         => (BackendFactory.CudaUnavailableReason ?? BackendFactory.CudaProbeFailureReason)?.Trim()
             ?? "no reason reported";
 
     /// <summary>Why the Engine did not use Vulkan, as a display string.</summary>
-    /// <remarks>Reflective, because these two properties are newer than the compile-time floor described on
-    /// <see cref="CudaReason"/>: an engine between that floor and alpha.158 has no Vulkan reasons to give, and a
-    /// direct reference would stop it building rather than degrade. "Absent" and "present but null" are reported
-    /// differently on purpose: the first means this build cannot answer, and rendering it as "no reason reported"
-    /// would tell the user we looked and found nothing, which is the same misdirection this change removes for
-    /// AMD users being sent to fix CUDA.</remarks>
+    /// <remarks>Reflective, because these properties are newer than the compile-time floor (see <see cref="CudaReason"/>), and a direct reference would stop an older engine building.
+    /// A missing property is reported as unsupported, not as "no reason reported", which would claim the build looked and found nothing.</remarks>
     private static string VulkanReason()
     {
         PropertyInfo unavailable = typeof(BackendFactory)
@@ -691,12 +610,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         return (unavailable.GetValue(null) as string ?? probeFailure)?.Trim() ?? "no reason reported";
     }
 
-    /// <summary>Parses the configured GPU_ID into the device ordinal handed to the Engine. Swarm allows a
-    /// comma-separated list (one backend instance per device); a single Engine drives one device, so the first
-    /// entry wins. Null (blank/unparseable) lets the Engine pick its own default device.</summary>
-    /// <remarks><b>The ordinal is CUDA's, not <c>nvidia-smi</c>'s.</b> CUDA enumerates fastest-first by default, so
-    /// on a mixed-GPU host <c>GPU_ID=0</c> is the fastest card, which need not be <c>nvidia-smi</c>'s index 0.
-    /// Verified on the dev box: ordinal 0 is the RTX 4090 while <c>nvidia-smi</c> index 0 is the RTX 3060.</remarks>
+    /// <summary>Parses GPU_ID into the device ordinal handed to the Engine. Only the first entry of a comma-separated list is used; null lets the Engine choose.</summary>
+    /// <remarks><b>The ordinal is CUDA's, not <c>nvidia-smi</c>'s.</b> CUDA enumerates fastest-first, so on a mixed-GPU host <c>GPU_ID=0</c> may be a different card than <c>nvidia-smi</c> index 0.</remarks>
     private static int? ParseGpuId(string gpuId)
     {
         if (string.IsNullOrWhiteSpace(gpuId))
@@ -706,19 +621,15 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         string first = gpuId.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).FirstOrDefault() ?? "";
         if (!int.TryParse(first, out int ordinal) || ordinal < 0)
         {
-            Logs.Warning($"[HartsyInference] GPU_ID='{gpuId}' is not a valid device ordinal; letting the Engine choose.");
+            HartsyLogs.Warning($"GPU_ID='{gpuId}' is not a valid device ordinal; letting the Engine choose.");
             return null;
         }
         return ordinal;
     }
 
-    /// <summary>Maps the backend's VRAM setting to the engine's per-backend policy. Per-backend (not the old
-    /// <c>HARTSY_LOWVRAM</c> env var, which was process-wide last-writer-wins) so two backends on different-size
-    /// cards keep their own policies.</summary>
-    /// <remarks>The legacy <c>auto</c>/<c>on</c>/<c>off</c> spellings are still accepted so a saved
-    /// <c>Backends.fds</c> keeps working: <c>on</c> was "always stream", which is Aggressive, and <c>off</c> was
-    /// "never stream, fail instead", which is Performance. Returns null for Auto rather than an explicit Auto policy
-    /// — that leaves the backend inheriting the environment, which is what a host that configures nothing expects.</remarks>
+    /// <summary>Maps the backend's VRAM setting to the engine's per-backend policy, so backends on different cards keep their own.</summary>
+    /// <remarks>The older <c>auto</c>/<c>on</c>/<c>off</c> spellings still load from a saved <c>Backends.fds</c>: <c>on</c> is Aggressive and <c>off</c> is Performance.
+    /// Auto returns null, so the backend inherits the environment's policy.</remarks>
     private static VramPolicy? ParseVramSetting(string mode)
     {
         string normalized = string.IsNullOrWhiteSpace(mode) ? "auto" : mode.Trim().ToLowerInvariant();
@@ -733,11 +644,11 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         };
         if (tier is null && normalized != "auto")
         {
-            Logs.Warning($"[HartsyInference] LowVram='{mode}' is not recognized; using Auto. "
+            HartsyLogs.Warning($"LowVram='{mode}' is not recognized; using Auto. "
                 + "Valid: Auto, Performance, Balanced, Aggressive, Maximum.");
             normalized = "auto";
         }
-        Logs.Info($"[HartsyInference] VRAM mode: {(tier?.ToString() ?? "Auto")}"
+        HartsyLogs.Info($"VRAM mode: {(tier?.ToString() ?? "Auto")}"
             + (tier == VramTier.Performance ? " (models larger than VRAM will fail rather than stream)." : "."));
         return tier is VramTier resolved ? VramPolicy.For(resolved) : null;
     }
@@ -754,12 +665,11 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         string compat = model.ModelClass?.CompatClass?.ID;
         if (!ModelSupport.IsArchitectureSupported(compat))
         {
-            Logs.Warning($"[HartsyInference] LoadModel: architecture '{compat}' isn't drivable. Returning false so another backend can handle it.");
+            HartsyLogs.Debug($"LoadModel: architecture '{compat}' is not supported here. Returning false so another backend can handle it.");
             return false;
         }
-        // The Engine loads (and caches) the pipeline lazily inside its generate call, keyed on the checkpoint
-        // path plus the request's LoRA/component identity — there is no separate load step to drive here, and
-        // duplicating one would only fight its cache.
+        // The Engine loads and caches pipelines lazily inside generate, keyed on checkpoint path and LoRA/component identity.
+        // A separate load step would only fight its cache.
         CurrentModelName = model.Name;
         return true;
     }
@@ -785,14 +695,12 @@ public class HartsyInferenceBackend : AbstractT2IBackend
 
     public override async Task GenerateLive(T2IParamInput input, string batchId, Action<object> takeOutput)
     {
-        // Status stays RUNNING throughout — it's the resting healthy state, not a "currently busy" flag.
-        // BackendData.Usages is what tracks active utilization.
+        // Status stays RUNNING throughout: it is the resting healthy state. BackendData.Usages tracks active use.
         //
         // Serialize: when OverQueue > 0 the scheduler may dispatch multiple jobs to us; run them one at a
         // time. Acquire BEFORE touching _cancelCts so the per-gen token belongs to the job holding the GPU.
         await _genLock.WaitAsync();
-        // Link to the input's InterruptToken (session.SessInterrupt) so the gen-page "stop" button
-        // actually cancels us — that's the token Swarm trips on stop.
+        // Linked to the input's InterruptToken, which Swarm trips when the Stop button is pressed.
         _cancelCts = CancellationTokenSource.CreateLinkedTokenSource(input.InterruptToken);
         long startMs = Environment.TickCount64;
         try
@@ -811,7 +719,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             {
                 promptPreview = promptPreview[..80] + "…";
             }
-            Logs.Verbose($"[HartsyInference] Backend #{BackendData?.ID} accepted job batch='{batchId}' model='{model.Name}' "
+            HartsyLogs.Verbose($"Backend #{BackendData?.ID} accepted job batch='{batchId}' model='{model.Name}' "
                 + $"compat='{compat}' family='{family.Id}' ({family.Kind}) prompt=\"{promptPreview}\"");
 
             CurrentModelName = model.Name;
@@ -833,10 +741,9 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             }
             catch (OutOfVramException first) when (!cancel.IsCancellationRequested)
             {
-                // Worth exactly one retry: the usual cause is a pipeline cached from an earlier, larger model still
-                // holding VRAM this request needs, which FreeMemory releases. A second failure is the real thing —
-                // this request does not fit — so it becomes a readable refusal rather than another retry.
-                Logs.Warning($"[HartsyInference] {first.Message} Freeing cached models and retrying once.");
+                // One retry: a pipeline cached from an earlier, larger model often holds VRAM this request needs, and FreeMemory releases it.
+                // A second failure means the request does not fit.
+                HartsyLogs.Warning($"{first.Message} Freeing cached models and retrying once.");
                 await FreeMemory(false);
                 try
                 {
@@ -844,11 +751,10 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 }
                 catch (OutOfVramException second)
                 {
-                    // Genuinely too big for this card at this size. Record it so routing skips this card (and any
-                    // no larger) for this workload, then let Swarm re-route when a larger card is still available.
+                    // Too big for this card: record it so routing skips this card and any with no more memory, then let Swarm re-route.
                     if (ModelFitGate.RecordFailure(input, this))
                     {
-                        Logs.Warning($"[HartsyInference] {second.Message} Redirecting '{model.Name}' to a GPU with more memory.");
+                        HartsyLogs.Warning($"{second.Message} Redirecting '{model.Name}' to a GPU with more memory.");
                         throw new PleaseRedirectException();
                     }
                     throw new SwarmReadableErrorException(DescribeVramFailure(second, family));
@@ -860,10 +766,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             }
             catch (NotSupportedException unsupported)
             {
-                // Backstop for a sampler/schedule refusal ValidateSamplingChoice did not pre-empt. Three families
-                // accept a selection on text-to-image but not on a secondary path (Boogu's reference-edit loop,
-                // OmniGen 2's edit loop, Flux.1's non-drain-free path), which is a per-REQUEST property the
-                // capability table cannot express. Surfacing the Engine's own message beats an unhandled throw.
+                // Backstop for sampler/schedule refusals ValidateSamplingChoice missed. Some families accept a selection on
+                // text-to-image but not on a secondary path (Boogu, OmniGen 2, Flux.1), which the capability table cannot express.
                 throw new SwarmUserErrorException($"HartsyInference: {unsupported.Message}");
             }
 
@@ -871,7 +775,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             int idx = 0;
             foreach (Image img in outputs)
             {
-                Logs.Verbose($"[HartsyInference] Yielding output {idx + 1}/{outputs.Length} batch='{batchId}' "
+                HartsyLogs.Verbose($"Yielding output {idx + 1}/{outputs.Length} batch='{batchId}' "
                     + $"(genTime={totalMs}ms, bytes={img.RawData?.Length ?? 0})");
                 takeOutput(new T2IEngine.ImageOutput
                 {
@@ -881,19 +785,18 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 });
                 idx++;
             }
-            Logs.Verbose($"[HartsyInference] Job batch='{batchId}' complete: {outputs.Length} output(s) in {totalMs}ms.");
+            HartsyLogs.Debug($"Job batch='{batchId}' complete: {outputs.Length} output(s) in {totalMs}ms.");
         }
         catch (OperationCanceledException)
         {
-            Logs.Info("[HartsyInference] Generation cancelled by user.");
+            HartsyLogs.Info("Generation cancelled by user.");
         }
         finally
         {
             _cancelCts?.Dispose();
             _cancelCts = null;
             _genLock.Release(); // hand the GPU to the next queued generation, if any
-            // No Status change here: we stay RUNNING (alive+ready) regardless of whether the generation
-            // succeeded. ERRORED would be wrong — the backend is healthy, only this one request failed.
+            // No Status change: the backend stays RUNNING even when this generation failed, since only this request is at fault.
         }
     }
 
@@ -905,13 +808,9 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         ImageResult result = await _engine.Images.GenerateAsync(spec, request, progress, cancel);
         byte[] rgb = result.Rgb;
         int width = result.Width, height = result.Height;
-        // Every pass below runs on whatever the engine returned — including the untouched init image an
-        // Init Image Creativity of 0 short-circuits to — so a tool can ask for "just remove the background" or
-        // "just upscale" without paying for a denoise it does not want.
-        // Optional SeedVR2 restore/upscale pass over the still (same param group as the video path). No
-        // FreeMemory here: RestoreService frees on pipeline load, and evicting a cached image model every
-        // generation would defeat the pipeline cache.
-        if (input.TryGet(SwarmUIHartsyInference.RestoreModelParam, out string restoreModel)
+        // Passes below run on the engine's output, even when Init Image Creativity 0 returns the init image untouched.
+        // Optional SeedVR2 restore pass. No FreeMemory here: RestoreService frees on pipeline load, and evicting cached models every generation would defeat the cache.
+        if (input.TryGet(HartsyInference.RestoreModelParam, out string restoreModel)
             && !string.IsNullOrWhiteSpace(restoreModel))
         {
             (rgb, width, height) = await RestoreStill(restoreModel, rgb, width, height, BuildRestoreKnobs(input), progress, cancel);
@@ -946,12 +845,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     /// <summary>The Refiner Upscale Method value that routes the pixel-space pass to SeedVR2 instead of Real-ESRGAN.</summary>
     private const string SeedVr2UpscaleMethod = "seedvr2";
 
-    /// <summary>Resolves a catalog model for an auxiliary pass (SeedVR2, Real-ESRGAN, RMBG) and fetches any asset its
-    /// catalog entry lists that is not on disk yet — the "weights are fetched on first use" the Restore group has
-    /// promised. The engine deliberately never downloads at generate time (its CLI asks first), which is why a
-    /// missing SeedVR2 checkpoint used to surface as T2IEngine's bare "Something went wrong": the
-    /// <see cref="FileNotFoundException"/> it threw was not a readable error. A missing id, a failed download and a
-    /// gated repo without an <c>HF_TOKEN</c> in this process's environment all become one here.</summary>
+    /// <summary>Resolves a catalog model for an auxiliary pass (SeedVR2, Real-ESRGAN, RMBG), fetching any missing assets on first use.</summary>
+    /// <remarks>The engine never downloads at generate time, so a missing id, a failed download or a gated repo (which needs <c>HF_TOKEN</c>) becomes one readable error.</remarks>
     private static async Task<ModelSpec> ResolveAuxModel(string id, Modality modality, CancellationToken cancel)
     {
         ModelSpec spec = ModelResolver.Resolve(id, null, modality);
@@ -970,7 +865,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             return spec;
         }
         string files = string.Join(", ", missing.Select(a => $"{a.Repo}/{a.RepoPath}"));
-        Logs.Info($"[HartsyInference] {spec.Catalog.DisplayName}: fetching {missing.Count} file(s) on first use — {files}");
+        HartsyLogs.Info($"{spec.Catalog.DisplayName}: fetching {missing.Count} file(s) on first use ({files}).");
         try
         {
             Dictionary<string, int> lastBucket = new();
@@ -980,9 +875,10 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 if (bucket > lastBucket.GetValueOrDefault(asset.FileName, -1))
                 {
                     lastBucket[asset.FileName] = bucket;
-                    Logs.Info($"[HartsyInference] {asset.FileName}: {fraction * 100:0}%");
+                    HartsyLogs.Debug($"Downloading '{asset.FileName}': {fraction * 100:0}%");
                 }
             }, cancel);
+            HartsyLogs.Info($"{spec.Catalog.DisplayName}: finished fetching {missing.Count} file(s).");
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -994,8 +890,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         return ModelResolver.Resolve(id, null, modality);
     }
 
-    /// <summary>SeedVR2 over one still, with the engine's own failure text kept readable (the HTTP API otherwise
-    /// collapses everything but a SwarmReadableErrorException into "Something went wrong").</summary>
+    /// <summary>SeedVR2 over one still, with the engine's failure text kept readable (the HTTP API otherwise shows "Something went wrong").</summary>
     private async Task<(byte[] Rgb, int Width, int Height)> RestoreStill(string restoreModel, byte[] rgb, int width, int height,
         RestoreRequest knobs, IProgress<StepPreview> progress, CancellationToken cancel)
     {
@@ -1020,10 +915,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         return (rgb, width, height);
     }
 
-    /// <summary>Refiner Upscale with no refiner model: enlarge the finished still by <paramref name="factor"/> in pixel
-    /// space. The Refiner Upscale Method value picks the engine (<see cref="ResolveUpscaleModel"/>); the engine fits the
-    /// result to <c>width×factor</c> by <c>height×factor</c> exactly (Real-ESRGAN runs whole model passes then resizes
-    /// down, SeedVR2 treats it as an area target). A factor below 1 is a plain shrink.</summary>
+    /// <summary>Refiner Upscale with no refiner model: enlarges the finished still by <paramref name="factor"/> in pixel space.</summary>
+    /// <remarks>The Refiner Upscale Method picks the engine (<see cref="ResolveUpscaleModel"/>). Real-ESRGAN runs model passes then resizes down, while SeedVR2 treats the size as an area target.</remarks>
     private async Task<(byte[] Rgb, int Width, int Height)> UpscaleStill(T2IParamInput input, double factor, byte[] rgb, int width, int height,
         IProgress<StepPreview> progress, CancellationToken cancel)
     {
@@ -1035,10 +928,10 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         }
         input.TryGet(ComfyUIBackendExtension.RefinerUpscaleMethod, out string method);
         string model = ResolveUpscaleModel(method, factor);
-        Logs.Info($"[HartsyInference] Refiner Upscale x{factor}: {width}x{height} → {targetWidth}x{targetHeight} via {model} (method '{method ?? "default"}').");
+        HartsyLogs.Debug($"Refiner upscale x{factor}: {width}x{height} to {targetWidth}x{targetHeight} via '{model}' (method '{method ?? "default"}').");
         if (model == SeedVr2UpscaleMethod)
         {
-            string restoreModel = input.TryGet(SwarmUIHartsyInference.RestoreModelParam, out string picked) && !string.IsNullOrWhiteSpace(picked)
+            string restoreModel = input.TryGet(HartsyInference.RestoreModelParam, out string picked) && !string.IsNullOrWhiteSpace(picked)
                 ? picked
                 : "seedvr2-3b";
             RestoreRequest knobs = BuildRestoreKnobs(input) with { TargetWidth = targetWidth, TargetHeight = targetHeight };
@@ -1057,12 +950,10 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         return (up.Rgb, up.Width, up.Height);
     }
 
-    /// <summary>Maps Comfy's Refiner Upscale Method value onto the pass this backend runs. Unset and the
-    /// <c>pixel-*</c> resamplers both become Real-ESRGAN (x2plus up to 2×, x4plus above — a model pass beats any
-    /// resampler for the same request); the extension's own <c>real-esrgan-*</c> / <c>seedvr2</c> entries are
-    /// literal; a <c>model-&lt;file&gt;</c> from Comfy's upscale_models folder picks the nearest Real-ESRGAN variant
-    /// by name, since that folder's arbitrary ESRGAN architectures are not loadable here. <c>latent-*</c> never
-    /// reaches this: <see cref="ValidateImageFeatures"/> refuses it without a refiner model.</summary>
+    /// <summary>Maps Comfy's Refiner Upscale Method onto the pass this backend runs.</summary>
+    /// <remarks>Unset and <c>pixel-*</c> become Real-ESRGAN (x2plus up to 2x, x4plus above, since a model pass beats a resampler).
+    /// <c>real-esrgan-*</c> and <c>seedvr2</c> are used as given. A <c>model-&lt;file&gt;</c> picks the nearest Real-ESRGAN variant by name,
+    /// as Comfy's ESRGAN architectures are not loadable here. <c>latent-*</c> never reaches this: <see cref="ValidateImageFeatures"/> refuses it without a refiner model.</remarks>
     private static string ResolveUpscaleModel(string method, double factor)
     {
         string m = (method ?? "").Trim().ToLowerInvariant();
@@ -1085,8 +976,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         return factor <= 2.0 + 1e-6 ? "real-esrgan-x2plus" : "real-esrgan-x4plus";
     }
 
-    /// <summary>RMBG-1.4 matte for the finished still: the engine's background removal returns the gray composite
-    /// the image→3D pipelines want plus the 8-bit alpha plane (engine 2.0.0-alpha.56+); only the plane is used here.</summary>
+    /// <summary>RMBG-1.4 matte for the finished still. Only the alpha plane of the engine's result is used.</summary>
+    /// <remarks>Needs engine 2.0.0-alpha.56 or newer.</remarks>
     private async Task<byte[]> RemoveBackground(byte[] rgb, int width, int height, CancellationToken cancel)
     {
         ModelSpec spec = await ResolveAuxModel("rmbg", Modality.Vision, cancel);
@@ -1103,8 +994,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         return alpha;
     }
 
-    /// <summary>One vision call with the engine's failure text kept readable; VRAM exhaustion and cancellation pass
-    /// through untouched so the retry-once and cancel paths in <c>GenerateAsync</c> still see them.</summary>
+    /// <summary>One vision call with readable failure text. VRAM and cancellation errors pass through so the retry and cancel paths still see them.</summary>
     private async Task<VisionResult> RunVision(ModelSpec spec, VisionRequest request, string label, CancellationToken cancel)
     {
         try
@@ -1120,9 +1010,9 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     /// <summary>The restore knobs shared by the still and video paths (target size, strength, seed).</summary>
     private static RestoreRequest BuildRestoreKnobs(T2IParamInput input) => new()
     {
-        TargetWidth = input.TryGet(SwarmUIHartsyInference.RestoreWidthParam, out int rw) ? rw : null,
-        TargetHeight = input.TryGet(SwarmUIHartsyInference.RestoreHeightParam, out int rh) ? rh : null,
-        Strength = input.TryGet(SwarmUIHartsyInference.RestoreStrengthParam, out double rst) ? (float)rst : null,
+        TargetWidth = input.TryGet(HartsyInference.RestoreWidthParam, out int rw) ? rw : null,
+        TargetHeight = input.TryGet(HartsyInference.RestoreHeightParam, out int rh) ? rh : null,
+        Strength = input.TryGet(HartsyInference.RestoreStrengthParam, out double rst) ? (float)rst : null,
         Seed = input.Get(T2IParamTypes.Seed, -1L) is long seed and >= 0 ? (int)(seed & 0x7FFFFFFF) : null,
     };
 
@@ -1132,22 +1022,13 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         VideoRequest request = BuildVideoRequest(input);
         string format = input.Get(T2IParamTypes.VideoFormat, "h264-mp4");
 
-        // Tier 3.5: stream frames straight to ffmpeg's stdin instead of buffering the whole clip, for the subset
-        // of requests that can't need the full clip in memory first — no boomerang/trim (need the final frame
-        // count / random access to reorder) and no audio (VideoAudioResolver.Resolve needs the final frame count
-        // too, to compute clip duration for trimming/looping the track). IVideoService.GenerateFramesAsync itself
-        // throws NotSupportedException for any family/variant that can't stream at all (as of 2026-08-11, only
-        // Wan's plain T2V/I2V-TI2V path) — caught below and falls back to the buffered path rather than refusing
-        // the generation outright, since these are core Swarm params a user may legitimately have set without
-        // knowing which families can stream.
+        // Stream frames straight to ffmpeg when nothing needs the whole clip in memory (no boomerang, trim, restore or audio).
+        // Families that cannot stream throw NotSupportedException, and those requests fall back to buffering.
         bool wantsBoomerang = input.Get(T2IParamTypes.VideoBoomerang, false);
         bool wantsTrim = input.Get(T2IParamTypes.TrimVideoStartFrames, 0) > 0 || input.Get(T2IParamTypes.TrimVideoEndFrames, 0) > 0;
-        bool wantsRestore = input.TryGet(SwarmUIHartsyInference.RestoreModelParam, out string restoreModelCheck) && !string.IsNullOrWhiteSpace(restoreModelCheck);
+        bool wantsRestore = input.TryGet(HartsyInference.RestoreModelParam, out string restoreModelCheck) && !string.IsNullOrWhiteSpace(restoreModelCheck);
         bool wantsAudio = input.Get(T2IParamTypes.VideoAudioInput) is not null;
-        // ...and no GENERATED soundtrack either. The streaming path pipes frames straight to ffmpeg and has no
-        // AudioTrack to give it, so a family that samples audio jointly with video would have its soundtrack
-        // silently dropped. Core's own HasJointAVLatents names exactly that set (LTX-2.x and MiniMax-H3), so this
-        // stays right as families are added rather than needing a list here.
+        // No generated soundtrack either: streaming has no AudioTrack, so one would be dropped. Core's HasJointAVLatents names those families.
         bool generatesAudio = input.Get(T2IParamTypes.Model)?.ModelClass?.CompatClass?.HasJointAVLatents == true;
         if (!wantsBoomerang && !wantsTrim && !wantsRestore && !wantsAudio && !generatesAudio)
         {
@@ -1157,7 +1038,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             }
             catch (NotSupportedException ex)
             {
-                Logs.Verbose($"[HartsyInference] Streaming generation not available ({ex.Message}); falling back to buffered.");
+                HartsyLogs.Debug($"Streaming generation not available ({ex.Message}); falling back to buffered.");
             }
         }
 
@@ -1175,14 +1056,9 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         {
             throw new InvalidOperationException("HartsyInference: the video pipeline produced no frames.");
         }
-        // Boomerang is NOT applied here: BuildVideoRequest already sets VideoRequest.VideoBoomerang, and every
-        // *RecipePipeline.Generate routes through VideoRecipeUtils.ToVideoFrames, which applies it before the
-        // frames ever leave _engine.Video.GenerateAsync above. Re-applying it here used to ping-pong the
-        // already-ping-ponged sequence (found scoping Tier 3.5 — see VideoRecipeUtilsFrameEditsTests.cs in the
-        // engine repo for the frame-count/order proof) instead of the single loop the user asked for.
-        // Optional SeedVR2 restore pass (Restore param group): frames go straight into the engine's
-        // restore service (no container round-trip), replacing the frame list before muxing.
-        if (input.TryGet(SwarmUIHartsyInference.RestoreModelParam, out string restoreModel)
+        // Boomerang is applied by the engine (VideoRecipeUtils.ToVideoFrames, via VideoRequest.VideoBoomerang), so it is not applied again here.
+        // Optional SeedVR2 restore pass: frames go straight to the restore service, with no container round-trip.
+        if (input.TryGet(HartsyInference.RestoreModelParam, out string restoreModel)
             && !string.IsNullOrWhiteSpace(restoreModel))
         {
             // The resident T2V DiT and SeedVR2's VAE peak cannot share 24 GB.
@@ -1191,8 +1067,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             RestoreRequest restoreRequest = BuildRestoreKnobs(input) with
             {
                 Frames = [.. frames.Select(f => new ImageData { Rgb = f, Width = width, Height = height })],
-                ClipFrames = input.TryGet(SwarmUIHartsyInference.RestoreClipFramesParam, out int rcf) ? rcf : 5,
-                Overlap = input.TryGet(SwarmUIHartsyInference.RestoreOverlapParam, out int rov) ? rov : 1,
+                ClipFrames = input.TryGet(HartsyInference.RestoreClipFramesParam, out int rcf) ? rcf : 5,
+                Overlap = input.TryGet(HartsyInference.RestoreOverlapParam, out int rov) ? rov : 1,
             };
             List<byte[]> restoredFrames = [];
             await foreach (VideoFrame restoredFrame in _engine.Restore.RestoreAsync(restoreSpec, restoreRequest, progress, cancel))
@@ -1205,18 +1081,14 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         }
         if (audio is not null && !VideoOutputEncoder.FormatSupportsAudio(format))
         {
-            Logs.Warning($"[HartsyInference] Video format '{format}' cannot carry audio; the {audio.SampleRate} Hz track is not muxed.");
+            HartsyLogs.Warning($"Video format '{format}' cannot carry audio, so the {audio.SampleRate} Hz track is dropped. Choose 'h264-mp4', 'h265-mp4', 'prores' or 'webm' to keep it.");
             audio = null;
         }
         return VideoOutputEncoder.Encode([.. frames], width, height, request.Fps ?? 25, format, cancel, audio);
     }
 
-    /// <summary>The streaming half of <see cref="GenerateVideo"/> (Tier 3.5): pulls frames from
-    /// <c>IVideoService.GenerateFramesAsync</c> and pipes them straight to <see cref="VideoOutputEncoder.EncodeStreamingAsync"/>
-    /// as they decode. Peeks exactly one frame to learn width/height (the encoder needs them before the first
-    /// write; the request's own Width/Height aren't reliable here — resolutions get snapped/defaulted per family)
-    /// and re-prepends it via a small local iterator so nothing is lost. No audio track — callers only reach this
-    /// when <c>VideoAudioInput</c> is unset, matching <see cref="GenerateVideo"/>'s eligibility gate.</summary>
+    /// <summary>The streaming path of <see cref="GenerateVideo"/>: pipes frames from <c>IVideoService.GenerateFramesAsync</c> into <see cref="VideoOutputEncoder.EncodeStreamingAsync"/> as they decode.</summary>
+    /// <remarks>Peeks one frame for width/height, since the request's own size is snapped per family. Callers only reach this with no audio track, matching the GenerateVideo gate.</remarks>
     private async Task<Image> GenerateVideoStreaming(ModelSpec spec, VideoRequest request, string format, IProgress<StepPreview> progress, CancellationToken cancel)
     {
         IAsyncEnumerator<VideoFrame> frames = _engine.Video.GenerateFramesAsync(spec, request, progress, cancel).GetAsyncEnumerator(cancel);
@@ -1226,16 +1098,12 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             throw new InvalidOperationException("HartsyInference: the video pipeline produced no frames.");
         }
         VideoFrame first = frames.Current;
-        // RgbFramesFrom takes ownership of `frames` from here: its own finally disposes it once
-        // EncodeStreamingAsync's `await foreach` drains it or unwinds — the compiler-generated disposal on an
-        // `await foreach` target runs in both cases, so there's no double-dispose or leak on either path.
+        // RgbFramesFrom takes ownership of `frames`: its finally disposes it once the encoder drains or unwinds the stream.
         return await VideoOutputEncoder.EncodeStreamingAsync(
             RgbFramesFrom(first, frames), first.Width, first.Height, request.Fps ?? 25, format, cancel);
     }
 
-    /// <summary>Yields <paramref name="first"/>'s RGB bytes, then the rest of <paramref name="remaining"/>'s —
-    /// the peek-and-reprepend glue <see cref="GenerateVideoStreaming"/> needs to learn width/height before
-    /// handing the stream to the encoder.</summary>
+    /// <summary>Yields <paramref name="first"/>'s RGB bytes, then the rest of <paramref name="remaining"/>: the peek-and-reprepend glue for <see cref="GenerateVideoStreaming"/>.</summary>
     private static async IAsyncEnumerable<byte[]> RgbFramesFrom(VideoFrame first, IAsyncEnumerator<VideoFrame> remaining)
     {
         try
@@ -1263,13 +1131,12 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         return new VideoOutputEncoder.AudioTrack { Left = left, Right = right, SampleRate = audio.SampleRate };
     }
 
-    /// <summary>Runs a music generation; the Engine returns an encoded WAV container, which Swarm carries as an
-    /// <see cref="Image"/> keyed by <see cref="MediaType.AudioWav"/> exactly like every other audio output.</summary>
+    /// <summary>Runs a music generation. The Engine returns an encoded WAV, carried as an <see cref="Image"/> keyed by <see cref="MediaType.AudioWav"/>.</summary>
     private async Task<Image> GenerateMusic(ModelSpec spec, T2IParamInput input, IProgress<StepPreview> progress, CancellationToken cancel)
     {
         MusicRequest request = BuildMusicRequest(input);
         AudioResult result = await _engine.Music.GenerateAsync(spec, request, progress, cancel);
-        Logs.Verbose($"[HartsyInference] Music: {result.DurationSeconds:0.0}s @ {result.SampleRate} Hz ({result.Format}).");
+        HartsyLogs.Verbose($"Music: {result.DurationSeconds:0.0}s @ {result.SampleRate} Hz ({result.Format}).");
         foreach (KeyValuePair<string, string> meta in result.Meta)
         {
             input.ExtraMeta[$"hartsy_{meta.Key}"] = meta.Value;
@@ -1277,10 +1144,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         return new Image(result.Data, MediaType.AudioWav);
     }
 
-    /// <summary>Bridges the Engine's <see cref="StepPreview"/> ticks onto Swarm's <c>takeOutput</c> progress
-    /// contract: every tick forwards a <c>{batch_index, overall_percent, current_percent}</c> JObject (or the
-    /// richer preview JObject when the Engine supplied preview pixels), and every 5% boundary also logs an
-    /// ASCII progress bar.</summary>
+    /// <summary>Bridges the Engine's <see cref="StepPreview"/> ticks onto Swarm's <c>takeOutput</c> progress contract, and logs a progress bar at each 5% step.</summary>
+    /// <remarks>Each tick sends a <c>{batch_index, overall_percent, current_percent}</c> JObject, or the richer preview JObject when the Engine supplied pixels.</remarks>
     private IProgress<StepPreview> BuildProgressBridge(string batchId, Action<object> takeOutput)
     {
         PreviewEncoder previewEncoder = new(Settings?.Previews ?? true);
@@ -1292,11 +1157,10 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             if (threshold != lastLoggedThreshold)
             {
                 lastLoggedThreshold = threshold;
-                Logs.Verbose($"[HartsyInference] Progress batch='{batchId}' {RenderProgressBar(overall)} step {p.Step}/{p.TotalSteps}");
+                HartsyLogs.Verbose($"Progress batch='{batchId}' {RenderProgressBar(overall)} step {p.Step}/{p.TotalSteps}");
             }
             JObject previewObj = previewEncoder.TryEncode(p, batchId, overall);
-            // When we have a preview encoded, send the richer JObject (preview + percent in one message —
-            // matches Comfy's contract). Otherwise just the percent.
+            // Send the preview JObject when one was encoded (preview and percent in one message, as Comfy does), else just the percent.
             takeOutput(previewObj ?? new JObject
             {
                 ["batch_index"] = batchId,
@@ -1306,8 +1170,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         });
     }
 
-    /// <summary>An <see cref="IProgress{T}"/> that invokes on the reporting thread. <see cref="Progress{T}"/>
-    /// would post to a captured SynchronizationContext and reorder (or drop) ticks fired from the sampler thread.</summary>
+    /// <summary>An <see cref="IProgress{T}"/> that runs on the reporting thread. <see cref="Progress{T}"/> would reorder or drop sampler ticks.</summary>
     private sealed class InlineProgress<T>(Action<T> handler) : IProgress<T>
     {
         private readonly Action<T> _handler = handler;
@@ -1315,8 +1178,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         public void Report(T value) => _handler(value);
     }
 
-    /// <summary>Renders an ASCII progress bar for log lines: <c>[████████░░░░░░░░░░░░] 40.0%</c>.
-    /// 20 cells wide so each cell is exactly 5% — matching the 5%-threshold log throttling.</summary>
+    /// <summary>Renders a text progress bar for log lines, such as <c>[████████░░░░░░░░░░░░] 40.0%</c>, 20 cells wide so each cell is 5%.</summary>
     private static string RenderProgressBar(double fraction, int width = 20)
     {
         fraction = Math.Clamp(fraction, 0.0, 1.0);
@@ -1330,15 +1192,14 @@ public class HartsyInferenceBackend : AbstractT2IBackend
 
     // ─────────────────────────────── 4. Request mapping ───────────────────────────────
     //
-    // Everything below is the ONLY place T2IParamTypes values are read. Each mapper produces one Engine-native
-    // request record; anything the Engine's flat contract doesn't name rides in the Extra bag under a documented
-    // key. Params we cannot express at all are refused in IsValidForThisBackend rather than silently dropped.
+    // T2IParamTypes values are read only in this section. Each mapper produces one Engine request record; anything the flat
+    // contract does not name rides in Extra under a documented key. Params we cannot express are refused in IsValidForThisBackend.
 
     /// <summary>Maps the Swarm request onto the Engine's <see cref="ImageRequest"/>.</summary>
     private ImageRequest BuildImageRequest(T2IParamInput input, ModelSupport.Family family)
     {
         string prompt = input.Get(T2IParamTypes.Prompt) ?? "";
-        if (family.Id == "ideogram4" && input.Get(SwarmUIHartsyInference.Ideogram4MagicPromptParam, false))
+        if (family.Id == "ideogram4" && input.Get(HartsyInference.Ideogram4MagicPromptParam, false))
         {
             // Ideogram 4 is trained on structured JSON captions; the expander rewrites a plain prompt through a
             // running LLM backend. Opt-in, and a no-op that returns the prompt unchanged when unavailable.
@@ -1346,14 +1207,13 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 prompt,
                 input.Get(T2IParamTypes.Width, DefaultImageSize),
                 input.Get(T2IParamTypes.Height, DefaultImageSize),
-                input.Get(SwarmUIHartsyInference.Ideogram4MagicPromptModelParam, ""),
+                input.Get(HartsyInference.Ideogram4MagicPromptModelParam, ""),
                 input.SourceSession,
-                msg => Logs.Verbose($"[HartsyInference][Ideogram4] {msg}"));
+                msg => HartsyLogs.Verbose($"[Ideogram4] {msg}"));
         }
         Image initImage = input.Get(T2IParamTypes.InitImage);
         Image maskImage = input.Get(T2IParamTypes.MaskImage);
-        // Where the recipe edits from references rather than adapting to them, prompt images are those references —
-        // the Init Image is the first, and these follow in the order the prompt refers to them.
+        // For reference-edit recipes, prompt images are the references: the Init Image comes first, then the prompt images in prompt order.
         bool refEditFamily = (ModelSupport.SupportedFeatures(input.Get(T2IParamTypes.Model)) & ImageFeatures.RefEdit) != 0;
         IReadOnlyList<ControlNetConditioning> controlNets = BuildControlNets(input, out List<(int Index, string UnionType)> unionTypes);
         return new ImageRequest
@@ -1363,20 +1223,17 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             Width = NullableInt(input, T2IParamTypes.Width),
             Height = NullableInt(input, T2IParamTypes.Height),
             Steps = NullableInt(input, T2IParamTypes.Steps),
-            // Core's existing toggle; the Engine now reads it too, to gate Krea 2's joint-attention prompt-weight patch.
+            // Core's toggle; the Engine also reads it, to gate Krea 2's joint-attention prompt-weight patch.
             ModelSpecificEnhancements = input.Get(T2IParamTypes.ModelSpecificEnhancements, true),
             CfgScale = input.TryGet(T2IParamTypes.CFGScale, out double cfg) ? (float)cfg : null,
-            CfgRescale = input.TryGet(SwarmUIHartsyInference.CfgRescaleParam, out double cfgRescale) ? (float)cfgRescale : null,
-            // Comfy's own TCFG param, not a duplicate of it: same paper (arXiv 2503.18137), same boolean, and
-            // ValidateComfyOnlyParams lets it through because "usetcfg" is in HonoredComfyParams.
+            CfgRescale = input.TryGet(HartsyInference.CfgRescaleParam, out double cfgRescale) ? (float)cfgRescale : null,
+            // Comfy's TCFG param (same paper, arXiv 2503.18137, same boolean). ValidateComfyOnlyParams passes it because "usetcfg" is in HonoredComfyParams.
             Tcfg = input.TryGet(ComfyUIBackendExtension.UseTCFG, out bool tcfg) ? tcfg : null,
             SeamlessTiling = input.TryGet(T2IParamTypes.SeamlessTileable, out string seamless) ? seamless : null,
             Seed = input.Get(T2IParamTypes.Seed, -1L),
             ClipSkip = NullableInt(input, T2IParamTypes.ClipStopAtLayer),
-            // Comfy's shared Sampler and Scheduler params, read as the two orthogonal selections they are — the
-            // Engine combines them (dpmpp_2m + karras => dpmpp_2m_karras) and every seam-carrying family honors both.
-            // ValidateSamplingChoice refuses a value this backend cannot run BEFORE generation, so Swarm can route
-            // that request to a Comfy backend instead of failing it.
+            // Comfy's Sampler and Scheduler are two orthogonal selections; the Engine combines them (dpmpp_2m + karras gives dpmpp_2m_karras).
+            // ValidateSamplingChoice refuses unsupported values before generation, so the request can route to Comfy.
             Sampler = input.Get(ComfyUIBackendExtension.SamplerParam, null),
             Scheduler = input.Get(ComfyUIBackendExtension.SchedulerParam, null),
             SigmaShift = input.TryGet(T2IParamTypes.SigmaShift, out double shift) ? shift : null,
@@ -1393,7 +1250,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             {
                 InitImage = ToEngineImage(initImage),
                 Creativity = input.Get(T2IParamTypes.InitImageCreativity, 0.6),
-                Mode = input.Get(SwarmUIHartsyInference.InitImageModeParam, "auto") switch
+                Mode = input.Get(HartsyInference.InitImageModeParam, "auto") switch
                 {
                     "denoise" => Img2ImgMode.Denoise,
                     "reference" => Img2ImgMode.Reference,
@@ -1438,8 +1295,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         return any ? overrides : null;
     }
 
-    /// <summary>Maps the Loras / LoraWeights / LoraTencWeights / LoraSectionConfinement parallel lists onto the
-    /// Engine's <see cref="LoraStack"/>. Names are resolved to on-disk paths through Swarm's LoRA model set.</summary>
+    /// <summary>Maps the Loras, LoraWeights, LoraTencWeights and LoraSectionConfinement lists onto the Engine's <see cref="LoraStack"/>.</summary>
     private static LoraStack BuildLoras(T2IParamInput input)
     {
         if (!input.TryGet(T2IParamTypes.Loras, out List<string> names) || names is null || names.Count == 0)
@@ -1477,10 +1333,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         return entries.Count == 0 ? null : new LoraStack { Entries = entries };
     }
 
-    /// <summary>Maps Swarm's three ControlNet slots onto the Engine's conditioning list, running the matching
-    /// annotator (Canny/Depth/OpenPose/…) over each hint image first. The Engine's contract expects an
-    /// already-preprocessed hint — annotation is deliberately host-side, since the annotators consume SwarmUI
-    /// images and fetch their own weights through Swarm.</summary>
+    /// <summary>Maps Swarm's ControlNet slots onto the Engine's conditioning list, running the matching annotator over each hint image first.</summary>
+    /// <remarks>Annotation stays host-side: the Engine expects preprocessed hints, and the annotators consume SwarmUI images and fetch weights through Swarm.</remarks>
     private IReadOnlyList<ControlNetConditioning> BuildControlNets(T2IParamInput input, out List<(int Index, string UnionType)> unionTypes)
     {
         unionTypes = [];
@@ -1507,7 +1361,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 throw new SwarmUserErrorException(
                     $"HartsyInference: ControlNet '{cnModel.Name}' has no control image. Set the ControlNet Image (or an Init Image).");
             }
-            HartsyInference.Diffusion.Adapters.ControlNetMode mode = ControlNetPreprocessing.DetectMode(cnModel.RawFilePath);
+            EngineControlNetMode mode = ControlNetPreprocessing.DetectMode(cnModel.RawFilePath);
             AddLoadStatus($"ControlNet '{cnModel.Name}' → {mode} preprocessing.");
             EngineImage annotated = ControlNetPreprocessing.Preprocess(
                 mode, hint,
@@ -1528,24 +1382,22 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         return layers.Count == 0 ? null : layers;
     }
 
-    /// <summary>The engine's union-control-type token for a detected preprocessing mode. Every output must be a
-    /// string <c>ControlNetResolver.ResolveUnionType</c> recognizes — an unknown token throws engine-side.</summary>
-    private static string UnionTypeString(HartsyInference.Diffusion.Adapters.ControlNetMode mode) => mode switch
+    /// <summary>The engine's union-control token for a detected preprocessing mode. Each must be one that <c>ControlNetResolver.ResolveUnionType</c> recognizes.</summary>
+    private static string UnionTypeString(EngineControlNetMode mode) => mode switch
     {
-        HartsyInference.Diffusion.Adapters.ControlNetMode.Depth => "depth",
-        HartsyInference.Diffusion.Adapters.ControlNetMode.OpenPose => "openpose",
-        HartsyInference.Diffusion.Adapters.ControlNetMode.Scribble => "softedge",
-        HartsyInference.Diffusion.Adapters.ControlNetMode.SoftEdge => "softedge",
-        HartsyInference.Diffusion.Adapters.ControlNetMode.Normal => "normal",
-        HartsyInference.Diffusion.Adapters.ControlNetMode.Segmentation => "segment",
-        HartsyInference.Diffusion.Adapters.ControlNetMode.Tile => "tile",
-        HartsyInference.Diffusion.Adapters.ControlNetMode.Inpaint => "repaint",
+        EngineControlNetMode.Depth => "depth",
+        EngineControlNetMode.OpenPose => "openpose",
+        EngineControlNetMode.Scribble => "softedge",
+        EngineControlNetMode.SoftEdge => "softedge",
+        EngineControlNetMode.Normal => "normal",
+        EngineControlNetMode.Segmentation => "segment",
+        EngineControlNetMode.Tile => "tile",
+        EngineControlNetMode.Inpaint => "repaint",
         // Canny + LineArt both drive the thin-line head.
         _ => "canny",
     };
 
-    /// <summary>Maps the image-prompt inputs onto the Engine's IP-Adapter conditioning. The adapter model itself
-    /// rides the Extra bag under the Engine's documented <c>ipadapter.model</c> key.</summary>
+    /// <summary>Maps the image-prompt inputs onto the Engine's IP-Adapter conditioning. The adapter model rides in Extra under <c>ipadapter.model</c>.</summary>
     private static IpAdapter BuildIpAdapter(T2IParamInput input)
     {
         if (!input.TryGet(T2IParamTypes.PromptImages, out List<Image> promptImages) || promptImages is null || promptImages.Count == 0)
@@ -1556,7 +1408,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         {
             PromptImages = [.. promptImages.Select(ToEngineImage)],
             Grouping = input.Get(T2IParamTypes.SmartImagePromptResizing, false),
-            FaceIdV2Weight = input.TryGet(SwarmUIHartsyInference.FaceIdV2WeightParam, out double faceId) ? faceId : null,
+            FaceIdV2Weight = input.TryGet(HartsyInference.FaceIdV2WeightParam, out double faceId) ? faceId : null,
         };
     }
 
@@ -1571,8 +1423,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         return new Refiner
         {
             Model = refinerModel.RawFilePath,
-            // Swarm knows every model's family from its compat class; the engine's own header sniff only covers
-            // the classic single-file architectures. This is what lets ANY model act as a refiner generically.
+            // Swarm knows every model's family from its compat class, so any model can act as a refiner. The engine's header sniff covers only classic architectures.
             FamilyId = ModelSupport.Resolve(refinerModel.ModelClass?.CompatClass?.ID)?.Id,
             Vae = ModelPath(input.Get(T2IParamTypes.RefinerVAE)),
             Method = input.Get(T2IParamTypes.RefinerMethod, null),
@@ -1583,8 +1434,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         };
     }
 
-    /// <summary>Regional / segment prompting: the plan is the raw prompt (the Engine parses the
-    /// <c>&lt;region&gt;</c>/<c>&lt;segment&gt;</c> syntax), plus the mask-shaping and per-segment overrides.</summary>
+    /// <summary>Regional prompting: the Engine parses the raw prompt as the plan, plus mask and per-segment overrides.</summary>
     private static Regional BuildRegional(T2IParamInput input, string prompt)
     {
         if (!HasRegionalSyntax(prompt) && !HasRegionalSyntax(input.Get(T2IParamTypes.NegativePrompt)))
@@ -1595,8 +1445,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         {
             Plan = prompt,
             SortOrder = input.Get(T2IParamTypes.SegmentSortOrder, null),
-            // Same fallbacks as core's Comfy path: these params are Toggleable with no IgnoreIf, so they are absent
-            // (not 0) when the toggle is off, and the documented defaults are 16 and 10.
+            // Same fallbacks as core's Comfy path: these params are absent (not 0) when their toggle is off.
             MaskGrow = input.Get(T2IParamTypes.SegmentMaskGrow, 16),
             MaskBlur = input.Get(T2IParamTypes.SegmentMaskBlur, 10),
             // Exact so a toggled-on 0 crops tight, as in core; absent means core's default of 16.
@@ -1627,8 +1476,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         return new VariationSeed { Seed = varSeed, Strength = strength };
     }
 
-    /// <summary>Everything the Engine's flat image contract doesn't name: its own documented Extra keys plus this
-    /// extension's registered custom params.</summary>
+    /// <summary>Everything the Engine's flat image contract does not name: its documented Extra keys plus this extension's custom params.</summary>
     private IReadOnlyDictionary<string, object> BuildImageExtra(T2IParamInput input, ModelSupport.Family family, Image initImage,
         List<(int Index, string UnionType)> controlNetUnionTypes)
     {
@@ -1638,24 +1486,24 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             && input.TryGetRaw(ipaType, out object ipaRaw)
             && ipaRaw is string ipaModel && !string.IsNullOrWhiteSpace(ipaModel) && ipaModel != "None")
         {
-            extra[HartsyInference.Engine.Features.RequestExtras.IpAdapterModel] = ipaModel;
+            extra[EngineExtras.IpAdapterModel] = ipaModel;
         }
         if (input.Get(T2IParamTypes.ClipVisionModel) is T2IModel clipVision)
         {
-            extra[HartsyInference.Engine.Features.RequestExtras.IpAdapterClipVision] = clipVision.RawFilePath;
+            extra[EngineExtras.IpAdapterClipVision] = clipVision.RawFilePath;
         }
         // IP-Adapter scheduling/weighting: forward Comfy's own params (we don't re-register them).
         if (input.TryGet(ComfyUIBackendExtension.IPAdapterWeight, out double ipaWeight))
         {
-            extra[HartsyInference.Engine.Features.RequestExtras.IpAdapterWeight] = ipaWeight;
+            extra[EngineExtras.IpAdapterWeight] = ipaWeight;
         }
         if (input.TryGet(ComfyUIBackendExtension.IPAdapterStart, out double ipaStart))
         {
-            extra[HartsyInference.Engine.Features.RequestExtras.IpAdapterStart] = ipaStart;
+            extra[EngineExtras.IpAdapterStart] = ipaStart;
         }
         if (input.TryGet(ComfyUIBackendExtension.IPAdapterEnd, out double ipaEnd))
         {
-            extra[HartsyInference.Engine.Features.RequestExtras.IpAdapterEnd] = ipaEnd;
+            extra[EngineExtras.IpAdapterEnd] = ipaEnd;
         }
         if (input.TryGet(ComfyUIBackendExtension.IPAdapterWeightType, out string ipaWeightType)
             && !string.IsNullOrWhiteSpace(ipaWeightType))
@@ -1663,53 +1511,48 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             // Comfy live-appends "name///name (New)" variants; the engine wants the bare name and safely
             // falls back to "standard" for anything it doesn't recognize.
             int marker = ipaWeightType.IndexOf("///", StringComparison.Ordinal);
-            extra[HartsyInference.Engine.Features.RequestExtras.IpAdapterWeightType] = marker < 0 ? ipaWeightType : ipaWeightType[..marker];
+            extra[EngineExtras.IpAdapterWeightType] = marker < 0 ? ipaWeightType : ipaWeightType[..marker];
         }
         foreach ((int index, string unionType) in controlNetUnionTypes)
         {
-            extra[HartsyInference.Engine.Features.RequestExtras.ControlNetUnionTypePrefix + index.ToString(CultureInfo.InvariantCulture)] = unionType;
+            extra[EngineExtras.ControlNetUnionTypePrefix + index.ToString(CultureInfo.InvariantCulture)] = unionType;
         }
-        // FLUX.1 Redux: Comfy's style-model params map onto the engine's redux.* keys. The model rides by name —
-        // the engine's ModelFileLocator resolves it against the style_models folders, same as ipadapter.model.
+        // FLUX.1 Redux: Comfy's style-model params map onto the engine's redux.* keys. The model rides by name, resolved from the style_models folders.
         if (input.TryGet(ComfyUIBackendExtension.UseStyleModel, out string styleModel)
             && !string.IsNullOrWhiteSpace(styleModel) && styleModel != "None")
         {
-            extra[HartsyInference.Engine.Features.RequestExtras.ReduxStyleModel] = styleModel;
+            extra[EngineExtras.ReduxStyleModel] = styleModel;
             if (input.TryGet(ComfyUIBackendExtension.StyleModelMultiplyStrength, out double reduxMultiply))
             {
-                extra[HartsyInference.Engine.Features.RequestExtras.ReduxMultiply] = reduxMultiply;
+                extra[EngineExtras.ReduxMultiply] = reduxMultiply;
             }
             if (input.TryGet(ComfyUIBackendExtension.StyleModelMergeStrength, out double reduxMerge))
             {
-                extra[HartsyInference.Engine.Features.RequestExtras.ReduxMerge] = reduxMerge;
+                extra[EngineExtras.ReduxMerge] = reduxMerge;
             }
             if (input.TryGet(ComfyUIBackendExtension.StyleModelApplyStart, out double reduxApplyStart))
             {
-                extra[HartsyInference.Engine.Features.RequestExtras.ReduxApplyStart] = reduxApplyStart;
+                extra[EngineExtras.ReduxApplyStart] = reduxApplyStart;
             }
         }
         // Extension-registered custom params.
-        if (input.TryGet(SwarmUIHartsyInference.Ideogram4MagicPromptParam, out bool magic))
+        if (input.TryGet(HartsyInference.Ideogram4MagicPromptParam, out bool magic))
         {
             extra["hartsy.ideogram4_magic_prompt"] = magic;
         }
-        if (input.TryGet(SwarmUIHartsyInference.Ideogram4MagicPromptModelParam, out string magicModel) && !string.IsNullOrWhiteSpace(magicModel))
+        if (input.TryGet(HartsyInference.Ideogram4MagicPromptModelParam, out string magicModel) && !string.IsNullOrWhiteSpace(magicModel))
         {
             extra["hartsy.ideogram4_magic_prompt_model"] = magicModel;
         }
-        // FLUX.1 Canny/Depth: these are ordinary Flux.1 checkpoints with a wider x_embedder baked in — no separate
-        // ControlNet adapter to select, so there is no ControlNet-slot model to key preprocessing off. The engine
-        // only learns the checkpoint is Canny/Depth/Fill after loading its weights (Flux1RecipePipeline has no
-        // earlier hook), so detection here is a filename heuristic on the MAIN model, mirroring
-        // ControlNetPreprocessing.DetectMode's convention for real ControlNet checkpoints. A wrong guess degrades
-        // to FluxPipeline's own clear "requires/does not accept a control image" error, not silent corruption —
-        // Fill deliberately isn't matched here since it conditions via Img2Img + Inpaint, not a control image.
+        // FLUX.1 Canny/Depth are plain Flux.1 checkpoints with a wider x_embedder, so there is no ControlNet slot to key preprocessing off.
+        // The engine only learns the variant after loading weights, so a filename heuristic on the main model stands in, as in
+        // ControlNetPreprocessing.DetectMode. A wrong guess fails with FluxPipeline's own error, not silent corruption. Fill is not matched: it uses Img2Img + Inpaint.
         if (family.Id == "flux1" && initImage is not null)
         {
             string modelPath = input.Get(T2IParamTypes.Model)?.RawFilePath ?? "";
             string modelName = System.IO.Path.GetFileNameWithoutExtension(modelPath).ToLowerInvariant();
-            HartsyInference.Diffusion.Adapters.ControlNetMode? toolsMode = modelName.Contains("canny") ? HartsyInference.Diffusion.Adapters.ControlNetMode.Canny
-                : modelName.Contains("depth") ? HartsyInference.Diffusion.Adapters.ControlNetMode.Depth
+            EngineControlNetMode? toolsMode = modelName.Contains("canny") ? EngineControlNetMode.Canny
+                : modelName.Contains("depth") ? EngineControlNetMode.Depth
                 : null;
             if (toolsMode is not null)
             {
@@ -1718,7 +1561,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                     toolsMode.Value, initImage,
                     input.Get(T2IParamTypes.Width, DefaultImageSize), input.Get(T2IParamTypes.Height, DefaultImageSize),
                     PreprocessBackend, msg => AddLoadStatus(msg));
-                extra[HartsyInference.Engine.Features.RequestExtras.FluxToolsControlImage] = annotated;
+                extra[EngineExtras.FluxToolsControlImage] = annotated;
             }
         }
         return extra;
@@ -1743,10 +1586,9 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         RefuseIncompatibleH3Conditioning(input, initImage, endFrame);
         (int? chainTotal, int chainContext) = ResolveH3Chain(input, frames);
         Dictionary<string, object> extra = new(StringComparer.Ordinal);
-        Image reference = input.Get(SwarmUIHartsyInference.AnimateReferenceImageParam);
-        // Comfy-backend parity: core's carrier for a Wan character/subject reference is the prompt-attached image
-        // list (WorkflowGenerator feeds PromptImages to WanPhantomSubjectToVideo), so an image dropped on the
-        // prompt box is the Animate character reference here too. The explicit param wins when both are given.
+        Image reference = input.Get(HartsyInference.AnimateReferenceImageParam);
+        // Comfy parity: a prompt-attached image is the Animate character reference, as core's WanPhantomSubjectToVideo workflow
+        // treats PromptImages. The explicit param wins when both are given.
         bool isAnimate = IsWanAnimate(input);
         if (isAnimate && input.TryGet(T2IParamTypes.PromptImages, out List<Image> animateRefs) && animateRefs is { Count: > 0 })
         {
@@ -1762,19 +1604,18 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             }
             else
             {
-                Logs.Warning("[HartsyInference] Both the Animate Reference Image param and a prompt-attached image "
-                    + "are set; the param wins and the prompt-attached image is ignored.");
+                HartsyLogs.Warning("Both the Animate Reference Image param and a prompt-attached image "
+                    + "are set; the param wins and the prompt-attached image is ignored. Clear one of them to avoid this warning.");
             }
         }
         if (reference is not null)
         {
-            extra[HartsyInference.Engine.Recipes.Video.WanAnimateRecipePipeline.ReferenceImageKey] = ToEngineImage(reference);
+            extra[EngineWanAnimate.ReferenceImageKey] = ToEngineImage(reference);
         }
-        Image poseVideo = input.Get(SwarmUIHartsyInference.AnimatePoseVideoParam);
-        Image faceVideo = input.Get(SwarmUIHartsyInference.AnimateFaceVideoParam);
-        // Animate intent + a video-typed Init media ⇒ the whole clip drives motion (VideoClip, all frames);
-        // a still keeps the engine's tile-across-frames fallback. Without animate intent the init media stays a
-        // plain start frame — DrivingVideo on a non-animate family would (correctly) trip the feature gate.
+        Image poseVideo = input.Get(HartsyInference.AnimatePoseVideoParam);
+        Image faceVideo = input.Get(HartsyInference.AnimateFaceVideoParam);
+        // With Animate intent, a video Init Image drives motion across all frames; a still uses the engine's tile-across-frames fallback.
+        // Without Animate intent, Init stays a plain start frame.
         bool animateIntent = reference is not null || poseVideo is not null || faceVideo is not null;
         bool initIsVideo = initImage?.Type?.MetaType == MediaMetaType.Video;
         bool initDrives = animateIntent && initIsVideo;
@@ -1795,20 +1636,19 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             InitImage = initImage is null || initDrives ? null : ToEngineImage(initImage),
             DrivingVideo = initDrives ? ToVideoClip(initImage) : null,
             DrivingPoseVideo = poseVideo is null ? null : ToVideoClip(poseVideo),
-            DrivingBackgroundVideo = input.Get(SwarmUIHartsyInference.AnimateBackgroundVideoParam) is Image bg ? ToVideoClip(bg) : null,
-            DrivingMaskVideo = input.Get(SwarmUIHartsyInference.AnimateMaskVideoParam) is Image maskVid ? ToVideoClip(maskVid) : null,
+            DrivingBackgroundVideo = input.Get(HartsyInference.AnimateBackgroundVideoParam) is Image bg ? ToVideoClip(bg) : null,
+            DrivingMaskVideo = input.Get(HartsyInference.AnimateMaskVideoParam) is Image maskVid ? ToVideoClip(maskVid) : null,
             DrivingFaceVideo = faceVideo is null ? null : ToVideoClip(faceVideo),
-            DrivingAutoPreprocess = input.Get(SwarmUIHartsyInference.AnimateAutoPreprocessParam, true),
-            // 0 / unset / at-or-below the chunk length all mean "one chunk" — the engine floors the total at the
-            // resolved chunk length, so this can only ever add chunks, never truncate a normal generation.
-            AnimateTotalFrames = input.TryGet(SwarmUIHartsyInference.AnimateTotalFramesParam, out int animateTotal)
+            DrivingAutoPreprocess = input.Get(HartsyInference.AnimateAutoPreprocessParam, true),
+            // 0, unset, or at-or-below the chunk length all mean one chunk. The engine floors the total at the chunk length, so this only adds chunks.
+            AnimateTotalFrames = input.TryGet(HartsyInference.AnimateTotalFramesParam, out int animateTotal)
                 && animateTotal > 0 ? animateTotal : null,
-            AnimateContinueMotionFrames = input.Get(SwarmUIHartsyInference.AnimateMotionContextFramesParam, 5),
-            AnimateColorCorrection = input.TryGet(SwarmUIHartsyInference.AnimateColorCorrectionParam, out double animateColorFix)
+            AnimateContinueMotionFrames = input.Get(HartsyInference.AnimateMotionContextFramesParam, 5),
+            AnimateColorCorrection = input.TryGet(HartsyInference.AnimateColorCorrectionParam, out double animateColorFix)
                 ? animateColorFix : null,
-            AnimatePoseStrength = input.TryGet(SwarmUIHartsyInference.AnimatePoseStrengthParam, out double animatePose)
+            AnimatePoseStrength = input.TryGet(HartsyInference.AnimatePoseStrengthParam, out double animatePose)
                 ? animatePose : null,
-            AnimateReferenceImageStrength = input.TryGet(SwarmUIHartsyInference.AnimateReferenceStrengthParam, out double animateRefStrength)
+            AnimateReferenceImageStrength = input.TryGet(HartsyInference.AnimateReferenceStrengthParam, out double animateRefStrength)
                 ? animateRefStrength : null,
             VideoModel = ModelPath(input.Get(T2IParamTypes.VideoModel)),
             VideoSwapModel = ModelPath(input.Get(T2IParamTypes.VideoSwapModel)),
@@ -1817,10 +1657,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             VideoSwapPercent = input.TryGet(T2IParamTypes.VideoSwapPercent, out double swapPercent) && swapPercent != 0.5
                 ? swapPercent : null,
             VideoResolution = input.Get(T2IParamTypes.VideoResolution, null),
-            // 25 is Swarm's cross-family fallback and is wrong for LTX-2: the recipe's own default, core's param
-            // default and Swarm's docs ("LTXV prefers 24") all say 24. Sent as a value rather than null because the
-            // LTX-2 pipeline doesn't report the fps it used on VideoGenerationResult — a null would generate at the
-            // recipe's 24 and then mux at the encoder's 25 fallback, i.e. play back 4% fast.
+            // Swarm's cross-family fallback of 25 is wrong for LTX-2, whose default is 24. Send a value, not null: LTX-2 does not report
+            // the fps it used, so a null would mux at the encoder's 25 and play 4% fast.
             Fps = input.Get(T2IParamTypes.VideoFPS, IsLtxVideo2(input) ? 24 : 25),
             VideoFormat = input.Get(T2IParamTypes.VideoFormat, null),
             // Boomerang is applied to the decoded frames on the way out (see GenerateVideo) so the Engine
@@ -1828,9 +1666,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             VideoBoomerang = input.Get(T2IParamTypes.VideoBoomerang, false),
             VideoEndFrame = endFrame is null ? null : ToEngineImage(endFrame),
             VideoAudioInput = ToAudioClip(input.Get(T2IParamTypes.VideoAudioInput)),
-            VideoAudioReference = ToAudioClip(input.Get(SwarmUIHartsyInference.VideoAudioReferenceParam)),
-            // On Animate checkpoints the prompt-attached image was consumed above as the character reference;
-            // passing it through here too would trip the engine's feature gate (Wan claims no ReferenceImages).
+            VideoAudioReference = ToAudioClip(input.Get(HartsyInference.VideoAudioReferenceParam)),
+            // On Animate checkpoints the prompt-attached image is consumed above as the character reference; passing it here too would trip the feature gate.
             ReferenceImages = isAnimate ? null : BuildReferenceImages(input),
             ReferenceVideos = BuildReferenceVideos(input),
             ReferenceAudios = BuildReferenceAudios(input),
@@ -1846,10 +1683,9 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         };
     }
 
-    /// <summary>Refuses start/end-frame conditioning combined with references on MiniMax-H3, whichever checkpoint is
-    /// loaded. fl2va and ref2va are separate tasks: the packed layout restarts its position cursor for reference
-    /// blocks, so keyframe and reference rows would occupy overlapping coordinates. The engine throws on this too —
-    /// this catches it at request construction, where the message can name the params the user actually set.</summary>
+    /// <summary>Refuses start/end-frame conditioning combined with reference media on MiniMax-H3, whichever checkpoint is loaded.</summary>
+    /// <remarks>fl2va and ref2va are separate tasks: reference blocks restart the packed layout's position cursor, so their rows overlap keyframe rows.
+    /// Checked here, at request construction, so the message can name the params the user set.</remarks>
     private static void RefuseIncompatibleH3Conditioning(T2IParamInput input, Image initImage, Image endFrame)
     {
         if (!IsMiniMaxH3(input))
@@ -1870,17 +1706,15 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         }
     }
 
-    /// <summary>Resolves and validates MiniMax-H3's chain params by dry-running the real planner (pure arithmetic,
-    /// no GPU) rather than re-deriving its grid/cap rules client-side, which is how this shipped snapping onto the
-    /// wrong grid once already: the required grid is 39+51k (17k+5 intersected with a whole number of 40 Hz audio
-    /// rows), not the plain 17k+5 frame-count grid <see cref="MiniMaxH3Geometry.AlignFrameCount"/> aligns onto.</summary>
+    /// <summary>Validates MiniMax-H3's chain params by dry-running the real planner (pure arithmetic, no GPU) rather than re-deriving its rules.</summary>
+    /// <remarks>The chain grid is 39+51k (17k+5 intersected with whole 40 Hz audio rows), not the plain 17k+5 grid that <see cref="MiniMaxH3Geometry.AlignFrameCount"/> uses.</remarks>
     private static (int? Total, int Context) ResolveH3Chain(T2IParamInput input, int? frames)
     {
-        int? total = input.TryGet(SwarmUIHartsyInference.H3ChainTotalFramesParam, out int totalRaw) && totalRaw > 0
+        int? total = input.TryGet(HartsyInference.H3ChainTotalFramesParam, out int totalRaw) && totalRaw > 0
             ? totalRaw : null;
-        bool contextSet = input.TryGet(SwarmUIHartsyInference.H3ChainContextFramesParam, out int contextRaw);
+        bool contextSet = input.TryGet(HartsyInference.H3ChainContextFramesParam, out int contextRaw);
         int context = contextSet ? SnapChainContextFrames(contextRaw)
-            : HartsyInference.Engine.Recipes.Video.MiniMaxH3ChainPlanner.DefaultContextFrames;
+            : EngineH3ChainPlanner.DefaultContextFrames;
         if (contextSet && total is null)
         {
             throw new SwarmUserErrorException(
@@ -1889,10 +1723,10 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         }
         if (total is int t)
         {
-            int maxSegment = HartsyInference.Diffusion.Models.Denoisers.MiniMaxH3Geometry.AlignFrameCount(frames ?? 124);
+            int maxSegment = EngineH3Geometry.AlignFrameCount(frames ?? 124);
             try
             {
-                HartsyInference.Engine.Recipes.Video.MiniMaxH3ChainPlanner.Plan(t, context, maxSegment);
+                EngineH3ChainPlanner.Plan(t, context, maxSegment);
             }
             catch (ArgumentOutOfRangeException ex)
             {
@@ -1903,9 +1737,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         return (total, context);
     }
 
-    /// <summary>Nearest, not up: rounding up can push a reasonable value past the segment cap that nearest would
-    /// have stayed under (e.g. 100 at the default 124-frame segment: up gives 141, which fails; nearest gives 90,
-    /// which passes).</summary>
+    /// <summary>Snaps to the nearest valid context length, not up, since rounding up can push a value past the segment cap.</summary>
+    /// <remarks>For example, 100 at the default 124-frame segment: rounding up gives 141 (fails), nearest gives 90 (passes).</remarks>
     private static int SnapChainContextFrames(int frames)
     {
         int k = (int)Math.Round((frames - 39) / 51.0, MidpointRounding.AwayFromZero);
@@ -1913,12 +1746,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     }
 
     /// <summary>The requested frame count, or null to let the family's own default stand.</summary>
-    /// <remarks>SwarmUI's core frame params default to 25 for every video family. For MiniMax-H3 that is not a
-    /// neutral value — 25 snaps up onto the 17k+5 grid to 39 frames (1.6 s), so a user who never touched the slider
-    /// silently got a sixth of the model's native 124-frame clip and no indication why. Returning null when neither
-    /// param was actually set hands the decision to the recipe, which uses 124 — the same "unset falls back to 124"
-    /// the reference workflow does. Scoped to H3 deliberately: the other families' defaults are wrong in their own
-    /// ways, but fixing those is not this change.</remarks>
+    /// <remarks>Core's frame params default to 25 for every family. On MiniMax-H3 that snaps to 39 frames (1.6 s), and 25 is off LTX-2's 8n+1 grid.
+    /// Null when neither param is set lets each recipe pick its own default (124 frames for H3).</remarks>
     private static int? ResolveFrames(T2IParamInput input)
     {
         if (input.TryGet(T2IParamTypes.Text2VideoFrames, out int t2vFrames) && t2vFrames > 0)
@@ -1931,13 +1760,13 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         }
         if (IsMiniMaxH3(input))
         {
-            Logs.Verbose("[HartsyInference] No frame count set — leaving it to MiniMax-H3's own 124-frame default "
+            HartsyLogs.Debug("No frame count set, so leaving it to MiniMax-H3's own 124-frame default "
                 + "rather than Swarm's cross-family 25 (which would snap to 39 on H3's 17k+5 grid).");
             return null;
         }
         if (IsLtxVideo2(input))
         {
-            Logs.Verbose("[HartsyInference] No frame count set — leaving it to the LTX-2 recipe's own default rather "
+            HartsyLogs.Debug("No frame count set, so leaving it to the LTX-2 recipe's own default rather "
                 + "than Swarm's cross-family 25, which is not on LTX-2's 8n+1 grid.");
             return null;
         }
@@ -1948,13 +1777,12 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     private static bool IsMiniMaxH3(T2IParamInput input) =>
         input.Get(T2IParamTypes.Model)?.ModelClass?.CompatClass?.ID == T2IModelClassSorter.CompatMiniMaxH3.ID;
 
-    /// <summary>Whether the selected model is any LTX-2.x (2, 2.3 or 2.5 — they share core's compat class).</summary>
+    /// <summary>Whether the selected model is any LTX-2.x (2, 2.3 or 2.5, which share core's compat class).</summary>
     private static bool IsLtxVideo2(T2IParamInput input) =>
         input.Get(T2IParamTypes.Model)?.ModelClass?.CompatClass?.ID == T2IModelClassSorter.CompatLtxv2.ID;
 
-    /// <summary>Whether the selected checkpoint is Wan-Animate or Wan-Animate-2. Animate shares Wan's compat
-    /// classes, so this goes through the engine's header-sniffed variant detection — only the Animate variants
-    /// claim <see cref="VideoFeatures.DrivingVideo"/>.</summary>
+    /// <summary>Whether the selected checkpoint is Wan-Animate or Wan-Animate-2.</summary>
+    /// <remarks>Animate shares Wan's compat classes, so the engine's header-sniffed variant detection decides: only Animate claims <see cref="VideoFeatures.DrivingVideo"/>.</remarks>
     private static bool IsWanAnimate(T2IParamInput input)
     {
         T2IModel model = input.Get(T2IParamTypes.Model);
@@ -1966,12 +1794,9 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     /// <summary>Reference media caps the model was trained under, mirroring what the reference node accepts.</summary>
     private const int MaxRefImages = ImageInputs.MaxReferenceImages, MaxRefAudios = 3, MaxRefVideos = 3;
 
-    /// <summary>Reference images come from the prompt box, not a param control: core's
-    /// <see cref="T2IParamTypes.PromptImages"/> is the internal carrier the textbox fills when media is dragged or
-    /// pasted onto it, and the model's own text encoder resolves the <c>&lt;Picture N&gt;</c> tags the user types
-    /// inline. Swarm never parses those tags — it just supplies the ordered list, which is exactly what the
-    /// MiniMax-H3 reference node and the Qwen-Image-Edit template consume, index for index. The consuming recipe
-    /// applies its own slot cap, which is tighter than this one for some families.</summary>
+    /// <summary>Reference images from the prompt box, as an ordered list. Swarm does not parse the <c>&lt;Picture N&gt;</c> tags; the model's encoder does.</summary>
+    /// <remarks>Core's <see cref="T2IParamTypes.PromptImages"/> carrier is what the prompt box fills on drag or paste.
+    /// The consuming recipe applies its own slot cap, which can be tighter.</remarks>
     private static IReadOnlyList<EngineImage> BuildReferenceImages(T2IParamInput input)
     {
         if (!input.TryGet(T2IParamTypes.PromptImages, out List<Image> images) || images is not { Count: > 0 })
@@ -1983,7 +1808,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         return kept.Count == 0 ? null : kept;
     }
 
-    /// <summary>Standalone reference audio, from the prompt box — <c>&lt;Audio N&gt;</c> in the prompt.</summary>
+    /// <summary>Standalone reference audio from the prompt box, referenced as <c>&lt;Audio N&gt;</c> in the prompt.</summary>
     private static IReadOnlyList<AudioClip> BuildReferenceAudios(T2IParamInput input)
     {
         if (!input.TryGet(T2IParamTypes.PromptAudios, out List<AudioFile> audios) || audios is not { Count: > 0 })
@@ -1996,10 +1821,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         return kept.Count == 0 ? null : kept;
     }
 
-    /// <summary>Reference videos from the prompt box. Deliberately UNPAIRED with the reference audio: the reference
-    /// node sends two independent positional lists and lets the model correlate them through the inline
-    /// <c>&lt;Video N&gt;</c>/<c>&lt;Audio N&gt;</c> tags. The engine's <see cref="ReferenceVideo.Audio"/> can carry
-    /// an explicit per-clip soundtrack and still does — it is simply not something this UI expresses.</summary>
+    /// <summary>Reference videos from the prompt box, unpaired with the reference audio. The model correlates them through the inline <c>&lt;Video N&gt;</c>/<c>&lt;Audio N&gt;</c> tags.</summary>
+    /// <remarks><see cref="ReferenceVideo.Audio"/> can carry a per-clip soundtrack, which this UI does not expose.</remarks>
     private static IReadOnlyList<ReferenceVideo> BuildReferenceVideos(T2IParamInput input)
     {
         if (!input.TryGet(T2IParamTypes.PromptVideos, out List<VideoFile> videos) || videos is not { Count: > 0 })
@@ -2012,26 +1835,24 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         return kept.Count == 0 ? null : kept;
     }
 
-    /// <summary>Says so when media past the model's cap is dropped — silently ignoring the 10th image would look
-    /// like the model ignored it.</summary>
+    /// <summary>Logs a warning when media past the model's cap is dropped, so it does not look as if the model ignored it.</summary>
     private static void WarnIfTruncated(int supplied, int used, string what)
     {
         if (supplied > used)
         {
-            Logs.Warning($"[HartsyInference] {supplied} reference {what} attached but this model takes at most "
-                + $"{used} — the extras were dropped.");
+            HartsyLogs.Warning($"{supplied} reference {what} attached but this model takes at most "
+                + $"{used}; the extra {what} were dropped. Remove the extras to avoid this warning.");
         }
     }
 
-    /// <summary>Maps Swarm's Text2Audio group plus this extension's music params onto the Engine's
-    /// <see cref="MusicRequest"/>. One source-audio param + one edit-mode dropdown populate exactly one of
-    /// Continuation/Repaint/Cover, so the engine's "more than one edit mode" throw is structurally unreachable.</summary>
+    /// <summary>Maps the Text2Audio group and this extension's music params onto the Engine's <see cref="MusicRequest"/>.</summary>
+    /// <remarks>One source-audio param and one edit-mode dropdown fill exactly one of Continuation, Repaint or Cover, so the engine's multiple-mode error cannot occur.</remarks>
     private static MusicRequest BuildMusicRequest(T2IParamInput input)
     {
         long seed = input.Get(T2IParamTypes.Seed, -1L);
-        AudioClip sourceAudio = ToAudioClip(input.Get(SwarmUIHartsyInference.AceStepSourceAudioParam));
-        string editMode = input.Get(SwarmUIHartsyInference.AceStepEditModeParam, "continuation");
-        string lmModel = input.Get(SwarmUIHartsyInference.AceStepLmPlannerParam, "none");
+        AudioClip sourceAudio = ToAudioClip(input.Get(HartsyInference.AceStepSourceAudioParam));
+        string editMode = input.Get(HartsyInference.AceStepEditModeParam, "continuation");
+        string lmModel = input.Get(HartsyInference.AceStepLmPlannerParam, "none");
         MusicRequest request = new MusicRequest
         {
             // ACE-Step convention (which the Engine follows): the prompt carries the lyrics, the style/genre tags
@@ -2052,15 +1873,15 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             Repaint = editMode == "repaint" ? sourceAudio : null,
             Cover = editMode == "cover" ? sourceAudio : null,
         };
-        if (input.TryGet(SwarmUIHartsyInference.AceStepRepaintStartParam, out double repaintStart))
+        if (input.TryGet(HartsyInference.AceStepRepaintStartParam, out double repaintStart))
         {
             request = request with { RepaintStart = repaintStart };
         }
-        if (input.TryGet(SwarmUIHartsyInference.AceStepRepaintEndParam, out double repaintEnd))
+        if (input.TryGet(HartsyInference.AceStepRepaintEndParam, out double repaintEnd))
         {
             request = request with { RepaintEnd = repaintEnd };
         }
-        if (input.TryGet(SwarmUIHartsyInference.AceStepCoverStrengthParam, out double coverStrength))
+        if (input.TryGet(HartsyInference.AceStepCoverStrengthParam, out double coverStrength))
         {
             request = request with { CoverStrength = coverStrength };
         }
@@ -2069,39 +1890,39 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             request = request with
             {
                 LmModel = lmModel,
-                Thinking = input.Get(SwarmUIHartsyInference.AceStepLmThinkingParam, true),
-                LmTemperature = input.Get(SwarmUIHartsyInference.AceStepLmTemperatureParam, 0.85),
-                LmCfgScale = input.Get(SwarmUIHartsyInference.AceStepLmCfgParam, 2.0),
-                LmTopK = input.Get(SwarmUIHartsyInference.AceStepLmTopKParam, 0),
-                LmTopP = input.Get(SwarmUIHartsyInference.AceStepLmTopPParam, 0.9),
-                LmNegativePrompt = input.Get(SwarmUIHartsyInference.AceStepLmNegativePromptParam, "") ?? "",
+                Thinking = input.Get(HartsyInference.AceStepLmThinkingParam, true),
+                LmTemperature = input.Get(HartsyInference.AceStepLmTemperatureParam, 0.85),
+                LmCfgScale = input.Get(HartsyInference.AceStepLmCfgParam, 2.0),
+                LmTopK = input.Get(HartsyInference.AceStepLmTopKParam, 0),
+                LmTopP = input.Get(HartsyInference.AceStepLmTopPParam, 0.9),
+                LmNegativePrompt = input.Get(HartsyInference.AceStepLmNegativePromptParam, "") ?? "",
             };
         }
-        if (input.TryGet(SwarmUIHartsyInference.AceStepSolverParam, out string inferMethod))
+        if (input.TryGet(HartsyInference.AceStepSolverParam, out string inferMethod))
         {
             request = request with { InferMethod = inferMethod };
         }
-        if (input.TryGet(SwarmUIHartsyInference.AceStepGuidanceTypeParam, out string guidanceType))
+        if (input.TryGet(HartsyInference.AceStepGuidanceTypeParam, out string guidanceType))
         {
             request = request with { GuidanceType = guidanceType };
         }
-        if (input.TryGet(SwarmUIHartsyInference.AceStepErgTagParam, out bool ergTag))
+        if (input.TryGet(HartsyInference.AceStepErgTagParam, out bool ergTag))
         {
             request = request with { UseErgTag = ergTag };
         }
-        if (input.TryGet(SwarmUIHartsyInference.AceStepErgLyricParam, out bool ergLyric))
+        if (input.TryGet(HartsyInference.AceStepErgLyricParam, out bool ergLyric))
         {
             request = request with { UseErgLyric = ergLyric };
         }
-        if (input.TryGet(SwarmUIHartsyInference.AceStepErgDiffusionParam, out bool ergDiffusion))
+        if (input.TryGet(HartsyInference.AceStepErgDiffusionParam, out bool ergDiffusion))
         {
             request = request with { UseErgDiffusion = ergDiffusion };
         }
-        if (input.TryGet(SwarmUIHartsyInference.AceStepCfgIntervalStartParam, out double cfgStart))
+        if (input.TryGet(HartsyInference.AceStepCfgIntervalStartParam, out double cfgStart))
         {
             request = request with { CfgIntervalStart = cfgStart };
         }
-        if (input.TryGet(SwarmUIHartsyInference.AceStepCfgIntervalEndParam, out double cfgEnd))
+        if (input.TryGet(HartsyInference.AceStepCfgIntervalEndParam, out double cfgEnd))
         {
             request = request with { CfgIntervalEnd = cfgEnd };
         }
@@ -2119,9 +1940,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     /// <summary>Video height when the request leaves it unset.</summary>
     public const int DefaultVideoHeight = 480;
 
-    /// <summary>The geometry and VRAM overrides a generation will run with, for the engine's memory estimate — read
-    /// through the same defaults and helpers as the real request, so routing is judged on what will actually run.
-    /// Frames stay null when the request leaves them to the family, and the engine substitutes the recipe's own.</summary>
+    /// <summary>The geometry and VRAM overrides a generation will run with, for the engine's memory estimate, so routing judges what will actually run.</summary>
+    /// <remarks>Frames stay null when the request leaves them to the family; the engine then substitutes the recipe's own.</remarks>
     public static MemoryEstimateRequest MapMemoryEstimateRequest(T2IParamInput input, ModelSupport.Family family)
     {
         ArgumentNullException.ThrowIfNull(input);
@@ -2139,22 +1959,20 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         input.TryGet(param, out int value) && value > 0 ? value : null;
 
     /// <summary>The per-generation VRAM lever overrides, or null when the request pinned none.</summary>
-    /// <remarks>Returning null for an untouched group matters: the Engine treats null as "follow the backend's
-    /// policy", so an empty override object would still be a decision and would defeat
-    /// <c>VramOverrides.IsEmpty</c>'s short-circuit. Only the runtime-scoped levers appear here — quantized compute
-    /// and multi-GPU spill bake into a constructed pipeline and stay backend settings.</remarks>
+    /// <remarks>Null for an untouched group: the engine treats null as "follow the backend's policy", and an empty override would still count as a decision.
+    /// Only runtime-scoped levers appear here; quantized compute and multi-GPU spill are fixed when the pipeline is built.</remarks>
     private static VramOverrides MapVramOverrides(T2IParamInput input)
     {
         VramOverrides overrides = new VramOverrides
         {
-            Tier = ParseTierOverride(input, SwarmUIHartsyInference.VramModeParam),
-            WeightStreaming = ParseLever(input, SwarmUIHartsyInference.VramWeightStreamingParam),
-            KeepResident = ParseLever(input, SwarmUIHartsyInference.VramKeepResidentParam),
-            PhaseUnload = ParseLever(input, SwarmUIHartsyInference.VramPhaseUnloadParam),
-            ActivationOffload = ParseLever(input, SwarmUIHartsyInference.VramActivationOffloadParam),
-            FreeAfterGeneration = ParseLever(input, SwarmUIHartsyInference.VramFreeAfterGenerationParam),
-            Caches = ParseCachePrecision(input, SwarmUIHartsyInference.VramCachePrecisionParam),
-            ChunkScale = input.TryGet(SwarmUIHartsyInference.VramChunkScaleParam, out double scale) && scale > 0
+            Tier = ParseTierOverride(input, HartsyInference.VramModeParam),
+            WeightStreaming = ParseLever(input, HartsyInference.VramWeightStreamingParam),
+            KeepResident = ParseLever(input, HartsyInference.VramKeepResidentParam),
+            PhaseUnload = ParseLever(input, HartsyInference.VramPhaseUnloadParam),
+            ActivationOffload = ParseLever(input, HartsyInference.VramActivationOffloadParam),
+            FreeAfterGeneration = ParseLever(input, HartsyInference.VramFreeAfterGenerationParam),
+            Caches = ParseCachePrecision(input, HartsyInference.VramCachePrecisionParam),
+            ChunkScale = input.TryGet(HartsyInference.VramChunkScaleParam, out double scale) && scale > 0
                 ? (float)scale : null,
         };
         return overrides.IsEmpty ? null : overrides;
@@ -2207,8 +2025,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         return value;
     }
 
-    /// <summary>The annotator device: the Engine's own backend when available (same device, shared caches, no second
-    /// CUDA context), else a lazily created standalone device that we own.</summary>
+    /// <summary>The annotator device: the Engine's backend when one exists (shared caches, no second CUDA context), else a lazily created device we own.</summary>
     private IBackend PreprocessBackend()
     {
         IBackend existing = _preprocessBackend;
@@ -2228,9 +2045,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 }
                 else
                 {
-                    // Init's probed answer when there is one: Create routes 'auto' through the cheap Resolve, which
-                    // is the same disagreement Init avoids by handing the engine a resolved kind. Without this the
-                    // annotator is the one device left that can land on CPU, or on a card the probe just rejected.
+                    // Prefer Init's probed kind: Create would re-resolve 'auto' cheaply, which is the disagreement Init avoids.
+                    // Otherwise the annotator could land on CPU, or on a card the probe rejected.
                     string selector = _resolvedComputeKind ?? Settings?.ComputeBackend?.ToLowerInvariant() ?? "auto";
                     int? ordinal = ParseGpuId(Settings?.GPU_ID);
                     AddLoadStatus($"Creating ControlNet annotator device (compute='{selector}', device={ordinal?.ToString() ?? "auto"})...");
@@ -2243,8 +2059,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         }
     }
 
-    /// <summary>Drops the annotator device reference; disposes it only when it was standalone (a borrowed Engine
-    /// backend must never be disposed here — that would evict the Engine's resident weights mid-lifecycle).</summary>
+    /// <summary>Drops the annotator device reference. Disposes it only when standalone, since disposing a borrowed Engine backend would evict its resident weights.</summary>
     private void DisposePreprocessBackend()
     {
         lock (_preprocessBackendLock)
@@ -2276,11 +2091,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     private static VideoClip ToVideoClip(VideoFile video) =>
         video is null ? null : new VideoClip { Data = video.RawData, Format = video.Type?.Extension };
 
-    /// <summary>Turns an out-of-VRAM failure into something a user can act on. The Engine's own message is already
-    /// specific — the pre-flight names the geometry, the byte requirement and the longest clip that would fit; a
-    /// mid-forward failure names the allocation that could not be served — so it is quoted verbatim rather than
-    /// re-derived, and only the advice is added here. Without this the whole thing surfaced as T2IEngine's generic
-    /// "Something went wrong".</summary>
+    /// <summary>Turns an out-of-VRAM failure into advice a user can act on. The engine's message is quoted verbatim, and only the advice is added here.</summary>
+    /// <remarks>The engine's message is already specific (pre-flight geometry and byte requirement, or the allocation that failed), so it is not re-derived.</remarks>
     private static string DescribeVramFailure(OutOfVramException ex, ModelSupport.Family family)
     {
         string sizes = ex.RequestedBytes > 0
@@ -2301,24 +2113,15 @@ public class HartsyInferenceBackend : AbstractT2IBackend
 
     // ─────────────────────────────── 5. Validation (the honesty guard) ───────────────────────────────
 
-    /// <summary>Refuses a sampler or sigma schedule the selected family cannot run, for EVERY family rather than the
-    /// SD pair this used to cover.
-    ///
-    /// <para>The allow-list this replaces was a hard-coded five names checked only on sd15/sdxl/sdxl-refiner, on the
-    /// reasoning that the flow-match families ignored the param anyway. They no longer do: the Engine's sampler seam
-    /// spans 25 pipelines, and the families that still cannot honor a selection (Wan's UniPC, LTX, Ideogram 4,
-    /// Lumina2, Lance image) now throw <see cref="NotSupportedException"/> from inside the pipeline. Catching that
-    /// mid-generation would be strictly worse than what came before, because a Comfy backend CAN serve those values —
-    /// so this refuses before generation and lets Swarm route the request there instead.</para>
-    ///
-    /// <para>Asked of the Engine rather than hard-coded, the same way <see cref="ModelSupport.SupportedFeatures"/>
-    /// asks the recipe registry, so the answer cannot drift from the pipeline that will actually run.</para></summary>
+    /// <summary>Refuses a sampler or sigma schedule the selected family cannot run, so Swarm can route the request to a Comfy backend.</summary>
+    /// <remarks>Support is asked of the Engine, the same way <see cref="ModelSupport.SupportedFeatures"/> asks the recipe registry, so the answer cannot drift from the pipeline.
+    /// Refusing here beats a <see cref="NotSupportedException"/> mid-generation, which some families (Wan UniPC, LTX, Ideogram 4, Lumina2, Lance image) throw from inside the pipeline.</remarks>
     private static bool ValidateSamplingChoice(T2IParamInput input, ModelSupport.Family family)
     {
         input.TryGet(ComfyUIBackendExtension.SamplerParam, out string sampler);
         input.TryGet(ComfyUIBackendExtension.SchedulerParam, out string schedule);
         bool wantsSampler = !string.IsNullOrWhiteSpace(sampler);
-        // "normal" is the identity schedule — the Engine treats it as no selection, so neither should this.
+        // "normal" is the identity schedule: the Engine treats it as no selection, so this does too.
         bool wantsSchedule = !string.IsNullOrWhiteSpace(schedule)
             && !string.Equals(schedule, "normal", StringComparison.OrdinalIgnoreCase);
         if (!wantsSampler && !wantsSchedule)
@@ -2353,9 +2156,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 + "Pick one it has, or leave the scheduler unset.");
             return false;
         }
-        // A re-spaced schedule cannot be combined with img2img or inpaint on any family: the init latent is noised at
-        // the family's own sigma[startStep], so the sampler would start from a noise level the latent does not carry.
-        // The Engine refuses this too; refusing here keeps it routable rather than a mid-generation throw.
+        // A re-spaced schedule cannot combine with img2img or inpaint: the init latent is noised at the family's own sigma, so the sampler
+        // would start at the wrong noise level. Refusing here keeps the request routable.
         if (wantsSchedule && (input.Get(T2IParamTypes.InitImage) is not null || input.Get(T2IParamTypes.MaskImage) is not null))
         {
             input.RefusalReasons.Add(
@@ -2367,27 +2169,21 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         return true;
     }
 
-    /// <summary>Cleaned IDs of "comfyui"-tagged params we genuinely service, so the comfy-only guard in
-    /// <see cref="IsValidForThisBackend"/> doesn't falsely refuse them. <c>refinersampler</c>/<c>refinerscheduler</c>
-    /// were removed 2026-08-09: they allow-listed but <see cref="BuildRefiner"/> never read them — StepSwap shares the
-    /// base loop's scheduler by construction, so no independent refiner sampler/scheduler exists to honor.
-    /// <c>refinerupscalemethod</c> came back 2026-09-09 with its first real consumer, <see cref="UpscaleStill"/>.</summary>
+    /// <summary>IDs of comfyui-tagged params this backend services, so the comfy-only guard in <see cref="IsValidForThisBackend"/> does not refuse them.</summary>
+    /// <remarks>Refiner sampler and scheduler are absent: the refiner shares the base loop's scheduler (StepSwap), so there is no separate choice to honor.</remarks>
     private static readonly HashSet<string> HonoredComfyParams =
         ["sampler", "scheduler",
-         // Tangential Damping CFG — Comfy's param drives our own ImageRequest.Tcfg (same paper, same boolean),
-         // so we honor it rather than registering a second control beside it.
+         // Tangential Damping CFG: Comfy's param drives ImageRequest.Tcfg, so no second control is registered.
          "usetcfg",
-         // Refiner Upscale Method — picks the pixel-space engine (Real-ESRGAN variant or SeedVR2) for a Refiner
-         // Upscale with no refiner model; see ResolveUpscaleModel for the value mapping.
+         // Refiner Upscale Method: picks the pixel-space engine when there is no refiner model; see ResolveUpscaleModel.
          "refinerupscalemethod",
-         // Style-model (FLUX.1 Redux) strengths — mapped onto the engine's redux.* Extra keys.
+         // Style-model (FLUX.1 Redux) strengths, mapped onto the engine's redux.* Extra keys.
          "stylemodelmergestrength", "stylemodelmultiplystrength", "stylemodelapplystart",
-         // IP-Adapter scheduling knobs — mapped onto the engine's ipadapter.* Extra keys.
+         // IP-Adapter scheduling knobs, mapped onto the engine's ipadapter.* Extra keys.
          "ipadapterweight", "ipadapterstart", "ipadapterend", "ipadapterweighttype"];
 
-    /// <summary>Swarm prompt-syntax tags that need conditioning machinery the Engine's recipes do not expose on the
-    /// request contract at all. Feeding these raw into a text encoder would silently corrupt the generation.
-    /// <c>region</c>/<c>segment</c> are NOT here — they map to <see cref="Regional"/> and are gated per-family.</summary>
+    /// <summary>Prompt-syntax tags the Engine's request contract cannot express. Feeding them to a text encoder would corrupt the output.</summary>
+    /// <remarks><c>region</c> and <c>segment</c> are not here: they map to <see cref="Regional"/> and are gated per family.</remarks>
     private static readonly System.Text.RegularExpressions.Regex UnsupportedPromptSyntax =
         new(@"<(object|clear|embed)\s*:|<break\s*>",
             System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Compiled);
@@ -2407,8 +2203,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         }
         ModelSupport.Family family = ModelSupport.Resolve(compat);
 
-        // Prompt-syntax features with no Engine contract: refuse with the tag named rather than silently feeding
-        // the tag text into the tokenizer (silent bad output is worse than a clean refusal that routes to Comfy).
+        // Refuse unsupported prompt syntax by name rather than feeding the tag text to the tokenizer. A clean refusal routes to Comfy.
         foreach (string promptText in new[] { input.Get(T2IParamTypes.Prompt), input.Get(T2IParamTypes.NegativePrompt) })
         {
             if (string.IsNullOrEmpty(promptText))
@@ -2426,9 +2221,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             }
         }
 
-        // The two-stage "generate an image, then animate it with a separate video model" flow (Comfy's
-        // ImageToVideoGenInfo, driven by the Video Model param) has no Engine equivalent — refuse upfront rather
-        // than silently returning a still image.
+        // The image-then-animate flow (Comfy's ImageToVideoGenInfo, driven by the Video Model param) has no Engine equivalent.
+        // Refuse upfront rather than return a still image.
         if (family.Kind != ModelSupport.Kind.Video && input.Get(T2IParamTypes.VideoModel) is not null)
         {
             input.RefusalReasons.Add(
@@ -2453,10 +2247,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         return ValidateComfyOnlyParams(input) && ModelFitGate.Allows(input, this);
     }
 
-    /// <summary>Music models: refuse the image-only knobs that make no sense for an audio output, plus any music
-    /// param the selected family would silently ignore. Music has no per-family feature model (no MusicFeatures
-    /// enum), so these are hard-coded per family id — reachable families today: acestep, minimaxmusic3
-    /// (YuE and MusicGen belong to AudioLab, which routes them through its own providers).</summary>
+    /// <summary>Refuses image-only knobs on music models, plus any music param the selected family would silently ignore.</summary>
+    /// <remarks>Music has no per-family feature model, so these checks are hard-coded by family id. YuE and MusicGen belong to AudioLab, which routes them through its own providers.</remarks>
     private static bool ValidateMusic(T2IParamInput input, ModelSupport.Family family)
     {
         if (input.Get(T2IParamTypes.InitImage) is not null)
@@ -2474,7 +2266,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             input.RefusalReasons.Add("HartsyInference: LoRAs aren't supported for music models. Remove the LoRA selection.");
             return false;
         }
-        bool hasSourceAudio = input.Get(SwarmUIHartsyInference.AceStepSourceAudioParam) is not null;
+        bool hasSourceAudio = input.Get(HartsyInference.AceStepSourceAudioParam) is not null;
         bool isAceStep = family.Id == "acestep";
         if (hasSourceAudio && !isAceStep)
         {
@@ -2484,30 +2276,30 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             return false;
         }
         // Pre-empt the engine's src_latents-conflict throw with a routable refusal.
-        if (hasSourceAudio && input.TryGet(SwarmUIHartsyInference.AceStepLmPlannerParam, out string lmModel) && lmModel != "none")
+        if (hasSourceAudio && input.TryGet(HartsyInference.AceStepLmPlannerParam, out string lmModel) && lmModel != "none")
         {
             input.RefusalReasons.Add(
                 "HartsyInference: the ACE-Step edit modes and the 5 Hz LM planner both occupy the src_latents slot — "
                 + "set ACE-Step LM Planner to none, or remove the Source Audio.");
             return false;
         }
-        if (hasSourceAudio && input.Get(SwarmUIHartsyInference.AceStepEditModeParam, "continuation") == "repaint"
-            && input.Get(SwarmUIHartsyInference.AceStepRepaintEndParam, 0.0) <= input.Get(SwarmUIHartsyInference.AceStepRepaintStartParam, 0.0))
+        if (hasSourceAudio && input.Get(HartsyInference.AceStepEditModeParam, "continuation") == "repaint"
+            && input.Get(HartsyInference.AceStepRepaintEndParam, 0.0) <= input.Get(HartsyInference.AceStepRepaintStartParam, 0.0))
         {
             input.RefusalReasons.Add(
-                $"HartsyInference: repaint needs Repaint End > Repaint Start (got {input.Get(SwarmUIHartsyInference.AceStepRepaintStartParam, 0.0)}"
-                + $"..{input.Get(SwarmUIHartsyInference.AceStepRepaintEndParam, 0.0)} s).");
+                $"HartsyInference: repaint needs Repaint End > Repaint Start (got {input.Get(HartsyInference.AceStepRepaintStartParam, 0.0)}"
+                + $"..{input.Get(HartsyInference.AceStepRepaintEndParam, 0.0)} s).");
             return false;
         }
         if (!isAceStep)
         {
             (bool Set, string Name)[] aceOnly =
             [
-                (input.TryGet(SwarmUIHartsyInference.AceStepLmPlannerParam, out string lm) && lm != "none", "ACE-Step LM Planner"),
-                (input.TryGet(SwarmUIHartsyInference.AceStepSolverParam, out string im) && im != "ode", "ACE-Step Solver"),
-                (input.TryGet(SwarmUIHartsyInference.AceStepGuidanceTypeParam, out string gt) && gt != "apg", "ACE-Step Guidance Type"),
-                (input.TryGet(SwarmUIHartsyInference.AceStepCfgIntervalStartParam, out double cis) && cis > 0, "ACE-Step CFG Interval Start"),
-                (input.TryGet(SwarmUIHartsyInference.AceStepCfgIntervalEndParam, out double cie) && cie < 1, "ACE-Step CFG Interval End"),
+                (input.TryGet(HartsyInference.AceStepLmPlannerParam, out string lm) && lm != "none", "ACE-Step LM Planner"),
+                (input.TryGet(HartsyInference.AceStepSolverParam, out string im) && im != "ode", "ACE-Step Solver"),
+                (input.TryGet(HartsyInference.AceStepGuidanceTypeParam, out string gt) && gt != "apg", "ACE-Step Guidance Type"),
+                (input.TryGet(HartsyInference.AceStepCfgIntervalStartParam, out double cis) && cis > 0, "ACE-Step CFG Interval Start"),
+                (input.TryGet(HartsyInference.AceStepCfgIntervalEndParam, out double cie) && cie < 1, "ACE-Step CFG Interval End"),
             ];
             foreach ((bool set, string name) in aceOnly)
             {
@@ -2520,7 +2312,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             }
         }
         if (family.Id != "minimaxmusic3"
-            && input.TryGet(SwarmUIHartsyInference.MiniMaxMusicLmPrecisionParam, out string precision) && precision != "bf16")
+            && input.TryGet(HartsyInference.MiniMaxMusicLmPrecisionParam, out string precision) && precision != "bf16")
         {
             input.RefusalReasons.Add(
                 $"HartsyInference: MiniMax Music LM Precision is MiniMax Music 3 only; '{family.Id}' would silently ignore it. Unset it or pick a MiniMax Music 3 model.");
@@ -2529,22 +2321,18 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         return true;
     }
 
-    /// <summary>Video models: the Engine's <see cref="VideoRequest"/> has no composition phase yet (its
-    /// VideoService rejects a LoRA stack outright), and a refiner over an encoded clip is meaningless.</summary>
+    /// <summary>Video model checks. LoRAs are refused because <see cref="VideoRequest"/> has no composition phase, and a refiner cannot run over an encoded clip.</summary>
     private static bool ValidateVideo(T2IParamInput input, string compat, ModelSupport.Family family)
     {
         if (!ValidateSamplingChoice(input, family))
         {
             return false;
         }
-        // Init/end-frame conditioning is per-family. Without this check the Engine used to accept the image and
-        // silently generate text-to-video, which looks like a working generation and is not. Checkpoint-aware:
-        // Wan's Animate/VACE/S2V variants share the family compat classes (header-sniffed engine-side).
+        // Init and end-frame conditioning are per family. Without this check the Engine would silently generate text-to-video.
+        // Checkpoint-aware: Wan's Animate, VACE and S2V variants share compat classes, so the engine's header sniff decides.
         VideoFeatures videoSupported = ModelSupport.SupportedVideoFeatures(input.Get(T2IParamTypes.Model));
-        // LTX-2.5 ships split across four files and must be handed to the Engine as a folder. ModelSupport resolves
-        // those companions through Swarm's normal CommonModels/download path during construction, just as Comfy does.
-        // Reference media rides the prompt box (core's internal PromptImages/Audios/Videos carriers), so these read
-        // what the user attached there rather than a param control of ours.
+        // LTX-2.5 ships as four files and is handed to the Engine as a folder. Reference media rides the prompt box
+        // (core's PromptImages/Audios/Videos carriers), so these checks read what the user attached there.
         bool hasRefImages = input.TryGet(T2IParamTypes.PromptImages, out List<Image> refImgs) && refImgs is { Count: > 0 };
         bool hasRefAudios = input.TryGet(T2IParamTypes.PromptAudios, out List<AudioFile> refAuds) && refAuds is { Count: > 0 };
         bool hasRefVideos = input.TryGet(T2IParamTypes.PromptVideos, out List<VideoFile> refVids) && refVids is { Count: > 0 };
@@ -2558,22 +2346,20 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             (VideoFeatures.ReferenceImages, "reference images (attached to the prompt)", hasRefImages && !animateCheckpoint),
             (VideoFeatures.ReferenceVideos, "reference videos (attached to the prompt)", hasRefVideos),
             (VideoFeatures.ReferenceAudios, "reference audio (attached to the prompt, or Video Audio Reference)",
-                hasRefAudios || input.Get(SwarmUIHartsyInference.VideoAudioReferenceParam) is not null),
+                hasRefAudios || input.Get(HartsyInference.VideoAudioReferenceParam) is not null),
             (VideoFeatures.DrivingVideo, "Wan-Animate driving (Animate Reference Image / Pose Video / Face Video)",
-                input.Get(SwarmUIHartsyInference.AnimateReferenceImageParam) is not null
-                || input.Get(SwarmUIHartsyInference.AnimatePoseVideoParam) is not null
-                || input.Get(SwarmUIHartsyInference.AnimateFaceVideoParam) is not null
+                input.Get(HartsyInference.AnimateReferenceImageParam) is not null
+                || input.Get(HartsyInference.AnimatePoseVideoParam) is not null
+                || input.Get(HartsyInference.AnimateFaceVideoParam) is not null
                 || (animateCheckpoint && hasRefImages)),
             (VideoFeatures.LongFormChain, "long-form chaining (H3 Chain Total Frames)",
-                input.TryGet(SwarmUIHartsyInference.H3ChainTotalFramesParam, out int chainCheck) && chainCheck > 0),
+                input.TryGet(HartsyInference.H3ChainTotalFramesParam, out int chainCheck) && chainCheck > 0),
         ];
         foreach ((VideoFeatures feature, string name, bool requested) in videoChecks)
         {
             if (requested && (videoSupported & feature) == 0)
             {
-                // For H3 the limit is the CHECKPOINT, not the architecture — saying "architecture doesn't support
-                // references" about a model whose sibling checkpoint is built for references sends people looking
-                // in the wrong place.
+                // For H3 the limit is the checkpoint, not the architecture, so the hint points at the sibling checkpoint.
                 string h3Hint = family.Id == "minimax-h3"
                     ? " MiniMax-H3 ships this as two checkpoints: fl2va does start/end frames, ref2va does reference"
                         + " media. Load the other one for this."
@@ -2586,8 +2372,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 return false;
             }
         }
-        // Feature-driven, not blanket: MiniMax-H3 merges LoRAs, the other video families still do not read
-        // context.Loras at all, and silently dropping a selected LoRA is worse than refusing it.
+        // Feature-driven: MiniMax-H3 merges LoRAs, other video families do not read them, and silently dropping a LoRA is worse than refusing it.
         if (input.TryGet(T2IParamTypes.Loras, out List<string> loras) && loras is not null && loras.Count > 0
             && (videoSupported & VideoFeatures.Lora) == 0)
         {
@@ -2604,17 +2389,16 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         return true;
     }
 
-    /// <summary>Checks every composition object the request would produce against the features the Engine's recipe
-    /// for this family actually declares, and refuses by name. This is the honesty guard: it is driven by
-    /// <see cref="IArchitectureRecipe.Supports"/>, so it can never claim more than the Engine will really apply.</summary>
+    /// <summary>Checks each composition object against the features the family's Engine recipe declares, and refuses by name.</summary>
+    /// <remarks>Driven by <see cref="IArchitectureRecipe.Supports"/>, so it never claims more than the Engine applies.</remarks>
     private static bool ValidateImageFeatures(T2IParamInput input, string compat, ModelSupport.Family family)
     {
         if (!ValidateSamplingChoice(input, family))
         {
             return false;
         }
-        // Refiner Upscale without a refiner model is a pixel-space pass here (Real-ESRGAN / SeedVR2). The latent
-        // methods need the refiner's re-denoise — that is the hires-fix item (P2) — so refuse them and let Comfy serve.
+        // Refiner Upscale without a refiner model is a pixel-space pass (Real-ESRGAN or SeedVR2). The latent methods need a
+        // refiner's re-denoise, which this backend does not do, so refuse them and let Comfy serve.
         if (input.Get(T2IParamTypes.RefinerModel) is null
             && input.TryGet(T2IParamTypes.RefinerUpscale, out double upscale) && upscale > 1.0 + 1e-6
             && input.TryGet(ComfyUIBackendExtension.RefinerUpscaleMethod, out string upscaleMethod)
@@ -2625,8 +2409,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 + "refiner this backend upscales in pixel space — pick a Pixel, Model, Real-ESRGAN or SeedVR2 method.");
             return false;
         }
-        // A refiner MODEL must come from a family whose recipe can consume an init image — that is the PostApply
-        // hand-off. Refusing here names the model; the engine-side check would surface as a mid-generation error.
+        // A refiner model must come from a family whose recipe can consume an init image (the PostApply hand-off).
+        // Refusing here names the model; the engine-side check would fail mid-generation.
         if (input.Get(T2IParamTypes.RefinerModel) is T2IModel refModel && refModel is not null)
         {
             ModelSupport.Family refFamily = ModelSupport.Resolve(refModel.ModelClass?.CompatClass?.ID);
@@ -2655,15 +2439,11 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         [
             (ImageFeatures.Lora, "LoRAs", input.TryGet(T2IParamTypes.Loras, out List<string> loras) && loras is not null && loras.Count > 0),
             (ImageFeatures.ControlNet, "ControlNet", AnyControlNetSelected(input)),
-            // Prompt images are EITHER adapter conditioning or in-context edit references depending on the family,
-            // and no family declares both bits, so either one satisfies the slot. Checking IpAdapter alone refused
-            // every reference-edit family outright, which is what blocked multi-image Qwen-Image-Edit.
+            // Prompt images are either adapter conditioning or edit references, depending on the family, so either bit satisfies the slot.
             (ImageFeatures.IpAdapter | ImageFeatures.RefEdit, "IP-Adapter / reference image prompting",
                 input.TryGet(T2IParamTypes.PromptImages, out List<Image> imgs) && imgs is not null && imgs.Count > 0),
             (ImageFeatures.Refiner, "Refiners", input.Get(T2IParamTypes.RefinerModel) is not null),
-            // An Init Image is satisfied by EITHER mode: strength-based img2img, or reference-image editing on an edit
-            // model (Mage-Flow, OmniGen2, Boogu, Qwen-Image-Edit) where Creativity has nothing to select. Checking only
-            // Img2Img here would refuse the edit families outright.
+            // An Init Image is satisfied by either mode: strength-based img2img, or reference editing on an edit model where Creativity does not apply.
             (ImageFeatures.Img2Img | ImageFeatures.RefEdit, "img2img (Init Image)", input.Get(T2IParamTypes.InitImage) is not null),
             (ImageFeatures.Inpaint, "inpainting (Mask Image)", input.Get(T2IParamTypes.MaskImage) is not null),
             (ImageFeatures.Regional, "regional / segment prompting",
@@ -2683,10 +2463,10 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 return false;
             }
         }
-        // An EXPLICIT init-image mode must match the family: reference needs RefEdit, denoise needs Img2Img.
-        // RefEdit-only families never branch on Mode, so an explicit "denoise" there would silently run as an edit.
+        // An explicit init-image mode must match the family: reference needs RefEdit, denoise needs Img2Img.
+        // RefEdit-only families ignore Mode, so "denoise" there would silently run as an edit.
         if (input.Get(T2IParamTypes.InitImage) is not null
-            && input.TryGet(SwarmUIHartsyInference.InitImageModeParam, out string initMode))
+            && input.TryGet(HartsyInference.InitImageModeParam, out string initMode))
         {
             if (initMode == "reference" && (supported & ImageFeatures.RefEdit) == 0)
             {
@@ -2706,11 +2486,9 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         return ValidateImageInputs(input, compat, family, supported);
     }
 
-    /// <summary>Refuses image inputs the model's resolved variant would otherwise drop: prompt images on a family that
-    /// only edits the Init Image and has none, and more images than it reads. Limits are the engine's own
-    /// (<see cref="ImageInputs.LimitsFor"/>), the same the <c>HartsyInferenceGetImageInputs</c> route answers from.</summary>
-    /// <remarks>Reference editing on a base Qwen-Image build needs no check here: its variant does not declare
-    /// <see cref="ImageFeatures.RefEdit"/>, so the feature and mode checks above already refuse it.</remarks>
+    /// <summary>Refuses image inputs the resolved variant would drop: prompt images on a family that only edits the Init Image, or more images than it reads.</summary>
+    /// <remarks>Limits are the engine's own <see cref="ImageInputs.LimitsFor"/>. A base Qwen-Image build needs no check here: its variant lacks
+    /// <see cref="ImageFeatures.RefEdit"/>, so the feature checks already refuse reference editing.</remarks>
     private static bool ValidateImageInputs(T2IParamInput input, string compat, ModelSupport.Family family, ImageFeatures supported)
     {
         T2IModel model = input.Get(T2IParamTypes.Model);
@@ -2761,18 +2539,14 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         return false;
     }
 
-    /// <summary>ComfyUI-only param guard. We advertise "comfyui" (see <see cref="SupportedFeatures"/>) so
-    /// comfyui-tagged requests reach this validator rather than being pre-filtered out; here we honour that by
-    /// refusing — and cleanly routing to a Comfy backend — any comfyui-tagged param actually set that we can't
-    /// service. The check is driven by the params' own FeatureFlag so it auto-covers future Comfy params.</summary>
+    /// <summary>Refuses any comfyui-tagged param that is set and that this backend cannot service, routing the request to Comfy.</summary>
+    /// <remarks>Driven by each param's own FeatureFlag, so new Comfy params are covered automatically. "comfyui" is advertised so such requests reach this check.</remarks>
     private static bool ValidateComfyOnlyParams(T2IParamInput input)
     {
-        // input.InternalSet.ValuesInput is the map of params actually set on the request, keyed by cleaned
-        // param ID — the authoritative "what did the user send" list.
+        // Params actually set on the request, keyed by cleaned param ID.
         Dictionary<string, object> setParams = input.InternalSet.ValuesInput;
 
-        // Explicit safety net first: a custom ComfyUI workflow (the raw node-graph IR, or the stored-workflow
-        // selector that expands into it) is the one we must never accept.
+        // Explicit safety net: never accept a custom ComfyUI workflow, raw or via the stored-workflow selector.
         foreach (string wfKey in new[] { "comfyworkflowraw", "comfyuicustomworkflow" })
         {
             if (setParams.TryGetValue(wfKey, out object wfVal) && !string.IsNullOrWhiteSpace($"{wfVal}"))
@@ -2798,7 +2572,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 continue;
             }
             string valStr = $"{setParams[paramId]}";
-            // Skip params left at their default / ignore value — they have no effect.
+            // Skip params left at their default or ignore value, as they have no effect.
             if (valStr == pType.Default || (pType.IgnoreIf is not null && valStr == pType.IgnoreIf))
             {
                 continue;
@@ -2813,14 +2587,10 @@ public class HartsyInferenceBackend : AbstractT2IBackend
 
     // ─────────────────────────────── 6. Engine auto-update ───────────────────────────────
 
-    /// <summary>Checks NuGet for a newer HartsyInference engine and, when the <c>AutoUpdate</c> setting opts in,
-    /// rebuilds this extension against it. Because the engine is an <b>in-process</b> library (not an external
-    /// process Swarm can relaunch), a fetched update is <i>staged</i> into the extension's build output and only
-    /// takes effect on the next SwarmUI start. 'aggressive' clears NuGet caches and calls
-    /// <see cref="Program.RequestRestart"/> so the new build loads automatically.
-    /// <para>Returns true if a newer engine was staged and the backend should now refuse to run on the stale
-    /// in-process version (forcing the user to restart). False when up to date, when staging failed, when
-    /// 'aggressive' is restarting anyway, or when the loop-guard tripped (run degraded, don't brick).</para></summary>
+    /// <summary>Checks NuGet for a newer HartsyInference engine and, when <c>AutoUpdate</c> opts in, stages a rebuild of this extension against it.</summary>
+    /// <remarks>The engine is an in-process library, so a staged update takes effect on the next SwarmUI start. 'aggressive' also clears NuGet caches
+    /// and calls <see cref="Program.RequestRestart"/>. Returns true when a newer engine was staged and this backend must refuse to run on the old one.
+    /// Returns false when up to date, when staging failed, when a restart is already underway, or when the boot-loop guard trips.</remarks>
     private async Task<bool> MaybeAutoUpdateEngine()
     {
         string mode = (Settings?.AutoUpdate ?? "false").Trim().ToLowerInvariant();
@@ -2829,9 +2599,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             return false;
         }
         bool aggressive = mode is "aggressive" or "force";
-        // Boot-loop guard: when 'aggressive' stages an update and restarts, we record the target version. If we
-        // come back up STILL behind that exact version, the restore isn't advancing — refuse to auto-restart
-        // again and surface an error instead of cycling forever.
+        // Boot-loop guard: 'aggressive' records the target version before restarting. Coming back still behind that exact
+        // version means the restore is not advancing, so do not auto-restart again.
         string updateMarker = Path.Combine(
             Path.GetDirectoryName(typeof(HartsyInferenceBackend).Assembly.Location) ?? ".",
             ".hartsy-engine-update-pending");
@@ -2847,11 +2616,11 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             }
             if (loaded is not null && !IsNewerAlpha(latest, loaded))
             {
-                // Up to date — a prior staged update (if any) applied successfully, so clear the marker.
+                // Up to date: any prior staged update applied, so clear the marker.
                 if (File.Exists(updateMarker))
                 {
                     try { File.Delete(updateMarker); }
-                    catch (Exception mEx) { Logs.Debug($"[HartsyInference] Auto-update: couldn't clear update marker: {mEx.Message}"); }
+                    catch (Exception mEx) { HartsyLogs.Debug($"Auto-update: couldn't clear update marker: {mEx.Message}"); }
                 }
                 AddLoadStatus("Auto-update: engine is already up to date.");
                 return false;
@@ -2859,7 +2628,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             string pending = File.Exists(updateMarker) ? File.ReadAllText(updateMarker).Trim() : null;
             if (aggressive && string.Equals(pending, latest, StringComparison.Ordinal))
             {
-                Logs.Error($"[HartsyInference] Auto-update: engine {latest} was already staged on a previous restart but the running engine is still {loaded}. "
+                HartsyLogs.Warning($"Auto-update: engine {latest} was already staged on a previous restart but the running engine is still {loaded}. "
                     + $"Not auto-restarting again (avoiding a boot loop). The rebuild's NuGet restore isn't resolving {latest}.");
                 AddLoadStatus($"Auto-update: {latest} did not apply after a restart — auto-restart paused to avoid a loop (see logs).");
                 return false; // run degraded on the old engine rather than bricking the backend
@@ -2868,30 +2637,27 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             string csproj = ExtensionProjectPath();
             if (csproj is null)
             {
-                Logs.Warning("[HartsyInference] Auto-update: extension .csproj not found next to the assembly; cannot rebuild.");
+                HartsyLogs.Warning("Auto-update: the extension's '.csproj' file was not found next to the assembly; cannot rebuild.");
                 return false;
             }
             AddLoadStatus($"Auto-update: verifying engine {latest} compiles against this extension (this can take a minute)...");
             string dir = Path.GetDirectoryName(csproj);
-            // Verification build BEFORE we touch anything: a freshly-published engine can have breaking API
-            // changes. This build goes to the csproj's DEFAULT output — NOT Swarm's load folder — purely as a
-            // compile check. RestoreForceEvaluate re-resolves the floating alpha.*, pre-warming the packages folder.
+            // Verification build before touching anything: a new engine can have breaking API changes. This writes to the csproj's
+            // default output, not Swarm's load folder. RestoreForceEvaluate re-resolves the floating alpha.* versions.
             (int code, string output) = await RunDotnet($"build \"{csproj}\" -c Release /p:RestoreForceEvaluate=true", dir);
             if (code != 0)
             {
-                Logs.Error($"[HartsyInference] Auto-update: engine {latest} does NOT compile against this extension — staying on the current engine. Build output:\n{output}");
+                HartsyLogs.Warning($"Auto-update: engine {latest} does not compile against this extension; staying on the current engine. Build output:\n{output}");
                 AddLoadStatus($"Auto-update: engine {latest} failed to compile — keeping the current engine (see logs).");
                 return false;
             }
 
-            // The engine is an IN-PROCESS library: it can't hot-swap, and SwarmUI's ExtensionsManager.BuildExtension
-            // keys its "already built, skip rebuild" decision on the extension's GIT COMMIT hash — NOT on the engine
-            // NuGet version. So to actually apply `latest` we must INVALIDATE that cached build.
+            // The engine is in-process and cannot hot-swap. SwarmUI's ExtensionsManager.BuildExtension skips rebuilds by the
+            // extension's git commit hash, not the engine version, so the cached build must be invalidated.
             string selfDll = typeof(HartsyInferenceBackend).Assembly.Location;
             try
             {
-                // On Linux, unlinking the loaded/mmap'd assembly is allowed — the running process keeps its
-                // mapping so THIS session is unaffected; the file is simply gone from disk for next start.
+                // Unlinking a loaded assembly is allowed on Linux: the process keeps its mapping, and the file is gone for the next start.
                 if (File.Exists(selfDll))
                 {
                     File.Delete(selfDll);
@@ -2899,18 +2665,18 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             }
             catch (Exception delEx)
             {
-                Logs.Warning($"[HartsyInference] Auto-update: couldn't invalidate cached build '{selfDll}' ({delEx.Message}). "
+                HartsyLogs.Warning($"Auto-update: couldn't invalidate cached build '{selfDll}' ({delEx.Message}). "
                     + $"Delete that file (or its folder under src/bin/extensions/) and restart to load engine {latest}.");
                 AddLoadStatus($"Auto-update: couldn't invalidate cached build — delete '{Path.GetFileName(selfDll)}' manually and restart.");
                 return false;
             }
-            Logs.Warning($"[HartsyInference] Engine {latest} verified + cached extension build invalidated. SwarmUI will REBUILD against the new engine on next start (an in-process library can't hot-swap).");
+            HartsyLogs.Info($"Engine {latest} verified and the cached extension build was invalidated. SwarmUI will rebuild against the new engine on next start (an in-process library cannot be hot-swapped).");
             if (aggressive)
             {
-                Logs.Warning("[HartsyInference] AutoUpdate=aggressive — requesting a SwarmUI restart to rebuild and load the new engine.");
+                HartsyLogs.Info("AutoUpdate is set to 'aggressive', so requesting a SwarmUI restart to rebuild and load the new engine.");
                 AddLoadStatus($"Auto-update: engine {latest} verified — restarting SwarmUI to rebuild and apply.");
                 try { File.WriteAllText(updateMarker, latest); }
-                catch (Exception mEx) { Logs.Debug($"[HartsyInference] Auto-update: couldn't write update marker: {mEx.Message}"); }
+                catch (Exception mEx) { HartsyLogs.Debug($"Auto-update: couldn't write update marker: {mEx.Message}"); }
                 Program.RequestRestart();
                 return false; // process is restarting; no need to error the backend
             }
@@ -2919,7 +2685,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         }
         catch (Exception ex)
         {
-            Logs.Error($"[HartsyInference] Auto-update failed: {ex.ReadableString()}");
+            HartsyLogs.Warning($"Auto-update failed; continuing with the current engine: {ex.ReadableString()}");
             AddLoadStatus("Auto-update: failed (continuing with the current engine).");
             return false;
         }
@@ -2967,13 +2733,12 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         }
         catch (Exception ex)
         {
-            Logs.Warning($"[HartsyInference] Auto-update: NuGet version query failed: {ex.ReadableString()}");
+            HartsyLogs.Warning($"Auto-update: NuGet version query failed; continuing with the current engine: {ex.ReadableString()}");
             return null;
         }
     }
 
-    /// <summary>True if <paramref name="candidate"/> is a newer "1.0.0-alpha.N" than <paramref name="current"/>
-    /// (compares the trailing alpha number; unparseable forms fall back to ordinal string compare).</summary>
+    /// <summary>True if <paramref name="candidate"/> is a newer "1.0.0-alpha.N" than <paramref name="current"/>. Unparseable forms fall back to an ordinal compare.</summary>
     private static bool IsNewerAlpha(string candidate, string current)
     {
         static int Num(string v)

@@ -13,13 +13,10 @@ using SiBackend = Hartsy.Extensions.HartsyInferenceBackend.Backends.HartsyInfere
 
 namespace Hartsy.Extensions.HartsyInferenceBackend.WebAPI;
 
-/// <summary>
-/// Admin / diagnostic HTTP routes for the HartsyInference backend. These have no ComfyUI
-/// equivalent — they exist because an in-process backend can answer "what will you do with
-/// this model?" and "what's resident right now?" directly, without a separate process.
-/// All routes are read-only except <see cref="HartsyInferenceClearCache"/>.
-/// See docs/08-Web-API-Routes.md.
-/// </summary>
+/// <summary>Admin and diagnostic HTTP routes for the HartsyInference backend. All are read-only except
+/// <see cref="HartsyInferenceClearCache"/>.</summary>
+/// <remarks>No ComfyUI equivalent: the in-process backend answers "what will this model do?" and "what is resident?"
+/// directly. See docs/08-Web-API-Routes.md.</remarks>
 public static class HartsyInferenceWebAPI
 {
     public static void Register()
@@ -31,7 +28,7 @@ public static class HartsyInferenceWebAPI
         API.RegisterAPICall(HartsyInferenceListLoadedPipelines, false, HartsyInferencePermissions.PermAdminHartsyInference);
         API.RegisterAPICall(HartsyInferenceGetDeviceInfo, false, HartsyInferencePermissions.PermAdminHartsyInference);
         API.RegisterAPICall(HartsyInferenceClearCache, true, HartsyInferencePermissions.PermAdminHartsyInference);
-        Logs.Init("HartsyInference WebAPI routes registered (supported-archs, probe-model, model-features, image-inputs, list-pipelines, device-info, clear-cache).");
+        HartsyLogs.Init("Web API routes registered ('supported-archs', 'probe-model', 'model-features', 'image-inputs', 'list-pipelines', 'device-info', 'clear-cache').");
     }
 
     /// <summary>Enumerate every live HartsyInference backend instance with its handler data.</summary>
@@ -47,14 +44,12 @@ public static class HartsyInferenceWebAPI
         }
     }
 
-    /// <summary>POST /API/HartsyInferenceGetSupportedArchs — list dispatched architectures plus the
-    /// engine-blocked "pending" ones with their reasons. Lets a UI explain coverage at a glance.
-    /// <para>Also returns per-architecture <c>features</c>: the composition features that architecture's recipe
-    /// declares, lowercased, as the same names <c>IsValidForThisBackend</c> refuses on. The gen-page script reads
-    /// this to hide LoRAs / ControlNet / IP-Adapter / Refiner / Seamless Tiling / Variation Seed / inpainting on
-    /// the families that don't have them — otherwise core offers all of those for every model and the refusal only
-    /// arrives after the user hits Generate. Asked of the Engine's registries at call time, so it can't drift from
-    /// what the pipeline will really do.</para></summary>
+    /// <summary>POST /API/HartsyInferenceGetSupportedArchs: dispatched architectures, plus the engine-blocked "pending"
+    /// ones with their reasons.</summary>
+    /// <remarks>Each architecture's <c>features</c> are the composition features its recipe declares, lowercased, as the
+    /// names <c>IsValidForThisBackend</c> refuses on, read from the engine's registries at call time. The gen-page script
+    /// hides LoRAs, ControlNet, IP-Adapter, Refiner, Seamless Tiling, Variation Seed and inpainting on families without
+    /// them, since core would otherwise offer them and refuse only after Generate.</remarks>
     public static async Task<JObject> HartsyInferenceGetSupportedArchs(Session session)
     {
         await Task.CompletedTask;
@@ -104,12 +99,11 @@ public static class HartsyInferenceWebAPI
         return result;
     }
 
-    /// <summary>POST /API/HartsyInferenceGetImageInputs — what images a model takes as input:
-    /// <c>{ need: none|optional|required, modes: [denoise|reference|init], autoMode, maxImages, mask, endFrame }</c>.
-    /// Pass <paramref name="model_name"/> for a concrete model (preferred: Wan and MiniMax-H3 narrow per checkpoint
-    /// file), or <paramref name="arch_id"/> for a Swarm model class id such as <c>qwen-image-edit-plus</c>. A bare
-    /// compat class id is accepted too, but it cannot tell Qwen-Image base from Edit and answers for base.
-    /// The same limits drive this backend's refusals, so a request sized from this answer is not refused for its images.</summary>
+    /// <summary>POST /API/HartsyInferenceGetImageInputs: the images a model takes as input.</summary>
+    /// <remarks>Returns <c>{ need: none|optional|required, modes: [denoise|reference|init], autoMode, maxImages, mask, endFrame }</c>.
+    /// Pass <paramref name="model_name"/> for a concrete model (preferred: Wan and MiniMax-H3 narrow per checkpoint file),
+    /// or <paramref name="arch_id"/> for a Swarm model class id such as <c>qwen-image-edit-plus</c>. A bare compat class
+    /// id cannot tell Qwen-Image base from Edit, so it answers for base. The same limits drive this backend's refusals.</remarks>
     public static async Task<JObject> HartsyInferenceGetImageInputs(Session session, string model_name = "", string arch_id = "")
     {
         await Task.CompletedTask;
@@ -164,7 +158,7 @@ public static class HartsyInferenceWebAPI
 
     /// <summary>The sampler and sigma-schedule names one architecture accepts, as
     /// <c>{ "samplers": [...], "schedulers": [...] }</c>. Empty arrays mean the family samples with its own solver
-    /// and takes no selection — which is what the gen-page script hides the Sampler/Scheduler controls on, so a user
+    /// and takes no selection; the gen-page script hides the Sampler/Scheduler controls on it, so a user
     /// on Wan or LTX is not offered a dropdown whose every value would be refused.</summary>
     private static JObject DescribeSampling(string arch)
     {
@@ -216,7 +210,7 @@ public static class HartsyInferenceWebAPI
         return result;
     }
 
-    /// <summary>POST /API/HartsyInferenceGetModelFeatures — the features ONE model's resolved variant has, plus which
+    /// <summary>POST /API/HartsyInferenceGetModelFeatures: the features ONE model's resolved variant has, plus which
     /// variant the engine resolved it to and from what evidence. Checkpoints that share a compat class can differ
     /// (a base Qwen-Image has no reference editing; its Edit builds do; Wan-Animate takes a driving video), so the
     /// gen-page script asks this per selected model instead of trusting the per-class map.</summary>
@@ -269,7 +263,7 @@ public static class HartsyInferenceWebAPI
         return true;
     }
 
-    /// <summary>POST /API/HartsyInferenceProbeModel — answer "will HartsyInference run this model, and how?"
+    /// <summary>POST /API/HartsyInferenceProbeModel: answer "will HartsyInference run this model, and how?"
     /// for a model by name, WITHOUT loading it. Resolves the model's architecture compat class and
     /// reports supported / pending / unsupported with the human-readable reason.</summary>
     public static async Task<JObject> HartsyInferenceProbeModel(Session session, string model_name)
@@ -294,7 +288,7 @@ public static class HartsyInferenceWebAPI
         };
     }
 
-    /// <summary>POST /API/HartsyInferenceListLoadedPipelines — per-backend resident-model + status snapshot.</summary>
+    /// <summary>POST /API/HartsyInferenceListLoadedPipelines: per-backend resident-model and status snapshot.</summary>
     public static async Task<JObject> HartsyInferenceListLoadedPipelines(Session session)
     {
         await Task.CompletedTask;
@@ -320,9 +314,7 @@ public static class HartsyInferenceWebAPI
         return new JObject { ["success"] = true, ["backends"] = backends };
     }
 
-    /// <summary>POST /API/HartsyInferenceGetDeviceInfo — report each backend's configured compute
-    /// target. Enumerating physical devices ahead of construction isn't exposed by the engine, so
-    /// this reflects the live configuration rather than a hardware scan.</summary>
+    /// <summary>POST /API/HartsyInferenceGetDeviceInfo: each backend's configured GPU settings and status. Reads configuration only, no hardware probe.</summary>
     public static async Task<JObject> HartsyInferenceGetDeviceInfo(Session session)
     {
         await Task.CompletedTask;
@@ -346,7 +338,7 @@ public static class HartsyInferenceWebAPI
         return new JObject { ["success"] = true, ["devices"] = devices };
     }
 
-    /// <summary>POST /API/HartsyInferenceClearCache — evict the pipeline cache. <paramref name="backend_id"/>
+    /// <summary>POST /API/HartsyInferenceClearCache: evict the pipeline cache. <paramref name="backend_id"/>
     /// of -1 clears every HartsyInference backend; otherwise just the matching one. Frees VRAM without
     /// restarting the server.</summary>
     public static async Task<JObject> HartsyInferenceClearCache(Session session, int backend_id = -1, bool free_system_ram = false)

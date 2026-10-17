@@ -8,18 +8,10 @@ using HartsyInference.Engine.Registry;
 using Hartsy.Extensions.HartsyInferenceBackend.Backends;
 using Hartsy.Extensions.HartsyInferenceBackend.Services;
 using Hartsy.Extensions.HartsyInferenceBackend.WebAPI;
+using EngineH3ChainPlanner = HartsyInference.Engine.Recipes.Video.MiniMaxH3ChainPlanner;
 
-// NOTE: Namespace must NOT contain "SwarmUI" (reserved for built-ins).
-// See docs/00-Overview.md for the broader plan.
+// Namespace must not contain "SwarmUI" (reserved for built-ins).
 namespace Hartsy.Extensions.HartsyInferenceBackend;
-
-// NOTE: This extension used to install an AssemblyLoadContext.Default.Resolving hook
-// ([ModuleInitializer]) to locate HartsyInference.*.dll next to the extension DLL. That's
-// now handled by Swarm core's SwarmExtensionLoadContext (ExtensionsManager.cs), which
-// probes the extension's folder for private deps after host resolution fails. Keeping
-// the old hook caused every HartsyInference DLL to load into the DEFAULT context first,
-// producing "ships X.dll but host already has it loaded" warnings at startup and a
-// version-skew hazard (host copy silently wins over the extension's copy).
 
 /// <summary>Permissions for the HartsyInference backend extension.</summary>
 public static class HartsyInferencePermissions
@@ -41,19 +33,13 @@ public static class HartsyInferencePermissions
         PermissionDefault.ADMINS, Group));
 }
 
-/// <summary>
-/// Extension entry point. Registers the HartsyInferenceBackend backend type, custom
-/// parameters, feature flags, and HTTP routes.
-/// See docs/01-Architecture.md for the component diagram.
-/// </summary>
-public class SwarmUIHartsyInference : Extension
+/// <summary>Entry point. Registers the backend type, parameters, feature flags and HTTP routes.</summary>
+public class HartsyInference : Extension
 {
-    // Wan-Animate conditioning inputs. A model-named group is right here precisely BECAUSE it is model-gated:
-    // hartsy_wan_animate is only granted for an Animate checkpoint, so the group is absent otherwise.
+    // Wan-Animate conditioning inputs. Model-gated: hartsy_wan_animate is granted only for Animate checkpoints.
     public static T2IParamGroup WanAnimateParamGroup;
 
-    // HartsyInference-specific params. Registered under feature flag "hartsyinference"
-    // so they only show when our backend is the active target.
+    // Gated on the "hartsyinference" feature flag, so these only show when this backend is active.
     public static T2IRegisteredParam<Image> AnimateReferenceImageParam;
 
     public static T2IRegisteredParam<SwarmUI.Media.AudioFile> VideoAudioReferenceParam;
@@ -68,19 +54,12 @@ public class SwarmUIHartsyInference : Extension
     public static T2IRegisteredParam<Image> AnimateBackgroundVideoParam;
     public static T2IRegisteredParam<Image> AnimateMaskVideoParam;
 
-    // MiniMax-H3 long-form chaining: generates past one denoise pass as successive segments that each hold the
-    // previous segment's tail fixed. A model-named group for the same reason as WanAnimateParamGroup above:
-    // hartsy_h3_chain is only granted for a MiniMax-H3 checkpoint.
+    // MiniMax-H3 long-form chaining: each segment holds the previous segment's tail fixed. Model-gated like WanAnimateParamGroup.
     public static T2IParamGroup MiniMaxH3ParamGroup;
     public static T2IRegisteredParam<int> H3ChainTotalFramesParam;
     public static T2IRegisteredParam<int> H3ChainContextFramesParam;
 
-    // CFG-Rescale is registered here rather than reading Comfy's "Rescale CFG Multiplier" because the two
-    // compute different things: CfgHelper.ApplyCfgRescale rescales the per-token last-dim L2 norm, Comfy's
-    // RescaleCFG node reduces standard deviation over all non-batch dims. The same slider value would produce a
-    // different-strength effect on each backend, so sharing one control would mislead.
-    // Sampler and TCFG have no such difference and are read from Comfy's params instead (see the backend's
-    // BuildImageRequest); this is the only member of that cluster left.
+    /// <summary>Not shared with Comfy's Rescale CFG Multiplier: that node uses a different norm, so one slider would mean different strengths per backend.</summary>
     public static T2IRegisteredParam<double> CfgRescaleParam;
 
     /// <summary>How the Init Image is consumed: denoise (classic img2img) vs reference (in-context edit).</summary>
@@ -115,11 +94,9 @@ public class SwarmUIHartsyInference : Extension
     public static T2IRegisteredParam<int> RestoreOverlapParam;
     public static T2IRegisteredParam<double> RestoreStrengthParam;
 
-    // Music params (ACE-Step edit modes + 5 Hz LM planner + advanced CFG; YuE sampling). Named for the model
-    // family that honors each one, which is also what keeps them off AudioLab's names — it owns the bare
-    // "Cover Strength"/"LM Top K"/"YuE Temperature" spellings, and a cleaned-name collision in
-    // T2IParamTypes.Register crashes SwarmUI at init. "YuE Stage-1" because these drive the Stage-1 LM only.
-    // Real nested groups (T2IParamGroup.Parent), the way core nests Video Obscure Options under Advanced Video.
+    // Music params, named for the model family that honors each one. AudioLab owns the bare "Cover Strength" and
+    // "LM Top K" spellings, and a duplicate cleaned name crashes SwarmUI at init in T2IParamTypes.Register.
+    // "YuE Stage-1" because these drive the Stage-1 LM only. Nested via T2IParamGroup.Parent.
     public static T2IParamGroup AceStepParamGroup, AceStepEditingGroup, AceStepPlannerGroup, AceStepGuidanceGroup, MiniMaxMusicGroup;
     public static T2IRegisteredParam<AudioFile> AceStepSourceAudioParam;
     public static T2IRegisteredParam<string> AceStepEditModeParam;
@@ -142,32 +119,13 @@ public class SwarmUIHartsyInference : Extension
 
     public override void OnPreInit()
     {
-        Logs.Init("HartsyInference extension pre-init");
-
-        // Engine performance config: since engine 1.0.0-alpha.45, the standard performance profile
-        // (cuDNN fused SDPA, fp8-native GEMM on SM 8.9+, F16 DiT activations, resident DiT weights, raised
-        // mem-pool release threshold) is DEFAULT-ON inside the engine itself — nothing to set here, every
-        // install reproduces the published benchmark times out of the box. Operators can disable any feature
-        // with HARTSY_<FEATURE>=0 in the launcher environment; the engine logs the resolved set at backend
-        // init ("[Cuda] perf flags: ..."). See the engine's docs/PERFORMANCE.md.
-
-        // Register feature flags here if needed before settings load.
-        // Most feature flags are advertised dynamically via HartsyInferenceBackend.SupportedFeatures.
-
-        // Model classes core doesn't know: ACE-Step v1 (core only registers v1.5), Lance image + video
-        // (core has no Lance classes at all — folder models with llm_config.json), MusicGen, YuE, F-Lite.
-        // Must register before model folders are scanned.
+        HartsyLogs.Init("Starting up.");
+        // Model classes must be registered before model folders are scanned.
         Generation.ModelClassRegistrations.RegisterAll();
-        // Boogu: core now detects it (compat class "boogu") and excludes it from the OmniGen2 probe, so
-        // the extension reuses core's classification — no registration needed.
     }
 
-    /// <summary>Adds <c>tcd</c> to the shared Sampler dropdown. We read Comfy's Sampler param rather than
-    /// registering a second one, but its stock list has no <c>tcd</c> entry while the engine's
-    /// <c>SchedulerFactory</c> implements <c>TcdScheduler</c> — without this, adopting the shared param would
-    /// quietly drop TCD-distilled checkpoint support. The list is a union across backends by design (core
-    /// concatenates whatever a live Comfy reports from its own <c>object_info</c>), so contributing one value a
-    /// running backend can service is the same pattern, not a special case.</summary>
+    /// <summary>Adds <c>tcd</c> to the Sampler dropdown. Comfy's stock list lacks it, but the engine's <c>SchedulerFactory</c>
+    /// implements <c>TcdScheduler</c>, so TCD-distilled checkpoints need it selectable.</summary>
     private static void PopulateSamplerValues()
     {
         try
@@ -178,14 +136,12 @@ public class SwarmUIHartsyInference : Extension
         }
         catch (Exception ex)
         {
-            Logs.Error($"[HartsyInference] Failed to add 'tcd' to the Sampler dropdown: {ex.Message}");
+            HartsyLogs.Warning($"Could not add 'tcd' to the Sampler dropdown, so TCD-distilled models cannot be selected: {ex.Message}");
         }
     }
 
-    /// <summary>Adds this backend's pixel-space upscalers to Comfy's Refiner Upscale Method dropdown. Core validates a
-    /// dropdown value against its list, so without these entries a user could only reach Real-ESRGAN by the
-    /// <c>model-*</c> names of files in Comfy's upscale_models folder. The plain <c>pixel-*</c> values and the
-    /// default map onto Real-ESRGAN by factor; <c>latent-*</c> still needs a refiner model (see
+    /// <summary>Adds pixel-space upscalers to Comfy's Refiner Upscale Method dropdown, which core validates values against.
+    /// <c>pixel-*</c> and the default map onto Real-ESRGAN by factor. <c>latent-*</c> needs a refiner model (see
     /// <c>HartsyInferenceBackend.ValidateImageFeatures</c>).</summary>
     private static void PopulateUpscaleMethodValues()
     {
@@ -200,7 +156,7 @@ public class SwarmUIHartsyInference : Extension
         }
         catch (Exception ex)
         {
-            Logs.Error($"[HartsyInference] Failed to add the Real-ESRGAN / SeedVR2 entries to the Refiner Upscale Method dropdown: {ex.Message}");
+            HartsyLogs.Warning($"Could not add the Real-ESRGAN and SeedVR2 entries to the Refiner Upscale Method dropdown: {ex.Message}");
         }
     }
 
@@ -225,18 +181,18 @@ public class SwarmUIHartsyInference : Extension
             if (found.Count > 0)
             {
                 T2IParamTypes.ConcatDropdownValsClean(ref SwarmUI.Builtin_ComfyUIBackend.ComfyUIBackendExtension.IPAdapterModels, found);
-                Logs.Verbose($"[HartsyInference] IP-Adapter dropdown populated with {found.Count} local file(s).");
+                HartsyLogs.Debug($"Found {found.Count} IP-Adapter model file(s) for the IP-Adapter dropdown.");
             }
         }
         catch (Exception ex)
         {
-            Logs.Error($"[HartsyInference] Failed to populate IP-Adapter model list: {ex.Message}");
+            HartsyLogs.Warning($"Could not list IP-Adapter models, so the IP-Adapter dropdown may be empty: {ex.Message}");
         }
     }
 
     public override void OnInit()
     {
-        Logs.Init("HartsyInference extension init");
+        HartsyLogs.Init("Registering parameters and web routes.");
 
         // Model-aware param visibility. "hartsyinference" only means "our backend is running", so without
         // this every param below shows under every model. See Assets/hartsy-params.js.
@@ -244,10 +200,8 @@ public class SwarmUIHartsyInference : Extension
 
         RegisterParameterRemaps();
 
-        // The Comfy extension's Use IP-Adapter dropdown normally populates from a live ComfyUI
-        // backend's object_info. When only HartsyInference backends run, populate it from the
-        // ipadapter model folder directly (the same folder-listing approach the style-model
-        // dropdown uses), so IPA works Comfy-free. Refresh keeps it current after downloads.
+        // Comfy's Use IP-Adapter dropdown normally fills from a live ComfyUI backend. With only HartsyInference backends
+        // running, list the ipadapter model folder instead, as the style-model dropdown does. Refresh keeps it current.
         PopulateIpAdapterModels();
         Program.ModelRefreshEvent += PopulateIpAdapterModels;
 
@@ -257,9 +211,8 @@ public class SwarmUIHartsyInference : Extension
         PopulateSamplerValues();
         PopulateUpscaleMethodValues();
 
-        // 1. Param groups. There is deliberately no group named after this extension: a group named for the
-        //    backend can never be model-scoped, which is what left every param below permanently visible.
-        //    Everything either lives in the matching core group or in a group named for the model family.
+        // 1. Param groups. No group is named after this extension, since a backend-named group can never be model-scoped.
+        //    Params live in the matching core group or in a group named for the model family.
         WanAnimateParamGroup = new("Wan Animate", Toggles: true, Open: false,
             Description: "Wan-Animate conditioning: the character image to animate, plus optional pre-rendered "
                 + "pose/face driving clips. The Init Image slot carries the driving video. The character image can "
@@ -279,15 +232,11 @@ public class SwarmUIHartsyInference : Extension
             FeatureFlag: "hartsyinference,hartsy_wan_animate",
             ChangeWeight: 2));
 
-        // MiniMax-H3 ref2va reference media is NOT registered as params here. Core already carries
-        // drag/paste-attached prompt-box media in T2IParamTypes.PromptImages/PromptAudios/PromptVideos, and the
-        // model's own text encoder resolves the <Picture N>/<Audio N>/<Video N> tags the user types inline — Swarm
-        // just supplies the ordered lists. HartsyInferenceBackend.BuildReference* reads those, index for index with
-        // the reference node, so the media shows up where the rest of SwarmUI puts media instead of in four
-        // bespoke controls that only appear for one model.
-        // Wan-Animate driving preprocessing. When on (default), the backend auto-derives the pose skeleton +
-        // cropped face from the Init-Image driving clip (the way the checkpoint was trained), instead of feeding
-        // the raw clip. Toggle off (or supply the overrides below) to hand the backend pre-rendered inputs.
+        // MiniMax-H3 ref2va media is not registered as params. It comes from core's prompt-box lists
+        // (T2IParamTypes.PromptImages/PromptAudios/PromptVideos), which BuildReference* reads in order.
+        // The model resolves the inline <Picture N>/<Audio N>/<Video N> tags itself.
+        // Wan-Animate driving preprocessing. On (default), derives the pose skeleton and cropped face from the driving clip,
+        // as the checkpoint was trained. Off, or with the overrides below, takes pre-rendered inputs instead.
         AnimateAutoPreprocessParam = T2IParamTypes.Register<bool>(new(
             "Animate Auto-Preprocess",
             "Wan-Animate: auto-derive the pose skeleton + cropped face from the Init-Image driving video (the format the model was trained on).\nOn (default) = best motion fidelity; off = feed the raw clip (legacy). The pose/face override params below take precedence when set.",
@@ -390,9 +339,8 @@ public class SwarmUIHartsyInference : Extension
             ChangeWeight: 2,
             DependNonDefault: AnimateReferenceImageParam.Type.ID));
 
-        // Extension-registered (NOT a Swarm core param — verified absent upstream as of 2026-08-05): the
-        // audio-reference input for joint audio+video models (MiniMax-H3 voice/style reference). The backend
-        // maps it to the engine's VideoRequest.VideoAudioReference beside core's Video Audio Input.
+        // Extension-registered (no core equivalent): audio reference for joint audio+video models (MiniMax-H3 voice/style).
+        // Maps to the engine's VideoRequest.VideoAudioReference beside core's Video Audio Input.
         VideoAudioReferenceParam = T2IParamTypes.Register<SwarmUI.Media.AudioFile>(new(
             "Video Audio Reference",
             "For audio+video models that support a reference audio clip (e.g. MiniMax-H3 voice reference): the generated soundtrack imitates this clip's voice/style rather than treating it as literal input audio.",
@@ -416,15 +364,14 @@ public class SwarmUIHartsyInference : Extension
         H3ChainContextFramesParam = T2IParamTypes.Register<int>(new(
             "H3 Chain Context Frames",
             "MiniMax-H3: how many frames of the previous segment are carried into the next as fixed context, which is what keeps the seams continuous.\nSnapped onto the chain's own grid (39, 90, 141, ...), the 17k+5 grid intersected with a whole number of 40 Hz audio rows; the default is the engine's own reference value. Refused (not silently adjusted) if the result leaves no room for new frames at the current frame count. Longer holds continuity better and costs that many re-denoised frames per segment.",
-            HartsyInference.Engine.Recipes.Video.MiniMaxH3ChainPlanner.DefaultContextFrames.ToString(), Min: 39, Max: 498, Step: 51,
+            EngineH3ChainPlanner.DefaultContextFrames.ToString(), Min: 39, Max: 498, Step: 51,
             Toggleable: true,
             Group: MiniMaxH3ParamGroup,
             FeatureFlag: "hartsyinference,hartsy_h3_chain",
             ChangeWeight: 2));
 
-        // Sampler and TCFG are NOT registered here — the backend reads Comfy's own "Sampler" and "Use TCFG"
-        // params instead (both are in HonoredComfyParams). Registering our own would put a second, near-identical
-        // control beside Comfy's for no gain.
+        // Sampler and TCFG are not registered here. The backend reads Comfy's "Sampler" and "Use TCFG" instead
+        // (see HonoredComfyParams), since a second near-identical control adds nothing.
 
         CfgRescaleParam = T2IParamTypes.Register<double>(new(
             "CFG Rescale",
@@ -449,10 +396,8 @@ public class SwarmUIHartsyInference : Extension
             GetValues: _ => new List<string> { "auto", "denoise", "reference" },
             DependNonDefault: T2IParamTypes.InitImage.Type.ID));
 
-        // FaceID-PlusV2 shortcut strength: sits with the Comfy extension's IP-Adapter params in the
-        // Image Prompting group (same "ipadapter" feature flag + dropdown dependency) so it appears
-        // exactly when an IP-Adapter is selected. Only consumed for faceid-plusv2 checkpoints; the
-        // 1.0 default matches the official IPAdapterFaceIDPlus pipeline (s_scale).
+        // FaceID-PlusV2 shortcut strength. Sits in the Image Prompting group with Comfy's IP-Adapter params, so it shows
+        // whenever an IP-Adapter is selected. Only faceid-plusv2 checkpoints read it; 1.0 matches IPAdapterFaceIDPlus's s_scale.
         FaceIdV2WeightParam = T2IParamTypes.Register<double>(new(
             "FaceID V2 Weight",
             "Strength of the FaceID-PlusV2 CLIP-face shortcut mix (the official pipeline's 's_scale').\nHigher = the CLIP appearance of the face crop contributes more on top of the ArcFace identity tokens.\nOnly used with ip-adapter-faceid-plusv2 models; 1.0 is the official default.",
@@ -465,19 +410,16 @@ public class SwarmUIHartsyInference : Extension
             Examples: ["0.5", "1", "1.5"],
             DependNonDefault: SwarmUI.Builtin_ComfyUIBackend.ComfyUIBackendExtension.UseIPAdapterForRevision.Type.ID));
 
-        // Ideogram 4 magic prompt: optional LLM rewrite of a plain prompt into Ideogram's structured JSON
-        // caption (Generation.Ideogram4MagicPrompt). Ideogram 4 is trained on structured captions; plain
-        // text also works, so this is opt-in and only fires for Ideogram 4 generations.
+        // Ideogram 4 magic prompt: optional LLM rewrite of a plain prompt into the structured JSON caption Ideogram 4 is trained on.
+        // Plain text also works, so this is opt-in and only fires for Ideogram 4 generations.
         Ideogram4ParamGroup = new("Ideogram 4", Toggles: false, Open: false, IsAdvanced: false);
 
         Ideogram4MagicPromptParam = T2IParamTypes.Register<bool>(new(
             "Ideogram 4 Magic Prompt",
             "Rewrite your plain prompt into Ideogram 4's structured JSON caption using a running LLM backend, the way Ideogram's own stack does.\nRequires an LLM backend (Server > Backends — LlamaSharp, Anthropic, or remote). When off (default), your prompt is sent to the model as-is (which also works).",
             "false",
-            // Toggleable so the frontend only sends it (and thus only requires the
-            // "hartsyinference" flag) when actually enabled. A non-toggleable flagged param
-            // is sent on every request, forcing "hartsyinference" onto unrelated generations
-            // and refusing the Comfy backend (which lacks the flag) — see [[backend feature flags]].
+            // Toggleable: a flagged param that is always sent would force "hartsyinference" onto every generation
+            // and refuse the Comfy backend, which lacks the flag.
             Toggleable: true,
             Group: Ideogram4ParamGroup,
             FeatureFlag: "hartsyinference,hartsy_ideogram4"));
@@ -491,12 +433,9 @@ public class SwarmUIHartsyInference : Extension
             FeatureFlag: "hartsyinference,hartsy_ideogram4",
             DependNonDefault: Ideogram4MagicPromptParam.Type.ID));
 
-        // Restore (SeedVR2): optional one-step restoration/upscale pass over the generated frames
-        // before muxing. The target is an AREA (aspect preserved by the model's bicubic area-resize) —
-        // SeedVR2 has no scale factor. Enabled by toggling the model param on; all params are Toggleable
-        // for the same feature-flag reason as Ideogram 4 above.
-        // Every lever defaults to "follow the backend", so the easy path stays the one dropdown in backend settings
-        // and this group only matters to someone deliberately overriding a single knob for one generation.
+        // Restore (SeedVR2): one-step restoration/upscale over the generated frames before muxing. The target is an area,
+        // not a scale factor. Enabled by toggling the model param on; params are Toggleable for the same flag reason as Ideogram 4.
+        // Every lever defaults to "follow the backend", so this group only matters when overriding one knob per generation.
         VramParamGroup = new("VRAM & Memory", Toggles: false, Open: false, IsAdvanced: true,
             Description: "Per-generation overrides of this backend's VRAM mode. Every setting here defaults to "
                 + "following the backend, so leave them alone unless you are targeting one specific behaviour.\n"
@@ -595,8 +534,7 @@ public class SwarmUIHartsyInference : Extension
             OrderPriority: 8,
             ViewType: ParamViewType.SLIDER));
 
-        // Not "Video Restore": it runs over a still image just as well, and this is the group users toggle to
-        // enable the pass at all, so it toggles as one.
+        // Not "Video Restore": the pass also runs on stills, and this group toggles the whole pass.
         VideoRestoreParamGroup = new("Restore / Upscale", Toggles: true, Open: false, IsAdvanced: true,
             Description: "SeedVR2 restoration pass over the finished generation — video frames before muxing, or a "
                 + "still image after generation.");
@@ -608,9 +546,8 @@ public class SwarmUIHartsyInference : Extension
             Toggleable: true,
             Group: VideoRestoreParamGroup,
             FeatureFlag: "hartsyinference",
-            // The engine's own restore catalog, not the model folder: these resolve through ModelResolver by
-            // catalog id and download themselves, so a free-text box here just invited typos that fail at
-            // generate time.
+            // Engine restore catalog, not the model folder: ids resolve through ModelResolver and download on use,
+            // so free text would only produce typos that fail at generate time.
             GetValues: _ => [.. ModelCatalog.ForModality(Modality.Restore)
                 .Select(entry => $"{entry.Id}///{entry.DisplayName}")]));
 
@@ -664,11 +601,8 @@ public class SwarmUIHartsyInference : Extension
             FeatureFlag: "hartsyinference",
             DependNonDefault: RestoreModelParam.Type.ID));
 
-        // One group per music family, with real nested subgroups. These used to be a single vendor-named group
-        // whose subgroups were faked with OrderPriority bands, on the belief that Swarm had no nested groups —
-        // it does: T2IParamGroup takes a Parent, which is how core nests Video Obscure Options under Advanced
-        // Video. Each group is model-gated by its params' flags, so selecting MusicGen (which honours none of
-        // these) collapses the whole tree: hideUnsupportableParams hides a group with no visible params.
+        // One group per music family, nested via T2IParamGroup.Parent. Each is model-gated by its params' flags, so a model
+        // that honours none of them collapses the whole tree (hideUnsupportableParams hides groups with no visible params).
         AceStepParamGroup = new("ACE-Step", Toggles: false, Open: false,
             Description: "ACE-Step editing, planning and guidance controls.");
         AceStepEditingGroup = new("ACE-Step Editing", Toggles: true, Open: false, OrderPriority: 1, Parent: AceStepParamGroup,
@@ -822,9 +756,8 @@ public class SwarmUIHartsyInference : Extension
             IsAdvanced: true,
             GetValues: _ => new List<string> { "ode", "sde" }));
 
-        // Replaced the old "ACE-Step Use ADG" bool: upstream offers three guidance blends and a bool could
-        // only reach two. No ParameterRemaps entry — a preset's "true"/"false" is not a valid enum value
-        // (same reasoning as the deleted Sampler param).
+        // Enum, not a bool: upstream has three guidance blends and a bool reaches only two.
+        // No ParameterRemaps entry, since a preset's "true"/"false" is not a valid value.
         AceStepGuidanceTypeParam = T2IParamTypes.Register<string>(new(
             "ACE-Step Guidance Type",
             "ACE-Step: guidance blend when CFG > 1 on non-turbo checkpoints. apg (default, momentum-projected), cfg (plain classifier-free), adg.",
@@ -894,11 +827,9 @@ public class SwarmUIHartsyInference : Extension
             OrderPriority: 30,
             IsAdvanced: true));
 
-        // 2. Register the backend type (single type — no _selfstart vs _api split,
-        //    we always run in-process).
-        // Fully qualify Backends.HartsyInferenceBackend because the trailing namespace
-        // segment of this file (`Hartsy.Extensions.HartsyInferenceBackend`) collides
-        // with the unqualified class name.
+        // 2. Register the backend type. Always in-process, so there is no separate API variant.
+        // Fully qualify Backends.HartsyInferenceBackend: the namespace's last segment (Hartsy.Extensions.HartsyInferenceBackend)
+        // shadows the bare name.
         Program.Backends.RegisterBackendType<Backends.HartsyInferenceBackend>(
             "hartsyinference",
             "HartsyInference (Pure C# Inference)",
@@ -916,10 +847,7 @@ public class SwarmUIHartsyInference : Extension
         WarnOnUndeclaredFeatureFlags();
     }
 
-    /// <summary>Keeps saved presets, preset links and "reuse parameters" from older images working across the
-    /// 2026-08 rename that dropped the vendor prefixes. <c>T2IParamTypes.ParameterRemaps</c> is consulted inside
-    /// <c>GetType</c>, so one entry covers both preset loading (<c>T2IPreset</c>) and metadata reuse
-    /// (<c>T2IParamInput</c>). Only maps IDs that are no longer registered, per that dictionary's own contract.</summary>
+    /// <summary>Remaps retired param IDs so old presets, preset links and reused parameters still load. One entry covers T2IPreset and T2IParamInput, since ParameterRemaps is consulted in GetType. Only IDs that are no longer registered belong here.</summary>
     private static void RegisterParameterRemaps()
     {
         (string Old, string New)[] renames =
@@ -949,10 +877,8 @@ public class SwarmUIHartsyInference : Extension
             ("hartsymusicuseadg", "acestepuseadg"),
             ("hartsymusiccfgintervalstart", "acestepcfgintervalstart"),
             ("hartsymusiccfgintervalend", "acestepcfgintervalend"),
-            // Deleted in favour of Comfy's own param. Safe to point at it: same boolean, same meaning, so an old
-            // preset's "true"/"false" carries over unchanged. The deleted Sampler param deliberately has NO entry
-            // here — it spelled DPM++ 2M as "dpm++2m" where Comfy's dropdown says "dpmpp_2m", so remapping would
-            // hand that dropdown a value it doesn't list. Losing the preference is better than an invalid value.
+            // Points at Comfy's own param: same boolean, same meaning. No entry for Sampler: its "dpm++2m"
+            // value is not in Comfy's dropdown ("dpmpp_2m"), and losing that preference beats an invalid value.
             ("hartsyinferencetcfg", "usetcfg"),
         ];
         foreach ((string old, string updated) in renames)
@@ -961,14 +887,9 @@ public class SwarmUIHartsyInference : Extension
         }
     }
 
-    /// <summary>Fails loudly at startup if any param registered above carries a FeatureFlag the backend does not
-    /// advertise. <c>T2IEngine</c> drops a backend whose SupportedFeatures don't cover a job's required flags, so
-    /// such a param makes every generation that touches it refuse — with a message that names no param and no flag.
-    /// Flags in <c>T2IEngine.DisregardedFeatureFlags</c> are UI-visibility-only and never gate a backend, so they
-    /// are exempt (that is how core's own "text2video"/"text2audio" tags work without any backend declaring them).
-    /// <para>Checks every registered param rather than one group's: our params live in core groups now, and the
-    /// group filter this used to apply covered only 9 of them. Any flag beginning "hartsy" is ours to declare no
-    /// matter who registered the param.</para></summary>
+    /// <summary>Fails at startup if a registered param carries a "hartsy" FeatureFlag this backend does not advertise.
+    /// T2IEngine would refuse every generation using that param, with no message naming the param or flag. Checks every
+    /// registered param, not one group. Flags in <c>T2IEngine.DisregardedFeatureFlags</c> are UI-only and exempt.</summary>
     private static void WarnOnUndeclaredFeatureFlags()
     {
         HashSet<string> covered = [.. Backends.HartsyInferenceBackend.DeclaredFeatures, .. T2IEngine.DisregardedFeatureFlags];
@@ -983,9 +904,9 @@ public class SwarmUIHartsyInference : Extension
             {
                 if (!covered.Contains(flag))
                 {
-                    Logs.Error($"[HartsyInference] Param '{type.Name}' requires feature flag '{flag}', which this "
-                        + "backend does not advertise — every generation using that param will be refused with no "
-                        + "explanation. Add it to HartsyInferenceBackend.DeclaredFeatures, or drop the flag.");
+                    HartsyLogs.Error($"Param '{type.Name}' requires feature flag '{flag}', which this "
+                        + "backend does not advertise. Every generation using that param will be refused. "
+                        + "Add the flag to HartsyInferenceBackend.DeclaredFeatures, or remove it from the param.");
                 }
             }
         }
@@ -993,12 +914,12 @@ public class SwarmUIHartsyInference : Extension
 
     public override void OnPreLaunch()
     {
-        // No special wiring needed — backend instances are created on demand by Swarm.
+        // Backend instances are created on demand by Swarm, so nothing to wire here.
     }
 
     public override void OnShutdown()
     {
-        Logs.Init("HartsyInference extension shutdown");
+        HartsyLogs.Info("Shutting down.");
         T2IEngine.PreGenerateEvent -= ModelFitGate.Prepare;
         // Per-instance shutdown is handled by the BackendHandler.
     }

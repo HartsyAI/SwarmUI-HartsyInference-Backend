@@ -10,24 +10,16 @@ using ISSize = SixLabors.ImageSharp.Size;
 
 namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
-/// <summary>
-/// ControlNet conditioning wrappers for the in-engine annotator models (HED soft-edge, Lineart,
-/// NormalBAE, UperNet segmentation) — the same auto-download + static-cache + [1,3,H,W]-[0,1] contract as
-/// <see cref="DepthPreprocessor"/>. Each model runs at its architecture-valid resolution
-/// (rounded from the generation size) and the map is bilinearly rescaled to the exact target
-/// (nearest-neighbor for the segmentation palette map, which must stay on exact class colors).
-/// Parity vs controlnet_aux is pinned by the engine's Hed/Lineart/NormalBae/UperNetSeg parity tests.
-/// </summary>
+/// <summary>ControlNet conditioning for the in-engine annotators (HED, Lineart, NormalBAE, UperNet segmentation), sharing <see cref="DepthPreprocessor"/>'s download, cache and [1,3,H,W] [0,1] contract.</summary>
 public static class AnnotatorControlPreprocessors
 {
-    // s_lock guards loads AND forwards: each cached model is one shared instance whose forward is not re-entrant,
-    // so two backends (or two same-backend generations) must not run it concurrently.
+    // s_lock guards loads and forwards: cached models are shared and their forward is not re-entrant.
     private static readonly object s_lock = new();
     private static HedPreprocessor s_hed;
     private static LineartPreprocessor s_lineart;
     private static NormalBaePreprocessor s_normal;
     private static UperNetSegPreprocessor s_segment;
-    // Model weights are (partly) views owned by their loaders — loaders live with the cached models.
+    // Model weights are (partly) views owned by their loaders; keep the loaders alive with the cached models.
     private static readonly List<PytorchPickleLoader> s_loaders = [];
 
     /// <summary>HED soft edge map (softedge_hed form) for <paramref name="input"/> at the generation resolution.</summary>
@@ -56,7 +48,7 @@ public static class AnnotatorControlPreprocessors
         return UnitMapToConditioning(unit, w, h, targetWidth, targetHeight);
     }
 
-    /// <summary>Lineart map (white lines on black — the CN conditioning form) at the generation resolution.</summary>
+    /// <summary>Lineart map (white lines on black, the CN conditioning form) at the generation resolution.</summary>
     public static Tensor ProcessLineart(Image input, int targetWidth, int targetHeight, IBackend backend, Action<string> log)
     {
         LineartPreprocessor pre = GetLineart(log);
@@ -101,9 +93,7 @@ public static class AnnotatorControlPreprocessors
         return output;
     }
 
-    /// <summary>ADE20K-palette segmentation map (UperNet-ConvNeXt-Small, the diffusers reference for
-    /// control_v11p_sd15_seg) at the generation resolution. Detection runs at the reference 512×512;
-    /// the class map is nearest-neighbor rescaled so conditioning colors stay on exact palette values.</summary>
+    /// <summary>ADE20K-palette segmentation map (UperNet-ConvNeXt-Small) at the generation resolution. Detection runs at the 512×512 reference size; the class map is nearest-neighbor rescaled to keep exact palette colors.</summary>
     public static unsafe Tensor ProcessSegment(Image input, int targetWidth, int targetHeight, IBackend backend, Action<string> log)
     {
         UperNetSegPreprocessor pre = GetSegment(log);

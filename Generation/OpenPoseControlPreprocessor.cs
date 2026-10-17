@@ -11,19 +11,12 @@ using ISImage = SixLabors.ImageSharp.Image;
 
 namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
-/// <summary>
-/// OpenPose skeleton extraction for ControlNet conditioning, backed by the engine's
-/// <see cref="OpenPosePreprocessor"/> (YOLO11-pose detector + OpenPose BODY-18 renderer — the same
-/// stack Wan-Animate's driving preprocessing uses). Returns <c>[1, 3, H, W]</c> F32 in <c>[0, 1]</c>
-/// (black background, colored limbs), the control_v11p_sd15_openpose / SDXL openpose format.
-/// </summary>
+/// <summary>OpenPose skeleton extraction for ControlNet conditioning, backed by the engine's <see cref="OpenPosePreprocessor"/> (YOLO11-pose detector and OpenPose BODY-18 renderer, the same stack Wan-Animate uses). Returns <c>[1, 3, H, W]</c> F32 in <c>[0, 1]</c>: black background, colored limbs, as the control_v11p_sd15_openpose and SDXL checkpoints expect.</summary>
 public static class OpenPoseControlPreprocessor
 {
     private const string PoseWeightsFile = "yolo11n-pose-folded.safetensors";
 
-    /// <summary>Per-backend preprocessor instances: <see cref="OpenPosePreprocessor"/> binds its backend at
-    /// construction, so a single static instance would run every caller on whichever GPU touched it first.
-    /// Weak keys let a disposed backend's entry die with it.</summary>
+    /// <summary>Per-backend preprocessors: <see cref="OpenPosePreprocessor"/> binds its backend at construction, so one static instance would run every caller on whichever GPU touched it first. Weak keys let a disposed backend's entry die.</summary>
     private static readonly ConditionalWeakTable<IBackend, Entry> s_perBackend = new();
 
     /// <summary>Renders the OpenPose skeleton map for <paramref name="input"/> at the generation resolution.</summary>

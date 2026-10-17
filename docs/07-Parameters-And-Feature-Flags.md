@@ -154,7 +154,7 @@ never for this extension. Two consequences worth knowing before adding one:
   (`RegisterParameterRemaps`). That dictionary is applied inside `GetType`, so one entry covers
   both saved presets and "reuse parameters" from previously generated images.
 
-`SwarmUIHartsyInference.OnInit` registers 35 params. **There is deliberately no group named
+`HartsyInference.OnInit` registers 35 params. **There is deliberately no group named
 after this extension.** A group named for the backend can never be model-scoped, and that is
 the structural reason every param used to be permanently visible. Each one either lives in the
 matching *core* group or in a group named for the *model family* — which is safe precisely
