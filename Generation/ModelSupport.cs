@@ -196,7 +196,7 @@ public static class ModelSupport
     {
         if (string.IsNullOrEmpty(compatClass))
         {
-            return "Model has no architecture compat class set — HartsyInference can't dispatch.";
+            return "Model has no architecture compat class set. HartsyInference can't dispatch.";
         }
         Family family = Resolve(compatClass);
         if (family is null)
@@ -540,14 +540,14 @@ public static class ModelSupport
         }
         if (!TryPlanLtx25Parts(model, input, download: true, out Ltx25Parts parts, out string problem))
         {
-            throw new SwarmUserErrorException($"HartsyInference: LTX-2.5 side models can't be resolved — {problem}");
+            throw new SwarmUserErrorException($"HartsyInference: LTX-2.5 side models can't be resolved: {problem}");
         }
         string staged = StageLtx25(parts);
         // Re-scanned over what the Engine will read, so a staging bug fails here rather than reaching the recipe's LTX-2.3 fallback.
         if (ScanCached(staged) is string staleProblem)
         {
             throw new SwarmUserErrorException("HartsyInference: LTX-2.5 side models resolved but the staged set is "
-                + $"not loadable — {staleProblem}");
+                + $"not loadable: {staleProblem}");
         }
         HartsyLogs.Debug($"LTX-2.5 resolved through SwarmUI: video VAE '{Path.GetFileName(parts.VideoVae)}', "
             + $"audio VAE '{Path.GetFileName(parts.AudioVae)}', text encoder '{Path.GetFileName(parts.Gemma)}' "
@@ -594,7 +594,7 @@ public static class ModelSupport
         if (convVae && diffusionVae)
         {
             return $"'{directory}' stages both LTX-2.5 video VAEs. The diffusion/conv question is one boolean over the "
-                + "merged key set, so staging both corrupts the selection for either — keep exactly one of "
+                + "merged key set, so staging both corrupts the selection for either; keep exactly one of "
                 + "'ltx-2.5-video-vae-conv-bf16.safetensors' or 'ltx-2.5-video-vae-bf16.safetensors'.";
         }
         List<string> missing = [];
@@ -614,7 +614,7 @@ public static class ModelSupport
         if (missing.Count > 0)
         {
             return $"'{directory}' is missing {string.Join(", ", missing)}. LTX-2.5 ships split across four files and "
-                + "must be loaded as a folder — put the DiT, text encoder and both VAEs (or symlinks to them) in one "
+                + "must be loaded as a folder: put the DiT, text encoder and both VAEs (or symlinks to them) in one "
                 + "directory. Without them the engine would silently fall back to LTX-2.3's Gemma 3 and 2.3 VAEs.";
         }
         return null;

@@ -2,7 +2,7 @@
     <PropertyGroup>
         <AssemblyName>SwarmExtensionHartsyInference</AssemblyName>
         <!-- Required by the ControlNet annotators / Wan-Animate preprocessors (Generation/*Preprocessor.cs,
-             ControlVideoDecoder) — they fill tensor storage through byte*/float* without a managed copy. -->
+             ControlVideoDecoder); they fill tensor storage through byte*/float* without a managed copy. -->
         <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
         <!-- Make the floating HartsyInference 'alpha.*' reference (below) ACTUALLY resolve to the
              latest published version on every build. Without this, NuGet serves the flat-container
@@ -18,7 +18,7 @@
              to a locally packed build from another feed, so this project restores from nuget.org alone. -->
         <RestoreSources>https://api.nuget.org/v3/index.json</RestoreSources>
         <!-- Engine source toggle (same pattern as SwarmUI-LLMAssistant): false = published NuGet;
-             true = prebuilt local HartsyInference DLLs. MUST default false — this extension is shipped to
+             true = prebuilt local HartsyInference DLLs. MUST default false. This extension is shipped to
              end users who only have nuget.org, so the pin below must always be a REAL published version.
              Only flip true (via -p:UseLocalHartsy=true) for local engine dev against unpublished DLLs. -->
         <UseLocalHartsy Condition="'$(UseLocalHartsy)' == ''">false</UseLocalHartsy>
@@ -30,11 +30,11 @@
     <Import Project="../../SwarmUI.extension.props" />
 
     <!-- SwarmUI.extension.props sets TargetFramework=net8.0 (matching the net8.0 host) and
-         CopyLocalLockFileAssemblies=false. KEEP the inherited net8.0 TFM — the engine is multi-target
+         CopyLocalLockFileAssemblies=false. KEEP the inherited net8.0 TFM. The engine is multi-target
          (net8.0 + net10.0), so net8.0 pulls the net8.0 engine assets that load in the net8.0 host. Overriding
          to net10.0 pulls net10.0 engine DLLs (System.Runtime 10.0.0.0) that the host's per-extension
          AssemblyLoadContext cannot resolve → ReflectionTypeLoadException. Only override
-         CopyLocalLockFileAssemblies — the engine's private DLLs (HartsyInference.*, Microsoft.ML.Tokenizers,
+         CopyLocalLockFileAssemblies, the engine's private DLLs (HartsyInference.*, Microsoft.ML.Tokenizers,
          Google.Protobuf) must land in THIS extension's output folder so the ALC can resolve them; we then
          exclude the host-provided packages below. -->
     <PropertyGroup>
