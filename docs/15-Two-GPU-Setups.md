@@ -105,4 +105,4 @@ new model family. Two concrete examples of that principle in this extension:
 - `T2IEngine.DisregardedFeatureFlags` (`text2video`, `text2audio`, …) are UI-visibility flags only
   and never gate a backend. Flags outside that set **do** gate: a param tagged with one the backend
   doesn't advertise makes every job using it refuse, naming neither the param nor the flag. A
-  startup self-check in `SwarmUIHartsyInference` catches that case for our own params.
+  startup self-check in `HartsyInference` catches that case for our own params.

@@ -9,13 +9,7 @@ using EngineDepthPreprocessor = HartsyInference.Vision.DepthAnything.DepthAnythi
 
 namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
-/// <summary>
-/// Depth-map extraction for Flux Depth / depth ControlNet conditioning, backed by the engine's
-/// Depth-Anything-V2 model (ViT-L by default — the checkpoint the Comfy ecosystem validates
-/// against). Auto-downloads the annotator on first use, runs preprocess → model → min-max
-/// normalize, and returns a <c>[1, 3, H, W]</c> F32 tensor in <c>[0, 1]</c> (relative depth
-/// replicated to 3 channels, white = near), matching ComfyUI's DepthAnythingV2Preprocessor output.
-/// </summary>
+/// <summary>Depth map for Flux Depth and depth ControlNet conditioning, backed by the engine's Depth-Anything-V2 ViT-L model. Returns a <c>[1, 3, H, W]</c> F32 tensor in <c>[0, 1]</c> (relative depth, white = near), matching ComfyUI's DepthAnythingV2Preprocessor.</summary>
 public static class DepthPreprocessor
 {
     private const string VitlFileName = "depth_anything_v2_vitl.pth";
@@ -24,7 +18,7 @@ public static class DepthPreprocessor
 
     private static readonly object s_lock = new();
     private static DepthAnythingV2Model s_model;
-    // The model's weight tensors are owned by the loader — it must stay alive with the cached model.
+    // The model's weight tensors are owned by the loader; keep the loader alive with the cached model.
     private static PytorchPickleLoader s_loader;
 
     /// <summary>Produces the depth conditioning map for <paramref name="input"/> at the generation resolution. <paramref name="fluxScaling"/> selects BFL's max-only depth scaling (FLUX.1-Depth checkpoints) instead of the min-max stretch SD ControlNets expect.</summary>

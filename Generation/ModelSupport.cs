@@ -15,15 +15,8 @@ using HartsyInference.ModelAssets.SafeTensors;
 
 namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
-/// <summary>
-/// The single translation table between SwarmUI's <c>T2IModel.ModelClass.CompatClass.ID</c> and the
-/// <c>HartsyInference.Engine</c> family id its recipe is registered under, plus the modality that family runs in.
-/// <para>This is the whole of the extension's "architecture knowledge" now: the Engine owns detection, recipe
-/// construction, pipeline caching and generation, so all this layer has to do is name the family. Whether a family is
-/// actually <i>drivable</i> is never hard-coded here — it is asked of the Engine's
-/// <see cref="RecipeRegistry"/> / <see cref="VideoRecipeRegistry"/> at call time, so the answer can't drift from what
-/// the Engine will really do.</para>
-/// </summary>
+/// <summary>Translates SwarmUI's <c>T2IModel.ModelClass.CompatClass.ID</c> into the <c>HartsyInference.Engine</c> family id and modality.
+/// <para>The Engine owns detection, recipe construction, caching and generation. Whether a family is drivable is asked of <see cref="RecipeRegistry"/> and <see cref="VideoRecipeRegistry"/> at call time, never hard-coded here.</para></summary>
 public static class ModelSupport
 {
     /// <summary>What a mapped compat class generates.</summary>
@@ -42,8 +35,7 @@ public static class ModelSupport
     /// <summary>A compat class's Engine family id plus the service that drives it.</summary>
     public sealed record Family(string Id, Kind Kind);
 
-    /// <summary>SwarmUI compat class → Engine family. Every entry here is a family the Engine has (or is expected to
-    /// have) a registered recipe for; the registry lookup decides whether it is live today.</summary>
+    /// <summary>SwarmUI compat class → Engine family. Every entry is a family the Engine may have a recipe for; the registry lookup decides whether it is live.</summary>
     private static readonly Dictionary<string, Family> _families = new(StringComparer.OrdinalIgnoreCase)
     {
         // ── Image (Engine RecipeRegistry family ids) ──
@@ -75,9 +67,7 @@ public static class ModelSupport
         ["anima"] = new("anima", Kind.Image),
         ["hidream-i1"] = new("hidream", Kind.Image),
         ["qwen-image"] = new("qwen-image", Kind.Image),
-        // Core owns the qwen-image-2.1 compat class (T2IModelClassSorter, "Adds Qwen2.1 support" #1548) along with
-        // its model class and VAE family — this maps it, it must not re-register it. Keyed off core's own
-        // registration rather than a repeated literal, the same as CompatMiniMaxH3 below.
+        // Core owns the qwen-image-2.1 compat, model and VAE classes. Map it, do not re-register it; key off core's constant.
         [T2IModelClassSorter.CompatQwenImage21.ID] = new("qwen-image-2.1", Kind.Image),
         ["kandinsky5-imglite"] = new("kandinsky5", Kind.Image),
         [ModelClassRegistrations.LanceCompatClassId] = new("lance-image", Kind.Image),
@@ -95,29 +85,20 @@ public static class ModelSupport
         ["hunyuan-video"] = new("hunyuan-video", Kind.Video),
         ["lightricks-ltx-video"] = new("ltx-video", Kind.Video),
         ["lightricks-ltx-video-2"] = new("ltx-video-2", Kind.Video),
-        // Both compat classes route to Kandinsky5VideoRecipe, which now weight-derives Lite vs. Pro from the
-        // loaded transformer's model_dim (see Kandinsky5VideoRecipe.DetectConfig) — mapping "vidpro" here was
-        // unsafe before that detection existed (it would have silently constructed the Lite-2B architecture).
+        // Both compat classes route to Kandinsky5VideoRecipe, which derives Lite vs. Pro from the loaded transformer's model_dim (see Kandinsky5VideoRecipe.DetectConfig).
         ["kandinsky5-vidlite"] = new("kandinsky5-video", Kind.Video),
         ["kandinsky5-vidpro"] = new("kandinsky5-video", Kind.Video),
         [ModelClassRegistrations.LanceVideoCompatClassId] = new("lance-video", Kind.Video),
-        // Core owns the minimax-h3 compat class (T2IModelClassSorter, "MiniMax H3 support" #1469) and shares it
-        // with the video/audio VAE classes, exactly as LTX-2 does — this maps it, it must not re-register it.
-        // Keyed off core's own registration rather than a repeated literal, so a rename there cannot leave this
-        // table silently matching nothing (which reads as "architecture not supported", not as a typo).
+        // Core owns the minimax-h3 compat class. Map it, do not re-register it; keying off core's constant means a rename cannot silently match nothing.
         [T2IModelClassSorter.CompatMiniMaxH3.ID] = new("minimax-h3", Kind.Video),
 
         // ── Music (Engine MusicCatalog descriptor ids) ──
-        // SwarmUI-native music only: core registers ace-step-1_5 and minimax-music-3 as IsAudioModel compat
-        // classes. Every other music family (YuE, MusicGen, …) is AudioLab's domain — its providers drive the
-        // same Engine catalog through their own virtual model classes, so a backend-extension mapping here
-        // would just double-register the family with a poorer param surface.
+        // SwarmUI-native music only: core registers ace-step-1_5 and minimax-music-3. Other families (YuE, MusicGen, …) belong to AudioLab, which maps them through its own model classes.
         ["ace-step-1_5"] = new("acestep", Kind.Music),
         [T2IModelClassSorter.CompatMiniMaxMusic3.ID] = new("minimaxmusic3", Kind.Music),
     };
 
-    /// <summary>The Engine family for <paramref name="compatClass"/>, or null when this compat class has no mapping
-    /// (i.e. the Engine has no such family at all).</summary>
+    /// <summary>The Engine family for <paramref name="compatClass"/>, or null when it has no mapping.</summary>
     public static Family Resolve(string compatClass)
     {
         if (string.IsNullOrEmpty(compatClass))
@@ -127,8 +108,7 @@ public static class ModelSupport
         return _families.TryGetValue(compatClass, out Family family) ? family : null;
     }
 
-    /// <summary>True when the Engine can actually drive <paramref name="compatClass"/> today: it is mapped to a
-    /// family AND that family has a registered recipe (music descriptors are always registered).</summary>
+    /// <summary>True when the Engine can drive <paramref name="compatClass"/>: it is mapped to a family with a registered recipe (music descriptors are always registered).</summary>
     public static bool IsArchitectureSupported(string compatClass)
     {
         Family family = Resolve(compatClass);
@@ -145,8 +125,7 @@ public static class ModelSupport
         };
     }
 
-    /// <summary>The composition features the Engine's recipe for <paramref name="compatClass"/> declares it can
-    /// apply. <see cref="ImageFeatures.None"/> for video/music/unmapped families.</summary>
+    /// <summary>The composition features the Engine's recipe for <paramref name="compatClass"/> declares. <see cref="ImageFeatures.None"/> for video, music and unmapped families.</summary>
     public static ImageFeatures SupportedFeatures(string compatClass)
     {
         Family family = Resolve(compatClass);
@@ -157,9 +136,7 @@ public static class ModelSupport
         return RecipeRegistry.Resolve(family.Id)?.Supports ?? ImageFeatures.None;
     }
 
-    /// <summary>The composition features the Engine applies to <paramref name="model"/>'s resolved variant — what
-    /// <see cref="SupportedFeatures(string)"/> answers for the family, narrowed to this checkpoint (a base Qwen-Image
-    /// has no reference editing; its Edit builds do). <see cref="ImageFeatures.None"/> for non-image models.</summary>
+    /// <summary>The composition features the Engine applies to <paramref name="model"/>'s resolved variant, narrowed from <see cref="SupportedFeatures(string)"/> (a base Qwen-Image has no reference editing; its Edit builds do). <see cref="ImageFeatures.None"/> for non-image models.</summary>
     public static ImageFeatures SupportedFeatures(SwarmUI.Text2Image.T2IModel model)
     {
         Family family = Resolve(model?.ModelClass?.CompatClass?.ID);
@@ -168,9 +145,7 @@ public static class ModelSupport
             : ModelCapabilities.ImageFeaturesFor(BuildSpec(model, family, stageBundles: false));
     }
 
-    /// <summary>The conditioning the Engine's video recipe for <paramref name="compatClass"/> declares it can apply.
-    /// <see cref="VideoFeatures.None"/> for image/music/unmapped families. Asked of the Engine's registry at call time,
-    /// exactly like <see cref="SupportedFeatures(string)"/>, so it cannot drift from what the pipeline will really do.</summary>
+    /// <summary>The conditioning the Engine's video recipe for <paramref name="compatClass"/> declares. <see cref="VideoFeatures.None"/> for non-video families. Asked of the registry at call time, like <see cref="SupportedFeatures(string)"/>.</summary>
     public static VideoFeatures SupportedVideoFeatures(string compatClass)
     {
         Family family = Resolve(compatClass);
@@ -179,9 +154,7 @@ public static class ModelSupport
             : VideoRecipeRegistry.Resolve(family.Id)?.Supports ?? VideoFeatures.None;
     }
 
-    /// <summary>The conditioning the Engine applies to <paramref name="model"/>'s resolved variant: Wan's VACE/Animate/S2V
-    /// builds share the family compat classes and are told apart engine-side, so a driving video on an Animate
-    /// checkpoint under <c>wan-21-14b</c> is accepted. <see cref="VideoFeatures.None"/> for non-video models.</summary>
+    /// <summary>The conditioning the Engine applies to <paramref name="model"/>'s resolved variant. Wan's VACE, Animate and S2V builds share the family compat classes and are told apart engine-side, so a driving video is accepted on an Animate checkpoint under <c>wan-21-14b</c>. <see cref="VideoFeatures.None"/> for non-video models.</summary>
     public static VideoFeatures SupportedVideoFeatures(SwarmUI.Text2Image.T2IModel model)
     {
         Family family = Resolve(model?.ModelClass?.CompatClass?.ID);
@@ -193,22 +166,15 @@ public static class ModelSupport
         return family.Id == "minimax-h3" ? MiniMaxH3TaskFeatures(features, model.RawFilePath) : features;
     }
 
-    /// <summary>The variant the Engine resolves <paramref name="model"/> to, with the evidence that decided it; null for
-    /// an unmapped model or a family that declares no variants.</summary>
+    /// <summary>The variant the Engine resolves <paramref name="model"/> to, with the evidence that decided it; null for an unmapped model or a family with no variants.</summary>
     public static ResolvedModelVariant ResolveVariant(SwarmUI.Text2Image.T2IModel model)
     {
         Family family = Resolve(model?.ModelClass?.CompatClass?.ID);
         return family is null ? null : ModelCapabilities.ResolveVariant(BuildSpec(model, family, stageBundles: false));
     }
 
-    /// <summary>MiniMax-H3 ships fl2va (first/last-frame) and ref2va (references) as SEPARATE checkpoints, and the
-    /// recipe declares the union because it serves both. Narrow that to the task this checkpoint actually does, or a
-    /// reference attached to an fl2va model is accepted and quietly ignored — which reads as the model disregarding
-    /// the reference rather than as the wrong checkpoint being loaded.
-    /// <para>By FILENAME, unavoidably: the two builds have byte-identical key sets and tensor shapes (verified
-    /// 2026-08-08 across all 1082 tensors of both pruned fp8 builds), so no header sniff can tell them apart the way
-    /// the engine's variant resolver can for Wan's. A name matching neither keeps the full union rather
-    /// than guessing — refusing on an unrecognized name would break renamed-but-valid checkpoints.</para></summary>
+    /// <summary>Narrows the recipe's MiniMax-H3 task union to this checkpoint's task, so an fl2va model does not advertise reference features. MiniMax-H3 ships fl2va (first/last frame) and ref2va (references) as separate checkpoints.
+    /// <para>Matched by FILENAME: the two builds have byte-identical key sets and shapes, so no header sniff separates them. A name matching neither keeps the full union rather than refusing renamed checkpoints.</para></summary>
     private static VideoFeatures MiniMaxH3TaskFeatures(VideoFeatures declared, string checkpointPath)
     {
         string name = Path.GetFileNameWithoutExtension(checkpointPath ?? "");
@@ -225,8 +191,7 @@ public static class ModelSupport
         return declared;
     }
 
-    /// <summary>Human-readable explanation of why a compat class isn't drivable. Distinguishes "the Engine knows this
-    /// family but hasn't lifted its recipe yet" from "the Engine has nothing for this architecture".</summary>
+    /// <summary>Human-readable reason a compat class is not drivable: its family has no registered recipe, or the Engine has no family for it.</summary>
     public static string WhyNotSupported(string compatClass)
     {
         if (string.IsNullOrEmpty(compatClass))
@@ -251,38 +216,32 @@ public static class ModelSupport
     public static IReadOnlyCollection<string> SupportedArchitectures =>
         [.. _families.Keys.Where(IsArchitectureSupported).Order(StringComparer.Ordinal)];
 
-    /// <summary>Compat classes that are mapped to an Engine family whose recipe isn't registered yet, mapped to the
-    /// human-readable blocker. Surfaced by the WebAPI for admin UX.</summary>
+    /// <summary>Compat classes mapped to an Engine family with no registered recipe, with the human-readable blocker. Surfaced by the WebAPI for admin UX.</summary>
     public static IReadOnlyDictionary<string, string> PendingArchitectures =>
         _families.Keys.Where(k => !IsArchitectureSupported(k))
             .Order(StringComparer.Ordinal)
             .ToDictionary(k => k, WhyNotSupported, StringComparer.Ordinal);
 
-    /// <summary>Core's model class id for LTX-2.5. Read directly — and uniquely in this extension — because the
-    /// compat class deliberately cannot answer this: core header-sniffs LTX-2 / 2.3 / 2.5 into three distinct model
-    /// classes that all share <c>lightricks-ltx-video-2</c>, and only 2.5 ships as a split bundle.</summary>
+    /// <summary>Core's model class id for LTX-2.5, read directly because the compat class cannot tell it apart: core header-sniffs LTX-2, 2.3 and 2.5 into distinct model classes that share <c>lightricks-ltx-video-2</c>.</summary>
     public const string Ltx25ModelClassId = "lightricks-ltx-video-2-5";
 
     /// <summary>Whether the selected model is LTX-2.5, by core's own header detection rather than a name guess.</summary>
     private static bool IsLtx25(T2IModel model) => model?.ModelClass?.ID == Ltx25ModelClassId;
 
-    /// <summary>The Gemma-4 tower's discriminator. Its per-layer <c>layer_scalar</c> is the key the Engine's own
-    /// converter keys on — NOT a missing <c>v_proj</c>, which the global layers also lack in Gemma 3.</summary>
+    /// <summary>The Gemma-4 tower's discriminator: its per-layer <c>layer_scalar</c> is the key the Engine's converter keys on, not a missing <c>v_proj</c> (the global layers also lack that in Gemma 3).</summary>
     private const string Gemma4SignatureKey = "model.layers.0.layer_scalar";
 
-    /// <summary>The convolutional video decoder's marker. Shared with LTX-2.3's VAE, and absent from the 2.5
-    /// diffusion decoder — which is what makes it usable as the "is the conv VAE here" test.</summary>
+    /// <summary>The convolutional video decoder's marker. Shared with LTX-2.3's VAE and absent from the 2.5 diffusion decoder, which makes it usable as the "is the conv VAE here" test.</summary>
     private const string ConvVideoVaeSignatureKey = "decoder.conv_in.conv.bias";
 
-    /// <summary>Cached bundle scans, keyed by directory. Invalidated on the directory's file-set signature so a
-    /// staged file appearing mid-session is picked up without re-reading a 21 GB header on every request.</summary>
+    /// <summary>Cached bundle scans keyed by directory. Invalidated on the file-set signature, so a file staged mid-session is picked up without a header rescan.</summary>
     private static readonly ConcurrentDictionary<string, (string Signature, string Problem)> _ltx25Scans = new(StringComparer.Ordinal);
 
     /// <summary>Header-scans <paramref name="directory"/>, memoised on its file-set signature.</summary>
     private static string ScanCached(string directory)
     {
         string[] files = Directory.GetFiles(directory, "*.safetensors", SearchOption.AllDirectories);
-        // Cheap signature first — computing it costs a stat per file, where a rescan costs a header parse per file.
+        // Cheap signature first: a stat per file, where a rescan costs a header parse per file.
         string signature = $"{files.Length}|{files.Select(f => new FileInfo(f).LastWriteTimeUtc.Ticks).DefaultIfEmpty(0L).Max()}";
         if (_ltx25Scans.TryGetValue(directory, out (string Signature, string Problem) cached) && cached.Signature == signature)
         {
@@ -296,26 +255,19 @@ public static class ModelSupport
     // ────────────────────────────────────────────────────────────────────────────────────────────────────────────
     // LTX-2.5 side models, resolved the way Swarm resolves them for every other backend.
     //
-    // The model the user picks in the UI is the DiT alone. The video VAE and audio VAE come from the VAE folder and
-    // the Gemma-4 tower from the text-encoder folder, each resolved through core's own registry and downloaded into
-    // the folder core assigns when absent — exactly what Builtin_ComfyUIBackend does. The Engine's LtxVideo2Recipe
-    // takes exactly ONE path though (it globs a directory and re-buckets the merged keys, and honours no
-    // RecipeContext.Components override yet), so the resolved parts are linked into a staging directory and THAT is
-    // what the Engine is handed. The staging directory lives under Data/ rather than a model root, so Swarm never
-    // indexes the links as models of their own.
+    // The user picks the DiT alone. The video and audio VAEs come from the VAE folder and the Gemma-4 tower from the
+    // text-encoder folder, each resolved through core's registry and downloaded into the folder core assigns when absent.
+    // The Engine's LtxVideo2Recipe takes exactly ONE path and does not honor RecipeContext.Components, so the resolved
+    // parts are linked into a staging directory under Data/ (never a model root, so Swarm does not index the links).
     // ────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-    /// <summary>Core's known-model ids for LTX-2.5's two VAEs (registered in <c>CommonModels.RegisterCoreSet</c>), so
-    /// the URL, hash and destination folder live in one place — core's registry — for both backends.</summary>
+    /// <summary>Core's known-model ids for LTX-2.5's two VAEs (registered in <c>CommonModels.RegisterCoreSet</c>), so the URL, hash and folder live in core's registry for both backends.</summary>
     private const string Ltx25VideoVaeKnownId = "ltx2-5-video-vae";
 
-    /// <summary>Companion of <see cref="Ltx25VideoVaeKnownId"/> for the audio VAE. No user param selects an audio VAE,
-    /// so this is always the registry's answer.</summary>
+    /// <summary>Companion of <see cref="Ltx25VideoVaeKnownId"/> for the audio VAE. No user param selects it, so this is always the registry's answer.</summary>
     private const string Ltx25AudioVaeKnownId = "ltx2-5-audio-vae";
 
-    /// <summary>The Gemma-4 tower. Deliberately NOT read from <c>CommonModels</c>: core doesn't register it there —
-    /// its ComfyUI backend fetches it inline via <c>RequireClipModel</c> — so the URL and hash are mirrored from that
-    /// call (<c>WorkflowGeneratorModelSupport.GetLTX25Gemma4Model</c>) rather than invented here.</summary>
+    /// <summary>The Gemma-4 tower. Not read from <c>CommonModels</c>, since core does not register it there. Its ComfyUI backend fetches it inline via <c>RequireClipModel</c>, so the URL and hash are mirrored from <c>WorkflowGeneratorModelSupport.GetLTX25Gemma4Model</c>.</summary>
     private const string Ltx25GemmaFileName = "gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot-v2.safetensors";
 
     private const string Ltx25GemmaUrl = "https://huggingface.co/mcmonkey/swarm-models/resolve/main/gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot-v2.safetensors";
@@ -328,15 +280,12 @@ public static class ModelSupport
     /// <summary>The four files an LTX-2.5 run needs, as absolute paths.</summary>
     private sealed record Ltx25Parts(string Dit, string VideoVae, string AudioVae, string Gemma);
 
-    /// <summary>Matches any LTX-2.5 Gemma-4 build already in the text-encoder folder, whatever it was repacked as —
-    /// the Engine's own <c>int8_lean_convrot</c> build and core's <c>comfy-int8-convrot</c> build are both valid.</summary>
+    /// <summary>Matches any LTX-2.5 Gemma-4 build in the text-encoder folder, whatever its repack: the Engine's <c>int8_lean_convrot</c> and core's <c>comfy-int8-convrot</c> builds are both valid.</summary>
     private static bool IsLtx25GemmaName(string name) =>
         name.Contains("gemma4", StringComparison.OrdinalIgnoreCase)
         && name.Contains("ltx-2.5", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>A user's component pick, or null when there isn't one. "None" is a real selectable entry that arrives
-    /// as a model of that name and means "use the default" — core's <c>DoVaeLoader</c> nulls it the same way, and
-    /// without this it would read as a pick and push a complete bundle onto the staging path for nothing.</summary>
+    /// <summary>A user's component pick, or null when there is none. "None" arrives as a model of that name and means "use the default", as core's <c>DoVaeLoader</c> also treats it. Without this check it would read as a pick and stage a bundle for nothing.</summary>
     private static string PickedPath(T2IModel picked)
     {
         if (picked?.RawFilePath is null || picked.Name == "None" || !File.Exists(picked.RawFilePath))
@@ -346,16 +295,10 @@ public static class ModelSupport
         return picked.RawFilePath;
     }
 
-    /// <summary>Whether the Engine will decode with the diffusion video VAE. Read through the Engine's own knob so the
-    /// staged VAE is the one the recipe will actually ask for — staging both is what corrupts the selection.</summary>
-    /// <remarks>This used to re-implement the parse and accepted "yes", which the Engine never did. A value of "yes"
-    /// therefore made the extension stage the diffusion VAE while the recipe still built the conv decoder — precisely
-    /// the divergence the summary warns about. Sharing the declaration removes the possibility.</remarks>
+    /// <summary>Whether the Engine decodes with the diffusion video VAE. Read through the Engine's own knob so the staged VAE matches the one the recipe requests; staging both corrupts the selection.</summary>
     private static bool WantDiffusionVae() => EngineKnobs.Ltx2DiffusionVae.Value;
 
-    /// <summary>Matching models in <paramref name="setName"/>, ordered by file name. Ordered because the model set is
-    /// a concurrent dictionary: taking its first match would pick a different file run to run whenever a user has
-    /// more than one valid build of the same component staged.</summary>
+    /// <summary>Matching models in <paramref name="setName"/>, ordered by file name. The model set is a concurrent dictionary, so an unordered first match would vary between runs when several builds are staged.</summary>
     private static List<T2IModel> FindInSet(string setName, Func<string, bool> matchesFileName)
     {
         if (!Program.T2IModelSets.TryGetValue(setName, out T2IModelHandler handler))
@@ -367,9 +310,7 @@ public static class ModelSupport
             .OrderBy(m => Path.GetFileName(m.RawFilePath), StringComparer.Ordinal)];
     }
 
-    /// <summary>Resolves a core known model to its on-disk path, downloading it into the folder core assigns when it
-    /// isn't there. <paramref name="download"/> is false at validation time, where the question is only whether the
-    /// registration exists at all — the fetch itself belongs at load, same as the ComfyUI backend.</summary>
+    /// <summary>Resolves a core known model to its on-disk path, downloading it into the folder core assigns when missing. With <paramref name="download"/> false (validation time) nothing is fetched; the fetch belongs at load, as in the ComfyUI backend.</summary>
     private static string EnsureKnownModel(string knownId, string setName, bool download, T2IParamInput input, out string problem)
     {
         problem = null;
@@ -399,7 +340,7 @@ public static class ModelSupport
         {
             return null;
         }
-        Logs.Info($"[HartsyInference] LTX-2.5: '{known.DisplayName}' is missing — downloading it to '{path}' through "
+        Logs.Info($"[HartsyInference] LTX-2.5: '{known.DisplayName}' is missing, so downloading it to '{path}' through "
             + "SwarmUI's known-model registry.");
         known.DownloadNow(session: input?.SourceSession).Wait();
         Program.RefreshAllModelSets();
@@ -411,10 +352,7 @@ public static class ModelSupport
         return path;
     }
 
-    /// <summary>Resolves the Gemma-4 tower: the user's pick, else any LTX-2.5 Gemma-4 already in the text-encoder
-    /// folder, else core's downloadable build. An already-present build wins over a download deliberately — an
-    /// existing install usually carries the Engine's own repack, and swapping it would change the text encoder
-    /// silently.</summary>
+    /// <summary>Resolves the Gemma-4 tower: the user's pick, else any LTX-2.5 Gemma-4 already in the text-encoder folder, else core's downloadable build. A present build wins over a download, since an existing install usually carries the Engine's own repack.</summary>
     private static string ResolveLtx25Gemma(T2IParamInput input, bool download, out string problem)
     {
         problem = null;
@@ -425,8 +363,7 @@ public static class ModelSupport
         List<T2IModel> present = FindInSet("Clip", IsLtx25GemmaName);
         if (present.Count > 0)
         {
-            // The Engine's own repack is preferred over core's when both are staged — it is what an existing install
-            // is already generating with, so picking the other one would change the text encoder without saying so.
+            // Prefer the Engine's repack over core's when both are staged: an existing install generates with it.
             T2IModel chosen = present.FirstOrDefault(m =>
                 Path.GetFileName(m.RawFilePath).Contains("lean", StringComparison.OrdinalIgnoreCase)) ?? present[0];
             return chosen.RawFilePath;
@@ -445,7 +382,7 @@ public static class ModelSupport
         {
             return null;
         }
-        Logs.Info($"[HartsyInference] LTX-2.5: the Gemma-4 text encoder is missing — downloading it to '{path}'.");
+        Logs.Info($"[HartsyInference] LTX-2.5: the Gemma-4 text encoder is missing, so downloading it to '{path}'.");
         Utilities.DownloadFile(Ltx25GemmaUrl, path, null, verifyHash: Ltx25GemmaHash, session: input?.SourceSession).Wait();
         Program.RefreshAllModelSets();
         if (!File.Exists(path))
@@ -456,8 +393,7 @@ public static class ModelSupport
         return path;
     }
 
-    /// <summary>Resolves the video VAE: the user's <c>vae</c> parameter wins outright, else the registry's build for
-    /// whichever decoder the Engine is set to use.</summary>
+    /// <summary>Resolves the video VAE: the user's <c>vae</c> parameter wins outright, else the registry's build for whichever decoder the Engine uses.</summary>
     private static string ResolveLtx25VideoVae(T2IParamInput input, bool download, out string problem)
     {
         problem = null;
@@ -482,8 +418,7 @@ public static class ModelSupport
         return EnsureKnownModel(Ltx25VideoVaeKnownId, "VAE", download, input, out problem);
     }
 
-    /// <summary>Resolves all four parts. With <paramref name="download"/> false this is the validation-time question
-    /// ("is each part present or fetchable?"); with it true, the missing ones are actually fetched.</summary>
+    /// <summary>Resolves all four parts. With <paramref name="download"/> false this checks whether each part is present or fetchable; with it true, missing parts are fetched.</summary>
     private static bool TryPlanLtx25Parts(T2IModel model, T2IParamInput input, bool download, out Ltx25Parts parts, out string problem)
     {
         parts = null;
@@ -524,9 +459,7 @@ public static class ModelSupport
         return true;
     }
 
-    /// <summary>Links the resolved parts into a private directory under <c>Data/</c> and returns it. Named by a hash
-    /// of the resolved paths so switching the <c>vae</c> parameter yields a different directory — which is also what
-    /// keeps the Engine's path-keyed pipeline cache from serving a pipeline built with the previous pick.</summary>
+    /// <summary>Links the resolved parts into a private directory under <c>Data/</c> and returns it. The directory is named by a hash of the resolved paths, so the Engine's path-keyed pipeline cache cannot return a pipeline built for other files.</summary>
     private static string StageLtx25(Ltx25Parts parts)
     {
         string joined = string.Join('|', parts.Dit, parts.VideoVae, parts.AudioVae, parts.Gemma);
@@ -552,13 +485,8 @@ public static class ModelSupport
         return dir;
     }
 
-    /// <summary>Validation-time check: can this LTX-2.5 model be run? True when either a complete hand-assembled
-    /// bundle sits beside the DiT, or every side model resolves through SwarmUI. Nothing is downloaded here.</summary>
-    /// <remarks>The Engine's <c>LtxVideo2Recipe</c> takes exactly ONE path and re-buckets the merged keys of
-    /// everything under it. Handing it the bare DiT is not a soft failure: the recipe finds no video-VAE and no
-    /// text-encoder keys and falls through to its LTX-<b>2.3</b> side-model resolver, silently fetching Gemma 3 and
-    /// the 2.3 VAEs and generating with them. That produces a video rather than an error, which is why both this and
-    /// <see cref="ResolveLtx25LoadPath"/> refuse up front instead.</remarks>
+    /// <summary>Validation-time check: can this LTX-2.5 model run? True when a complete bundle sits beside the DiT, or every side model resolves through SwarmUI. Nothing is downloaded here.</summary>
+    /// <remarks>The Engine's <c>LtxVideo2Recipe</c> takes exactly ONE path and re-buckets the merged keys under it. Given the bare DiT it finds no side-model keys and silently falls back to LTX-<b>2.3</b>'s Gemma 3 and VAEs, producing a video rather than an error. That is why this check and <see cref="ResolveLtx25LoadPath"/> refuse up front.</remarks>
     public static bool TryResolveLtx25Bundle(T2IModel model, out string directory, out string problem)
     {
         directory = null;
@@ -583,10 +511,7 @@ public static class ModelSupport
         return TryPlanLtx25Parts(model, null, download: false, out _, out problem);
     }
 
-    /// <summary>Whether a hand-assembled bundle could plausibly live beside the DiT — i.e. the DiT is in a SUBFOLDER
-    /// of its model root, not sitting directly in the root itself. A bare checkpoint in a model root (where
-    /// <c>diffusion_models</c> keeps them) is never bundle-scanned: that scan header-probes every neighbouring
-    /// safetensors, which over a model root means opening every checkpoint the user owns.</summary>
+    /// <summary>Whether a bundle could sit beside the DiT, i.e. the DiT is in a subfolder of its model root. A checkpoint directly in a model root is never bundle-scanned, since the scan header-probes every neighbouring safetensors.</summary>
     private static bool LooksLikeBundleDir(T2IModel model, string directory)
     {
         string root = model?.OriginatingFolderPath;
@@ -599,20 +524,18 @@ public static class ModelSupport
         return !string.Equals(normRoot, normDir, StringComparison.Ordinal);
     }
 
-    /// <summary>The single path the Engine's LTX-2.5 recipe is handed: a pre-existing complete bundle beside the DiT
-    /// if there is one, else a staging directory linking the parts SwarmUI resolved and downloaded.</summary>
+    /// <summary>The single path the Engine's LTX-2.5 recipe is handed: an existing complete bundle beside the DiT if there is one, else a staging directory linking the parts SwarmUI resolved and downloaded.</summary>
     private static string ResolveLtx25LoadPath(T2IModel model, T2IParamInput input)
     {
         string checkpoint = model?.RawFilePath
             ?? throw new SwarmUserErrorException("HartsyInference: the LTX-2.5 model has no resolved file path.");
         string dir = Path.GetDirectoryName(checkpoint);
         bool userPickedVae = PickedPath(input?.Get(T2IParamTypes.VAE)) is not null;
-        // A complete bundle beside the DiT still wins, so installs that already have one keep working unchanged —
-        // except when the user explicitly picked a VAE, which a bundle would silently ignore.
+        // A complete bundle beside the DiT still wins, unless the user picked a VAE, which a bundle would silently ignore.
         if (!userPickedVae && !string.IsNullOrEmpty(dir) && Directory.Exists(dir) && LooksLikeBundleDir(model, dir)
             && ScanCached(dir) is null)
         {
-            Logs.Verbose($"[HartsyInference] LTX-2.5: loading the complete bundle already staged at '{dir}'.");
+            Logs.Debug($"[HartsyInference] LTX-2.5: loading the complete bundle already staged at '{dir}'.");
             return dir;
         }
         if (!TryPlanLtx25Parts(model, input, download: true, out Ltx25Parts parts, out string problem))
@@ -620,22 +543,19 @@ public static class ModelSupport
             throw new SwarmUserErrorException($"HartsyInference: LTX-2.5 side models can't be resolved — {problem}");
         }
         string staged = StageLtx25(parts);
-        // Re-scanned over what the Engine will actually read. A staging bug fails loudly HERE rather than reaching
-        // the recipe's LTX-2.3 fallback, which would generate a plausible video with the wrong model.
+        // Re-scanned over what the Engine will read, so a staging bug fails here rather than reaching the recipe's LTX-2.3 fallback.
         if (ScanCached(staged) is string staleProblem)
         {
             throw new SwarmUserErrorException("HartsyInference: LTX-2.5 side models resolved but the staged set is "
                 + $"not loadable — {staleProblem}");
         }
-        Logs.Info($"[HartsyInference] LTX-2.5 resolved through SwarmUI: video VAE '{Path.GetFileName(parts.VideoVae)}', "
+        Logs.Debug($"[HartsyInference] LTX-2.5 resolved through SwarmUI: video VAE '{Path.GetFileName(parts.VideoVae)}', "
             + $"audio VAE '{Path.GetFileName(parts.AudioVae)}', text encoder '{Path.GetFileName(parts.Gemma)}' "
             + $"(linked into '{staged}').");
         return staged;
     }
 
-    /// <summary>Header-probes every safetensors file beside the checkpoint and reports the first missing companion.
-    /// Probes headers rather than filenames because repacks rename freely — the same reason the Engine refuses to
-    /// infer the distilled schedule from a filename.</summary>
+    /// <summary>Header-probes every safetensors file beside the checkpoint and reports what is missing. Headers are probed rather than filenames, since repacks rename freely.</summary>
     private static string ScanLtx25Bundle(string directory, string[] files)
     {
         List<string> allKeys = [];
@@ -651,7 +571,7 @@ public static class ModelSupport
             }
             catch (Exception ex)
             {
-                // A neighbouring file we can't parse isn't fatal — the Engine would skip it too. Say so and move on.
+                // An unparseable neighbour is not fatal, since the Engine skips it too.
                 Logs.Verbose($"[HartsyInference] LTX-2.5 bundle scan skipped '{Path.GetFileName(file)}': {ex.Message}");
                 continue;
             }
@@ -668,8 +588,8 @@ public static class ModelSupport
                     || key.Contains("vocoder.mel_stft.mel_basis", StringComparison.Ordinal);
             }
         }
-        // Asked of the Engine's own whole-file rule rather than re-derived: both decoders share decoder.conv_in,
-        // so this cannot be answered per-key. The Engine decodes with EITHER decoder now; only the ambiguity is fatal.
+        // Asked of the Engine's whole-file rule rather than re-derived: both decoders share decoder.conv_in, so this cannot be answered per key.
+        // The Engine decodes with either decoder; only the ambiguity is fatal.
         bool diffusionVae = LtxVideo2CheckpointConverter.IsDiffusionVideoVae(allKeys);
         if (convVae && diffusionVae)
         {
@@ -700,15 +620,10 @@ public static class ModelSupport
         return null;
     }
 
-    /// <summary>Builds the Engine's load request for a Swarm model: the family id travels as the catalog id (that is
-    /// what the Engine keys its recipe registry on), and the checkpoint path as the resolved local path.</summary>
+    /// <summary>Builds the Engine's load request for a Swarm model: the family id travels as the catalog id (what the Engine keys its recipe registry on), and the checkpoint path as the resolved local path.</summary>
     /// <param name="input">The request, when there is one, so a user-picked VAE / text encoder is honoured. Optional
     /// only so callers that merely describe a model (rather than run it) need not supply one.</param>
-    /// <param name="stageBundles">False never stages split checkpoints (LTX-2.5) into their bundle directory: a
-    /// hand-assembled bundle beside the DiT is used as-is, and otherwise the spec carries no path. For callers that
-    /// only inspect the checkpoint, such as memory routing, which runs before every generation and must not rewrite
-    /// links a running generation is reading — and must not size the bare DiT, which the engine would pair with
-    /// LTX-2.3's side models.</param>
+    /// <param name="stageBundles">False skips staging split checkpoints (LTX-2.5) into a bundle directory. A complete bundle beside the DiT is still used, and otherwise the spec carries no path. For callers that only inspect the checkpoint, such as memory routing, which must not rewrite links a running generation reads or size the bare DiT with LTX-2.3's side models.</param>
     public static ModelSpec BuildSpec(SwarmUI.Text2Image.T2IModel model, Family family, T2IParamInput input = null,
         bool stageBundles = true)
     {
@@ -732,9 +647,7 @@ public static class ModelSupport
         }
         else if (IsLtx25(model))
         {
-            // LTX-2.5 ships split, and the Engine takes ONE path. This resolves the side models through SwarmUI and
-            // hands over a directory holding exactly the right set — throwing rather than letting the recipe load
-            // 2.3 components under a 2.5 name.
+            // LTX-2.5 ships split, and the Engine takes ONE path. This resolves the side models through SwarmUI and passes a directory holding exactly the right set. It throws rather than let the recipe load 2.3 components under a 2.5 name.
             localPath = ResolveLtx25LoadPath(model, input);
         }
         return new ModelSpec
@@ -756,19 +669,12 @@ public static class ModelSupport
         };
     }
 
-    /// <summary>Picks MiniMax Music 3's language-model precision: the family id carries it as the selector variant
-    /// (<c>minimaxmusic3:q8</c>), which the engine's descriptor maps to its GGUF-quantized language-model path.</summary>
-    /// <remarks>Two things can say it. An explicit <c>q8</c>/<c>q4</c> on the LM-precision param wins. Otherwise the
-    /// picked model decides: AudioLab offers the one checkpoint as three entries, <c>base</c>, <c>q8</c> and
-    /// <c>q4</c>, and until this read them every entry ran the 17 GB bf16 language model, so "MiniMax Music 3 Q4
-    /// (smallest)" was out of VRAM on a 24 GB card exactly like the base entry. The param's default is <c>bf16</c>,
-    /// which is why the default is not allowed to override the model: a user who picked the Q4 entry and never
-    /// opened the advanced group has said what they want once already. Those entries have no file, so the name's
-    /// last segment is matched (<c>Audio Models/MiniMaxMusic3/q4</c>); a real file's stem is read the same way.</remarks>
+    /// <summary>Picks MiniMax Music 3's language-model precision: the family id carries it as the selector variant (<c>minimaxmusic3:q8</c>), which the engine's descriptor maps to its GGUF-quantized language-model path.</summary>
+    /// <remarks>An explicit <c>q8</c> or <c>q4</c> on the LM-precision param wins. Otherwise the picked model decides: AudioLab offers one checkpoint as <c>base</c>, <c>q8</c> and <c>q4</c> entries. Those entries have no file, so the name's last segment is matched (<c>Audio Models/MiniMaxMusic3/q4</c>); a real file's stem is read the same way. The param defaults to <c>bf16</c>, so the default must not override the picked entry.</remarks>
     private static string MiniMaxMusicFamily(SwarmUI.Text2Image.T2IModel model, T2IParamInput input)
     {
         if (input is not null
-            && input.TryGet(SwarmUIHartsyInference.MiniMaxMusicLmPrecisionParam, out string lmPrecision)
+            && input.TryGet(HartsyInference.MiniMaxMusicLmPrecisionParam, out string lmPrecision)
             && lmPrecision is "q8" or "q4")
         {
             return $"minimaxmusic3:{lmPrecision}";
@@ -787,8 +693,7 @@ public static class ModelSupport
         return "minimaxmusic3";
     }
 
-    /// <summary>Kept for the extension entry point's call order; the Engine's registries are self-registering, so
-    /// there is nothing left to pre-register here.</summary>
+    /// <summary>No-op: the Engine's registries self-register. Retained for the extension entry point's call order.</summary>
     public static void RegisterBuiltins()
     {
     }

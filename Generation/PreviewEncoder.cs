@@ -10,17 +10,12 @@ using ISImage = SixLabors.ImageSharp.Image;
 
 namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
-/// <summary>Turns the RGB preview the Engine attaches to a <see cref="StepPreview"/> tick into a base64 JPEG or
-/// animated WebP data URI
-/// that the SwarmUI frontend renders through its existing <c>gen_progress.preview</c> handler.
-/// <para>Latent decoding (latent2rgb / TAESD) now belongs to the Engine — it owns the latent, and only it knows the
-/// architecture's factor table. This class is pure marshalling: pixels in, wire JSON out.</para>
-/// <para>Throttled internally to <see cref="MinIntervalMs"/> between encoded previews so a fast sampler can't flood
-/// the WebSocket.</para></summary>
+/// <summary>Turns the RGB preview on a <see cref="StepPreview"/> tick into a base64 JPEG or animated WebP data URI for the frontend's <c>gen_progress.preview</c> handler.
+/// <para>Latent decoding (latent2rgb / TAESD) belongs to the Engine, which owns the latent and its factor table. This class only marshals pixels to wire JSON.</para>
+/// <para>Throttled to <see cref="MinIntervalMs"/> so a fast sampler cannot flood the WebSocket.</para></summary>
 public sealed class PreviewEncoder
 {
-    /// <summary>Minimum milliseconds between encoded previews (~4/sec) — the UI can't render faster, and JPEG
-    /// encoding every tick would be pure waste.</summary>
+    /// <summary>Minimum milliseconds between encoded previews (~4/sec): the UI cannot render faster, and encoding every tick is wasted work.</summary>
     private const int MinIntervalMs = 250;
 
     private readonly bool _enabled;
@@ -36,9 +31,7 @@ public sealed class PreviewEncoder
     /// <summary>Whether previews are turned on for this generation.</summary>
     public bool Enabled => _enabled;
 
-    /// <summary>Encodes the preview carried by <paramref name="preview"/>, or returns null when previews are off, the
-    /// throttle hasn't elapsed, or this engine build produced no preview pixels for the tick. The returned JObject
-    /// matches the schema the frontend's <c>data.gen_progress.preview</c> handler expects.</summary>
+    /// <summary>Encodes the preview carried by <paramref name="preview"/>, or returns null when previews are off, the throttle has not elapsed, or the tick has no preview pixels. The JObject matches the schema the frontend's <c>data.gen_progress.preview</c> handler expects.</summary>
     public JObject? TryEncode(StepPreview preview, string batchId, double overallPercent)
     {
         if (!_enabled)
@@ -72,8 +65,7 @@ public sealed class PreviewEncoder
         };
     }
 
-    /// <summary>Encodes raw HWC RGB bytes to JPEG via ImageSharp. Quality 70 — plenty for a preview, and the
-    /// resulting frames are typically under 30 KB on the wire.</summary>
+    /// <summary>Encodes raw HWC RGB bytes to JPEG via ImageSharp. Quality 70 is plenty for a preview and keeps frames typically under 30 KB.</summary>
     private static byte[] EncodeJpeg(byte[] rgb, int width, int height)
     {
         using SixLabors.ImageSharp.Image<Rgb24> img = ISImage.LoadPixelData<Rgb24>(rgb, width, height);
@@ -96,9 +88,7 @@ public sealed class PreviewEncoder
         return true;
     }
 
-    /// <summary>Packages temporal latent previews as a looping animated WebP at six frames per second, matching
-    /// Swarm's Comfy sampler preview cadence. Lossy quality 60 and the fastest encoding method keep this suitable
-    /// for repeated WebSocket updates.</summary>
+    /// <summary>Packages temporal latent previews as a looping animated WebP at six frames per second, matching Swarm's Comfy sampler cadence. Lossy quality 60 and the fastest method keep repeated WebSocket updates cheap.</summary>
     private static byte[] EncodeAnimatedWebp(byte[][] frames, int width, int height)
     {
         using SixLabors.ImageSharp.Image<Rgb24> animation = ISImage.LoadPixelData<Rgb24>(frames[0], width, height);

@@ -6,8 +6,7 @@ using HartsyInference.Engine.Recipes;
 
 namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
-/// <summary>What images a model takes as input: how many, in which modes, whether one is required, and whether a mask
-/// or end frame applies. Feeds the <c>HartsyInferenceGetImageInputs</c> route and this backend's image refusals.</summary>
+/// <summary>What images a model takes as input: how many, in which modes, whether one is required, and whether a mask or end frame applies. Feeds the <c>HartsyInferenceGetImageInputs</c> route and this backend's image refusals.</summary>
 /// <remarks>Every number comes from the engine's per-variant answers (<see cref="ModelCapabilities"/>), so a Qwen-Image
 /// base and Edit build, or a Wan I2V and Animate checkpoint, are described as what they resolve to.</remarks>
 public static class ImageInputs
@@ -36,8 +35,7 @@ public static class ImageInputs
         };
     }
 
-    /// <summary>The route's <c>inputs</c> object for a Swarm model class with no file in hand: the class id is passed
-    /// as the variant hint, which is what separates Qwen-Image base from Edit. Null when not drivable here.</summary>
+    /// <summary>The route's <c>inputs</c> object for a model class with no file in hand. The class id is the variant hint that separates Qwen-Image base from Edit. Null when not drivable here.</summary>
     public static JObject Describe(string compat, string modelClassId)
     {
         if (!ModelSupport.IsArchitectureSupported(compat))

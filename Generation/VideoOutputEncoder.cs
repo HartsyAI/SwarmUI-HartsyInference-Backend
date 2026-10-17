@@ -6,21 +6,12 @@ using Image = SwarmUI.Utils.Image;
 
 namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
-/// <summary>
-/// Muxes raw RGB frames from a HartsyInference video pipeline into an encoded video container,
-/// returning a SwarmUI <see cref="Image"/> (videos are Image objects with a video MediaType —
-/// Swarm's save path, mime handling, and history previews all key off the MediaType).
+/// <summary>Muxes raw RGB frames from a HartsyInference video pipeline into an encoded container, returned as a SwarmUI <see cref="Image"/> with a video MediaType.
 ///
-/// <para>This is the C# twin of ComfyUI's <c>SwarmSaveAnimationWS.py</c> node: same per-format
-/// ffmpeg arguments, same <c>rawvideo rgb24</c> stdin piping, same format names (the
-/// <c>VideoFormat</c> param values). ffmpeg itself comes from Swarm's own resolver
-/// (<see cref="Utilities.FfmegLocation"/> — system ffmpeg or ComfyUI's vendored imageio-ffmpeg);
-/// we never bundle an encoder.</para>
-/// </summary>
+/// <para>The C# twin of ComfyUI's <c>SwarmSaveAnimationWS.py</c>: same per-format ffmpeg arguments, <c>rawvideo rgb24</c> stdin piping and <c>VideoFormat</c> names. ffmpeg comes from Swarm's resolver (<see cref="Utilities.FfmegLocation"/>: system ffmpeg or ComfyUI's vendored imageio-ffmpeg). No encoder is bundled.</para></summary>
 public static class VideoOutputEncoder
 {
-    /// <summary>A stereo audio track to mux into the video container (e.g. LTX-2's generated soundtrack,
-    /// or a Wan S2V driving-speech clip). <see cref="Right"/> may be null for mono (Left is duplicated).</summary>
+    /// <summary>A stereo audio track to mux into the video container, e.g. LTX-2's soundtrack or a Wan S2V speech clip. <see cref="Right"/> may be null for mono (Left is duplicated).</summary>
     public sealed class AudioTrack
     {
         public required float[] Left { get; init; }
@@ -29,11 +20,7 @@ public static class VideoOutputEncoder
         public bool HasSamples => Left is not null && Left.Length > 0 && SampleRate > 0;
     }
 
-    /// <summary>Encodes frames to the requested <c>VideoFormat</c> value ("h264-mp4", "h265-mp4",
-    /// "webm", "prores", "gif", "gif-hd", "webp"). A single frame short-circuits to a plain PNG image,
-    /// matching the Comfy node's behavior. When <paramref name="audio"/> is supplied and the container
-    /// can carry sound (mp4/mov/webm), the audio is muxed in as a second ffmpeg input so the output is a
-    /// single playable video-with-sound file; formats that can't carry audio (gif/webp/png) ignore it.</summary>
+    /// <summary>Encodes frames to the requested <c>VideoFormat</c> ("h264-mp4", "h265-mp4", "webm", "prores", "gif", "gif-hd", "webp"). A single frame short-circuits to a plain PNG, matching the Comfy node. Audio is muxed in as a second ffmpeg input when the container can carry it (mp4/mov/webm); other formats ignore it.</summary>
     /// <param name="frames">Interleaved RGB24 bytes, one array per frame, each width*height*3 long.</param>
     public static Image Encode(byte[][] frames, int width, int height, int fps, string format, CancellationToken cancel, AudioTrack audio = null)
     {
@@ -46,7 +33,7 @@ public static class VideoOutputEncoder
             return RgbToImage.FromHwcRgb(frames[0], width, height);
         }
         (Process proc, string tmpFile, string audioTmp, MediaType type) = StartFfmpegEncode(width, height, fps, format, audio, cancel);
-        Logs.Verbose($"[HartsyInference] Encoding {frames.Length} frames {width}x{height}@{fps}fps as '{format}'"
+        Logs.Debug($"[HartsyInference] Encoding {frames.Length} frames {width}x{height}@{fps}fps as '{format}'"
             + (audioTmp is not null ? $" with a {audio.SampleRate} Hz audio track" : ""));
         try
         {
@@ -65,20 +52,12 @@ public static class VideoOutputEncoder
         }
     }
 
-    /// <summary>Streaming sibling of <see cref="Encode"/> (Tier 3.5 backlog): writes frames to ffmpeg's stdin as
-    /// they arrive instead of requiring the whole clip materialized first — lower peak memory and a muxed file
-    /// available sooner after the last frame decodes, for the video pipelines that can genuinely produce frames
-    /// incrementally (<c>IVideoService.GenerateFramesAsync</c>). The ffmpeg command line itself never needed a
-    /// frame count up front (no <c>-frames:v</c> flag; duration is inferred from EOF on stdin), so this differs
-    /// from <see cref="Encode"/> only in the write loop — same args, same process lifecycle, same cleanup
-    /// (<see cref="StartFfmpegEncode"/>/<see cref="FinishEncode"/>/<see cref="CleanupEncode"/> are shared).
-    /// Unlike <see cref="Encode"/>, this does NOT special-case a single frame as a bare PNG — the count isn't
-    /// known until the source is exhausted. Acceptable because its only caller gates on multi-frame requests
-    /// before choosing this path (see the eligibility check in <c>HartsyInferenceBackend.GenerateVideo</c>).</summary>
+    /// <summary>Streaming variant of <see cref="Encode"/>: writes frames to ffmpeg's stdin as they arrive, for pipelines that produce frames incrementally (<c>IVideoService.GenerateFramesAsync</c>).
+    /// <para>Shares the ffmpeg setup and cleanup helpers with <see cref="Encode"/>. No frame count is passed to ffmpeg, so duration comes from EOF on stdin. A single frame is not special-cased to PNG, since the count is unknown until the source ends; the only caller streams multi-frame requests (see <c>HartsyInferenceBackend.GenerateVideo</c>).</para></summary>
     public static async Task<Image> EncodeStreamingAsync(IAsyncEnumerable<byte[]> frames, int width, int height, int fps, string format, CancellationToken cancel, AudioTrack audio = null)
     {
         (Process proc, string tmpFile, string audioTmp, MediaType type) = StartFfmpegEncode(width, height, fps, format, audio, cancel);
-        Logs.Verbose($"[HartsyInference] Streaming-encoding {width}x{height}@{fps}fps as '{format}'"
+        Logs.Debug($"[HartsyInference] Streaming-encoding {width}x{height}@{fps}fps as '{format}'"
             + (audioTmp is not null ? $" with a {audio.SampleRate} Hz audio track" : "") + " (frame count unknown until EOF)");
         try
         {
@@ -103,8 +82,7 @@ public static class VideoOutputEncoder
         }
     }
 
-    /// <summary>Resolves ffmpeg, builds its argv (same for the buffered and streaming encode paths), and starts
-    /// the subprocess with stdin/stderr redirected — writing frames to it is the caller's job.</summary>
+    /// <summary>Resolves ffmpeg, builds its argv (shared by the buffered and streaming paths), and starts the subprocess with stdin and stderr redirected. The caller writes the frames.</summary>
     private static (Process Proc, string TmpFile, string AudioTmp, MediaType Type) StartFfmpegEncode(
         int width, int height, int fps, string format, AudioTrack audio, CancellationToken cancel)
     {
@@ -139,8 +117,7 @@ public static class VideoOutputEncoder
         return (proc, tmpFile, audioTmp, type);
     }
 
-    /// <summary>Closes out a successful encode: waits for ffmpeg to exit, checks its exit code, and reads back
-    /// the muxed file. Caller must have already closed stdin.</summary>
+    /// <summary>Closes out a successful encode: waits for ffmpeg to exit, checks its exit code, and reads back the muxed file. The caller must already have closed stdin.</summary>
     private static Image FinishEncode(Process proc, string tmpFile, string audioTmp, MediaType type, string format)
     {
         string stderr = proc.StandardError.ReadToEnd();
@@ -152,41 +129,35 @@ public static class VideoOutputEncoder
         return new Image(File.ReadAllBytes(tmpFile), type);
     }
 
-    /// <summary>Kills ffmpeg if it's still running (e.g. the caller threw before closing stdin) and deletes the
-    /// temp files. Always runs from a <c>finally</c> in both <see cref="Encode"/> and
-    /// <see cref="EncodeStreamingAsync"/>.</summary>
+    /// <summary>Kills ffmpeg if it is still running (e.g. the caller threw before closing stdin) and deletes the temp files. Runs from a <c>finally</c> in both <see cref="Encode"/> and <see cref="EncodeStreamingAsync"/>.</summary>
     private static void CleanupEncode(Process proc, string tmpFile, string audioTmp)
     {
         if (!proc.HasExited)
         {
-            try { proc.Kill(); } catch (Exception ex) { Logs.Error($"[HartsyInference] Failed to kill ffmpeg: {ex.Message}"); }
+            try { proc.Kill(); } catch (Exception ex) { Logs.Warning($"[HartsyInference] Could not stop the ffmpeg process: {ex.Message}"); }
         }
         proc.Dispose();
         try { if (File.Exists(tmpFile)) File.Delete(tmpFile); }
-        catch (Exception ex) { Logs.Warning($"[HartsyInference] Failed to delete temp video file '{tmpFile}': {ex.Message}"); }
+        catch (Exception ex) { Logs.Warning($"[HartsyInference] Could not delete temp video file '{tmpFile}' (you can remove it by hand): {ex.Message}"); }
         if (audioTmp is not null)
         {
             try { if (File.Exists(audioTmp)) File.Delete(audioTmp); }
-            catch (Exception ex) { Logs.Warning($"[HartsyInference] Failed to delete temp audio file '{audioTmp}': {ex.Message}"); }
+            catch (Exception ex) { Logs.Warning($"[HartsyInference] Could not delete temp audio file '{audioTmp}' (you can remove it by hand): {ex.Message}"); }
         }
     }
 
-    /// <summary>True if the container for this <c>VideoFormat</c> value can carry an audio stream (mp4/mov/webm).
-    /// gif/webp can't, so a generated soundtrack is dropped with a warning for those formats — there is no separate
-    /// audio-file fallback. Pick mp4/mov/webm to keep an LTX-2 or MiniMax-H3 soundtrack.</summary>
+    /// <summary>True if the container for this <c>VideoFormat</c> can carry an audio stream (mp4/mov/webm). gif and webp cannot, so a generated soundtrack is dropped for those formats, with no separate audio-file fallback.</summary>
     public static bool FormatSupportsAudio(string format) => AudioArgsForContainer(FormatArgs(format).ext) is not null;
 
-    /// <summary>Per-container audio codec args, or null if the container can't carry audio (gif/webp).
-    /// mp4/mov take AAC; webm needs Opus (AAC isn't valid in a WebM/Matroska container).</summary>
+    /// <summary>Per-container audio codec args, or null if the container cannot carry audio (gif/webp). mp4/mov take AAC; webm needs Opus, since AAC is not valid in Matroska.</summary>
     private static string AudioArgsForContainer(string ext) => ext switch
     {
         "mp4" or "mov" => "-c:a aac -b:a 192k",
         "webm" => "-c:a libopus -b:a 192k",
-        _ => null, // gif / webp — no audio stream
+        _ => null, // gif / webp: no audio stream
     };
 
-    /// <summary>Writes a stereo audio track to a temp f32le raw file (interleaved L/R), for use as a
-    /// second ffmpeg input. Mono tracks (null Right) duplicate Left into both channels.</summary>
+    /// <summary>Writes a stereo audio track to a temp f32le file (interleaved L/R) for use as a second ffmpeg input. Mono tracks (null Right) duplicate Left into both channels.</summary>
     private static string WriteInterleavedF32(AudioTrack audio, CancellationToken cancel)
     {
         float[] left = audio.Left;
@@ -204,9 +175,7 @@ public static class VideoOutputEncoder
         return path;
     }
 
-    /// <summary>Applies the shared frame-array post-edits the Comfy path supports:
-    /// <c>TrimVideoStartFrames</c>/<c>TrimVideoEndFrames</c> drop corrupted edge frames, and
-    /// <c>VideoBoomerang</c> appends the reversed sequence (minus endpoints) for smooth looping.</summary>
+    /// <summary>Applies the frame-array post-edits the Comfy path supports: <c>TrimVideoStartFrames</c> and <c>TrimVideoEndFrames</c> drop corrupted edge frames, and <c>VideoBoomerang</c> appends the reversed sequence (minus endpoints) for smooth looping.</summary>
     public static byte[][] ApplyFrameEdits(byte[][] frames, int trimStart, int trimEnd, bool boomerang)
     {
         if (trimStart > 0 || trimEnd > 0)
@@ -232,9 +201,7 @@ public static class VideoOutputEncoder
         return frames;
     }
 
-    /// <summary>Per-format ffmpeg output arguments, file extension, and Swarm MediaType. Arguments
-    /// mirror <c>SwarmSaveAnimationWS.py</c>; webp/gif (PIL-encoded in the python node) use ffmpeg's
-    /// libwebp / palette encoders here. Unknown values fall back to h264-mp4.</summary>
+    /// <summary>Per-format ffmpeg output arguments, file extension, and Swarm MediaType. Arguments mirror <c>SwarmSaveAnimationWS.py</c>, with webp and gif using ffmpeg's libwebp and palette encoders. Unknown values fall back to h264-mp4.</summary>
     private static (string videoArgs, string ext, MediaType type) FormatArgs(string format) => format switch
     {
         "h265-mp4" => ("-c:v libx265 -pix_fmt yuv420p", "mp4", MediaType.VideoMp4),

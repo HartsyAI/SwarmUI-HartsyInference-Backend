@@ -9,16 +9,10 @@ using Image = SwarmUI.Utils.Image;
 
 namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
-/// <summary>
-/// Convert HartsyInference's HWC RGB byte output (the format
-/// <see cref="HartsyInference.Diffusion.Pipelines.FluxPipeline.GenerateFromTokens"/>
-/// returns) into a SwarmUI <see cref="Image"/> as PNG bytes.
-/// </summary>
+/// <summary>Converts HartsyInference's HWC RGB byte output (the format <see cref="global::HartsyInference.Diffusion.Pipelines.FluxPipeline.GenerateFromTokens"/> returns) into a SwarmUI <see cref="Image"/> as PNG bytes.</summary>
 public static class RgbToImage
 {
-    /// <summary>
-    /// Wrap an HWC-interleaved RGB byte array as a SwarmUI Image (PNG-encoded).
-    /// </summary>
+    /// <summary>Wraps an HWC-interleaved RGB byte array as a SwarmUI Image (PNG-encoded).</summary>
     /// <param name="rgbData">Pixel bytes, layout <c>rgb[y*width*3 + x*3 + c]</c>, range 0..255.</param>
     /// <param name="width">Pixel width.</param>
     /// <param name="height">Pixel height.</param>
@@ -36,9 +30,7 @@ public static class RgbToImage
         return new Image(image);
     }
 
-    /// <summary>Wraps HWC RGB bytes plus a straight 8-bit alpha plane (255 = opaque) as a SwarmUI Image, encoded
-    /// as an RGBA PNG (colour type 6) explicitly — a cutout only exists if the alpha survives the encode, and
-    /// ImageSharp's default colour-type choice is not something to rely on for that.</summary>
+    /// <summary>Wraps HWC RGB bytes plus a straight 8-bit alpha plane (255 = opaque) as an explicit RGBA PNG (colour type 6). A cutout needs its alpha to survive the encode, so ImageSharp's default colour type is not relied on.</summary>
     public static Image FromHwcRgba(byte[] rgbData, byte[] alpha, int width, int height)
     {
         if (rgbData is null || rgbData.Length != width * height * 3)
@@ -67,8 +59,7 @@ public static class RgbToImage
         return new Image(stream.ToArray(), MediaType.ImagePng);
     }
 
-    /// <summary>Plain resample of HWC RGB bytes to a new size (ImageSharp's default bicubic). The honest thing to do
-    /// for a Refiner Upscale below 1 — a shrink has nothing to super-resolve.</summary>
+    /// <summary>Plain resample of HWC RGB bytes to a new size (ImageSharp's default bicubic), used for a Refiner Upscale below 1, where there is nothing to super-resolve.</summary>
     public static byte[] ResizeHwcRgb(byte[] rgbData, int width, int height, int newWidth, int newHeight)
     {
         if (rgbData is null || rgbData.Length != width * height * 3)
@@ -88,8 +79,7 @@ public static class RgbToImage
         return rgb;
     }
 
-    /// <summary>Decodes only the image header to get pixel dimensions (no full decode) — used to
-    /// compute a video target resolution from an init image's aspect before resizing.</summary>
+    /// <summary>Reads only the image header for pixel dimensions, e.g. to size a video target from an init image's aspect.</summary>
     public static (int width, int height) GetDimensions(Image image)
     {
         if (image is null) throw new ArgumentNullException(nameof(image));
@@ -97,8 +87,7 @@ public static class RgbToImage
         return (info.Width, info.Height);
     }
 
-    /// <summary>Like <see cref="ToHwcRgb"/> but resampled to an exact target size first — used to fit
-    /// an init image to a video model's latent-grid-aligned resolution before VAE encoding.</summary>
+    /// <summary>Like <see cref="ToHwcRgb"/> but resampled to an exact size first, to fit an init image to a video model's latent grid before VAE encoding.</summary>
     public static byte[] ToHwcRgbResized(Image image, int width, int height)
     {
         if (image is null) throw new ArgumentNullException(nameof(image));
@@ -109,9 +98,7 @@ public static class RgbToImage
         return rgb;
     }
 
-    /// <summary>Inverse of <see cref="FromHwcRgb"/>: extract HWC-interleaved RGB bytes
-    /// from a SwarmUI Image. Used to feed a base-stage image back into the refiner's
-    /// VAE encoder which expects raw pixel data.</summary>
+    /// <summary>Inverse of <see cref="FromHwcRgb"/>: extracts HWC-interleaved RGB bytes from a SwarmUI Image.</summary>
     /// <returns>(rgbData, width, height) in the same layout <see cref="FromHwcRgb"/> consumes.</returns>
     public static (byte[] rgbData, int width, int height) ToHwcRgb(Image image)
     {
@@ -122,7 +109,7 @@ public static class RgbToImage
         int w = frame.Width;
         int h = frame.Height;
         byte[] rgb = new byte[w * h * 3];
-        // CopyPixelDataTo writes contiguous HWC bytes — same layout HartsyInference's
+        // CopyPixelDataTo writes contiguous HWC bytes, the layout HartsyInference's
         // ImagePostProcessor.RgbBytesToTensor expects.
         frame.CopyPixelDataTo(rgb);
         return (rgb, w, h);

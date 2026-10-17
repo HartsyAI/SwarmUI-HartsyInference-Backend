@@ -7,19 +7,15 @@ using SwarmUI.WebAPI;
 
 namespace Hartsy.Extensions.HartsyInferenceBackend.WebAPI;
 
-/// <summary>
-/// Whole-server queue visibility.
-/// <para><see cref="HartsyGetQueueStatus"/> answers the question core has no call for: how busy is the whole server?
-/// Core's <c>GetCurrentStatus</c> is per session, so a caller such as Hartsy's site - which gives every Discord run a
-/// session of its own - could only ever see its own jobs, and could not tell a member how many are ahead of them or
-/// whether the server is simply saturated.</para>
-/// </summary>
+/// <summary>Whole-server queue visibility, summed over every session. Core's <c>GetCurrentStatus</c> is per session.</summary>
+/// <remarks>A caller such as Hartsy's site gives each Discord run its own session, so core's per-session status cannot
+/// show queue position or whether the server is saturated.</remarks>
 public static class HartsyQueueWebAPI
 {
     public static void Register()
     {
         API.RegisterAPICall(HartsyGetQueueStatus, false, HartsyInferencePermissions.PermUseHartsyInference);
-        Logs.Init("HartsyInference queue route registered (queue-status).");
+        Logs.Init("[HartsyInference] Queue API route registered ('queue-status').");
     }
 
     /// <summary>POST /API/HartsyGetQueueStatus - the whole server's queue, summed over every session, plus what each

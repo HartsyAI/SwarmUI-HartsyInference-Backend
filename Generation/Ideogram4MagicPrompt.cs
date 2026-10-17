@@ -1,21 +1,8 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// TODO(LLM-core): Ideogram 4 magic prompt is TEMPORARILY GATED OFF.
-//
-// The full implementation below needs SwarmUI core's expanded LLM API:
-//   LLMParamInput.SystemPrompt / Temperature / MaxTokens / Stream / RequestSession
-//   AbstractLLMBackend.ListModels()
-// Those members currently live ONLY on the `temp-LLM-impl` core branch and are NOT in the
-// SwarmUI core this extension is built against on other machines (e.g. the H200 box), so they
-// break the extension build (CS0117 / CS1061).
-//
-// Everything LLM-dependent is excluded via `#if HARTSY_LLM_CORE` (kept, not deleted, for easy
-// restore). Without the symbol, Expand() is a no-op stub that returns the prompt unchanged, so
-// the extension builds clean and Ideogram 4 generation still works (magic prompt is opt-in/off
-// by default anyway).
-//
-// TO RE-ENABLE once the core LLM API is merged into the target core:
-//   add  <DefineConstants>$(DefineConstants);HARTSY_LLM_CORE</DefineConstants>  to the csproj
-//   (or build with -p:DefineConstants=HARTSY_LLM_CORE).
+// TODO(LLM-core): gated off until SwarmUI core ships the expanded LLM API (LLMParamInput.SystemPrompt, Temperature,
+// MaxTokens, Stream, RequestSession, and AbstractLLMBackend.ListModels()). Without them the build fails (CS0117 / CS1061).
+// The LLM code sits behind #if HARTSY_LLM_CORE; without the symbol, Expand() returns the prompt unchanged.
+// To re-enable, define HARTSY_LLM_CORE (csproj DefineConstants, or -p:DefineConstants=HARTSY_LLM_CORE).
 // ─────────────────────────────────────────────────────────────────────────────
 #if HARTSY_LLM_CORE
 using System.IO;
@@ -31,21 +18,12 @@ using SwarmUI.Utils;
 
 namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
-/// <summary>
-/// Ideogram 4 "magic prompt": rewrites a plain user prompt into the structured JSON caption Ideogram 4
-/// was trained on, using a SwarmUI LLM backend (LlamaSharp / Anthropic / remote — whichever is running).
+/// <summary>Ideogram 4 "magic prompt": rewrites a plain user prompt into the structured JSON caption Ideogram 4 was trained on, using a SwarmUI LLM backend (LlamaSharp, Anthropic or remote, whichever is running).
 ///
-/// <para><b>Currently gated off</b> behind <c>#if HARTSY_LLM_CORE</c> — see the file-top TODO. Without that
-/// symbol, <see cref="Expand"/> returns the prompt unchanged so the extension builds against any SwarmUI
-/// core. The full flow (a faithful port of upstream <c>ideogram-oss/ideogram4</c>'s <c>magic_prompt.py</c>
-/// + <c>ClaudeOpusMagicPromptV1</c>) is preserved below for restore.</para>
-/// </summary>
+/// <para><b>Gated off</b> behind <c>#if HARTSY_LLM_CORE</c> (see the file-top TODO). Without the symbol, <see cref="Expand"/> returns the prompt unchanged. The full flow is a port of upstream <c>ideogram-oss/ideogram4</c>'s <c>magic_prompt.py</c> and <c>ClaudeOpusMagicPromptV1</c>.</para></summary>
 public static class Ideogram4MagicPrompt
 {
-    /// <summary>True if <paramref name="prompt"/> is already an Ideogram 4 structured JSON caption (e.g. authored
-    /// by a prompt-builder UI like SwarmUI-IdeogramPromptBuilder, or pasted by hand). Such a prompt must NOT be
-    /// re-expanded through the LLM — that would double-process it and strip its user-drawn bboxes. Cheap shape
-    /// check: a JSON object carrying one of the schema's top-level keys.</summary>
+    /// <summary>True if <paramref name="prompt"/> is already a structured JSON caption (from a prompt builder or pasted by hand). Such a prompt must not be re-expanded, since that would strip its user-drawn bboxes. Cheap shape check on the top-level keys.</summary>
     public static bool LooksLikeStructuredCaption(string prompt)
     {
         if (string.IsNullOrWhiteSpace(prompt))
@@ -57,22 +35,12 @@ public static class Ideogram4MagicPrompt
             && (prompt.Contains("compositional_deconstruction") || prompt.Contains("high_level_description"));
     }
 
-    /// <summary>Wraps a plain user prompt in Ideogram 4's minimal structured-caption JSON shape WITHOUT an LLM.
-    /// Ideogram 4 was trained on structured JSON captions; feeding raw plain text is out-of-distribution and
-    /// makes the model's built-in safety filter false-trigger far more often (it renders a grey "Image blocked
-    /// by safety filter" placeholder). Putting the whole idea in <c>high_level_description</c> inside the schema
-    /// keeps the input in the JSON form the model expects. This is the always-available fallback for the richer
-    /// LLM <see cref="Expand"/> path (which is gated off on cores without the LLM API). Uses System.Text.Json
-    /// for correct string escaping (Newtonsoft is only imported under HARTSY_LLM_CORE).</summary>
+    /// <summary>Wraps a plain prompt in Ideogram 4's minimal structured-caption JSON without an LLM. Raw text is out-of-distribution and trips the safety filter more often, so the prompt goes in <c>high_level_description</c>. Uses System.Text.Json because Newtonsoft is only imported under HARTSY_LLM_CORE.</summary>
     public static string WrapPlainAsJson(string prompt)
     {
         string p = string.IsNullOrWhiteSpace(prompt) ? "a photograph" : prompt.Trim();
-        // Best-effort structured shape for a bare prompt. NOTE (verified 2026-07-03): this is NOT sufficient to
-        // reliably clear Ideogram 4's trained safety head — mechanically echoing a short prompt into the schema
-        // still reads as out-of-distribution and often yields the grey "Image blocked by safety filter" frame,
-        // whereas a genuinely written rich caption (elaborated high_level_description + specific multi-detail
-        // background + a decomposed focal element) renders correctly. Producing that from a bare prompt needs the
-        // LLM Expand() path. Kept as a slightly-better-than-plain fallback; callers should warn the user.
+        // Best-effort shape only: echoing a bare prompt into the schema often still yields the safety-filter placeholder.
+        // A rich, written caption needs the LLM Expand() path, so callers should warn the user.
         var caption = new
         {
             high_level_description = p,
@@ -85,9 +53,7 @@ public static class Ideogram4MagicPrompt
         return System.Text.Json.JsonSerializer.Serialize(caption);
     }
 
-    /// <summary>Expands <paramref name="plainPrompt"/> into the canonical Ideogram 4 JSON caption via a running
-    /// LLM backend. <b>Gated:</b> when built without <c>HARTSY_LLM_CORE</c> this is a no-op that returns the
-    /// prompt unchanged (Ideogram 4 accepts plain text), pending SwarmUI core's expanded LLM API.</summary>
+    /// <summary>Expands <paramref name="plainPrompt"/> into the canonical Ideogram 4 JSON caption via a running LLM backend. <b>Gated:</b> without <c>HARTSY_LLM_CORE</c> this returns the prompt unchanged, since Ideogram 4 accepts plain text.</summary>
     public static string Expand(
         string plainPrompt,
         int width,
@@ -143,8 +109,8 @@ public static class Ideogram4MagicPrompt
         }
 #else
         // TODO(LLM-core): no-op until SwarmUI core ships the expanded LLM API (see file-top TODO).
-        Logs.Warning("[HartsyInference][Ideogram4] Magic prompt is temporarily disabled (pending the SwarmUI core "
-            + "LLM API); using your prompt as-is. Rebuild with HARTSY_LLM_CORE defined to re-enable.");
+        Logs.Warning("[HartsyInference][Ideogram4] The magic prompt is not available in this build yet, so your prompt is "
+            + "used as-is. Turn off the 'Ideogram 4 Magic Prompt' parameter to stop this warning.");
         return plainPrompt;
 #endif
     }
@@ -159,11 +125,7 @@ public static class Ideogram4MagicPrompt
     private static readonly object _sectionsLock = new();
     private static (string System, string UserTemplate)? _sections;
 
-    /// <summary>Mirrors upstream <c>strip_aspect_ratio_and_bboxes(strip_bboxes=True)</c> — the post-step the
-    /// Claude-based (i.e. LLM, not hosted-API) expanders run: drop the top-level <c>aspect_ratio</c> key and
-    /// every element's <c>bbox</c>, then re-emit minified JSON (no spaces, literal Unicode). We strip bboxes
-    /// because the engine's regional-attention coupling is not yet implemented, so per-element boxes can't be
-    /// honored — feeding them would only dilute the caption.</summary>
+    /// <summary>Mirrors upstream <c>strip_aspect_ratio_and_bboxes(strip_bboxes=True)</c>: drops the top-level <c>aspect_ratio</c> and every element's <c>bbox</c>, then re-emits minified JSON. Bboxes are dropped because the engine does not honor per-element regions, so they would only dilute the caption.</summary>
     private static string StripAspectRatioAndBboxes(string caption)
     {
         JObject data = JObject.Parse(caption);
@@ -181,8 +143,7 @@ public static class Ideogram4MagicPrompt
         return data.ToString(Formatting.None);
     }
 
-    /// <summary>Picks an LLM backend the same way <c>LLMDispatcher</c> does: the only running one, else (when a
-    /// specific model is named) the backend that owns that model, else the first running backend.</summary>
+    /// <summary>Picks an LLM backend the same way <c>LLMDispatcher</c> does: the only running one, else the backend that owns the named model, else the first running backend.</summary>
     private static AbstractLLMBackend PickBackend(string modelOverride)
     {
         List<AbstractLLMBackend> backends = Program.Backends.RunningBackendsOfType<AbstractLLMBackend>().ToList();
@@ -213,8 +174,7 @@ public static class Ideogram4MagicPrompt
         return backends[0];
     }
 
-    /// <summary>Reduces pixel <paramref name="width"/>x<paramref name="height"/> to a "W:H" string. Mirrors
-    /// upstream <c>aspect_ratio_from_size</c> (used to fill the <c>{{aspect_ratio}}</c> placeholder).</summary>
+    /// <summary>Reduces pixel <paramref name="width"/>x<paramref name="height"/> to a "W:H" string for the <c>{{aspect_ratio}}</c> placeholder, as upstream <c>aspect_ratio_from_size</c> does.</summary>
     private static string AspectRatioFromSize(int width, int height)
     {
         int divisor = Gcd(Math.Abs(width), Math.Abs(height));
@@ -231,9 +191,7 @@ public static class Ideogram4MagicPrompt
         return a;
     }
 
-    /// <summary>Builds the user message from the <c>[USER]</c> template. Mirrors upstream <c>build_messages</c>:
-    /// substitute <c>{{aspect_ratio}}</c>, then <c>{{original_prompt}}</c> if present, else append the prompt
-    /// after a blank line.</summary>
+    /// <summary>Builds the user message from the <c>[USER]</c> template, mirroring upstream <c>build_messages</c>: substitutes <c>{{aspect_ratio}}</c>, then <c>{{original_prompt}}</c> if present, else appends the prompt after a blank line.</summary>
     private static string BuildUserMessage(string userTemplate, string aspectRatio, string plainPrompt)
     {
         string template = string.IsNullOrEmpty(userTemplate)
@@ -260,8 +218,7 @@ public static class Ideogram4MagicPrompt
         return string.Join('\n', lines[start..end]).Trim();
     }
 
-    /// <summary>Loads and caches the embedded <c>v1.txt</c> system prompt, parsed into its <c>[SYSTEM]</c> and
-    /// <c>[USER]</c> blocks. Mirrors upstream <c>_load_sections</c> ([NAME] markers alone on a line).</summary>
+    /// <summary>Loads and caches the embedded <c>v1.txt</c> system prompt, parsed into its <c>[SYSTEM]</c> and <c>[USER]</c> blocks, mirroring upstream <c>_load_sections</c>.</summary>
     private static (string System, string UserTemplate) LoadSections()
     {
         if (_sections is { } cached)

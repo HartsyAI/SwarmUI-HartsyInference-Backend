@@ -16,20 +16,15 @@ namespace Hartsy.Extensions.HartsyInferenceBackend.Services;
 
 /// <summary>Routes each generation to a GPU its model fits on. SwarmUI's scheduler picks backends by load and loaded
 /// model only; this gives it the missing memory dimension through the one hook it offers, the backend filter.</summary>
-/// <remarks><para><b>Two halves, split by cost.</b> <see cref="Prepare"/> runs once per generation on that request's
-/// own task (SwarmUI's <see cref="T2IEngine.PreGenerateEvent"/>), asks each distinct fit profile's engine for a verdict
-/// and freezes the routing answer. <see cref="Allows"/> runs inside SwarmUI's single scheduler thread for every pending
-/// request against every backend on every pass, so it reads that frozen answer and only touches the registry snapshot
-/// when it is about to refuse.</para>
-/// <para><b>Works with the VRAM tiers, never over them.</b> The engine judges under the effective tier (backend setting
-/// with the request's "VRAM Mode" applied). Performance is the operator sizing workloads themselves, so it is never
-/// filtered. Auto and Balanced prefer a card that holds the model resident, then the largest card that can stream it.
-/// Aggressive and Maximum chose streaming deliberately, so any card that can stream qualifies.</para>
-/// <para><b>Estimates route; only evidence refuses.</b> When no card fits by estimate the largest card is still allowed
-/// — the engine's own pre-flight gives the precise refusal. A preference never strands a request: when every card it
-/// prefers has stopped taking work, the rest are allowed again. A card is excluded outright only after it actually ran
-/// out of memory for this model and request shape (<see cref="RecordFailure"/>); that evidence expires, and is what
-/// makes the out-of-memory redirect finite, since every redirect excludes at least one more fit profile.</para></remarks>
+/// <remarks><para><b>Two halves.</b> <see cref="Prepare"/> runs once per generation on the request's own task and freezes
+/// the routing answer. <see cref="Allows"/> runs on SwarmUI's scheduler thread for every pending request, so it only reads that answer.</para>
+/// <para><b>Works with the VRAM tiers, never over them.</b> The engine judges under the effective tier (backend setting plus the
+/// request's VRAM Mode). Performance is never filtered. Auto and Balanced prefer a card that holds the model resident, then the largest
+/// that can stream it. Aggressive and Maximum accept any card that can stream it.</para>
+/// <para><b>Estimates route; only evidence refuses.</b> If no card fits by estimate, the largest is still allowed and the engine's
+/// pre-flight gives the precise refusal. A preference never strands a request. A card is excluded only after it actually ran out of
+/// memory for this model and request shape (<see cref="RecordFailure"/>). Those records expire, and each redirect excludes at least
+/// one more profile, so redirects terminate.</para></remarks>
 public static class ModelFitGate
 {
     /// <summary>Capacities within this fraction of the largest count as the largest: two "24 GB" cards rarely report
@@ -59,8 +54,8 @@ public static class ModelFitGate
     private static readonly ConcurrentDictionary<LedgerKey, OutOfMemoryRecord> FailedWorkloads = new();
 
     /// <summary>Assesses <paramref name="args"/>' request against every dispatchable fit profile and freezes the routing
-    /// answer. Subscribed to <see cref="T2IEngine.PreGenerateEvent"/>; never throws — any failure leaves the request
-    /// unfiltered, exactly as it was before this gate existed.</summary>
+    /// answer. Subscribed to <see cref="T2IEngine.PreGenerateEvent"/>; never throws: any failure leaves the request
+    /// unfiltered.</summary>
     public static void Prepare(T2IEngine.PreGenerationEventParams args)
     {
         T2IParamInput input = args?.UserInput;
@@ -90,10 +85,9 @@ public static class ModelFitGate
         }
         if (!Fits.TryGetValue(input, out RequestFit fit))
         {
-            // Prepare runs for every generation and always leaves an answer, so a miss means SwarmUI filtered a
-            // different T2IParamInput than the one PreGenerateEvent handed over — which turns routing off for that
-            // request, and looks exactly like the bug routing exists to fix. A warning the first time in this process,
-            // Verbose after; remembered per request so the scheduler's repeated passes say nothing more.
+            // Prepare runs for every generation and always leaves an answer, so a miss means SwarmUI filtered a different
+            // T2IParamInput than PreGenerateEvent received, turning routing off for this request. Warn the first time in this
+            // process, Verbose after; remembered per request so repeated scheduler passes say nothing more.
             string miss = "[HartsyInference] VRAM fit routing has no answer for this generation request: SwarmUI "
                 + "filtered a request object that PreGenerateEvent never prepared, so it is routed without memory checks.";
             if (FirstTime("unprepared-request"))
@@ -124,7 +118,7 @@ public static class ModelFitGate
 
     /// <summary>Records that <paramref name="input"/> ran out of memory on <paramref name="backend"/>, so requests of this
     /// shape at least this large skip that card, and equally configured cards no larger, until the record expires.</summary>
-    /// <returns>True when another fit profile can still take the request and it was not pinned to this backend — the
+    /// <returns>True when another fit profile can still take the request and it was not pinned to this backend: the
     /// caller should redirect rather than fail.</returns>
     public static bool RecordFailure(T2IParamInput input, SiBackend backend)
     {
@@ -149,9 +143,9 @@ public static class ModelFitGate
                     + "Lower the resolution or frame count, or use a GPU with more memory.",
             }),
         });
-        Logs.Info($"[HartsyInference] Recorded out-of-VRAM for '{fit.ModelName}' on {backend.FitProfileKey} at "
-            + $"workload {fit.Workload}; for {RecordLifetime.TotalMinutes:0} minutes, requests like it at least this "
-            + "large skip this card and equally configured cards no larger.");
+        Logs.Warning($"[HartsyInference] '{fit.ModelName}' ran out of VRAM on {failed.Device} at workload {fit.Workload}. "
+            + $"For {RecordLifetime.TotalMinutes:0} minutes, requests like it at least this large skip this card and equally "
+            + "configured cards no larger. Lower the resolution or frame count, or use a GPU with more memory.");
         return !fit.Pinned && fit.Profiles.Any(other => other.Key != backend.FitProfileKey
             && !PresumedOutOfMemory(fit.Checkpoint, fit.Shape, other.Key, other.Value.FitSettings, other.Value.Fit,
                 fit.Workload));
@@ -210,9 +204,9 @@ public static class ModelFitGate
         {
             if (FirstTime($"no-path:{model.Name}"))
             {
-                Logs.Info($"[HartsyInference] VRAM fit routing is off for '{model.Name}': its checkpoint has no single "
+                Logs.Warning($"[HartsyInference] VRAM fit routing is off for '{model.Name}': its checkpoint has no single "
                     + "local path to size (a split LTX-2.5 install without a bundle folder), so it is routed without "
-                    + "memory checks.");
+                    + "memory checks. Put all four LTX-2.5 files in one subfolder to enable memory-aware routing for it.");
             }
             return RequestFit.NoOpinion("no local checkpoint path");
         }
@@ -237,14 +231,14 @@ public static class ModelFitGate
             {
                 // One profile's engine failing (disposed mid-shutdown, unreadable side file) costs that profile its
                 // say, not the whole request its routing.
-                Logs.Verbose($"[HartsyInference] Fit '{model.Name}' on {entry.FitProfileKey} not assessed: {ex.Message}");
+                Logs.Debug($"[HartsyInference] Fit '{model.Name}' on {entry.FitProfileKey} not assessed: {ex.Message}");
                 continue;
             }
             bool outOfMemory = fit.EffectiveTier != VramTier.Performance
                 && PresumedOutOfMemory(spec.LocalPath, shape, entry.FitProfileKey, entry.FitSettings, fit, request.Workload);
             assessed[entry.FitProfileKey] = (entry, fit, outOfMemory);
-            Logs.Verbose($"[HartsyInference] Fit '{model.Name}' on {entry.DeviceName ?? entry.DeviceKey} "
-                + $"[{entry.FitProfileKey}]: {fit.Verdict}{(outOfMemory ? " (ran out of VRAM before)" : "")} — {fit.Reason}");
+            Logs.Debug($"[HartsyInference] Fit '{model.Name}' on {entry.DeviceName ?? entry.DeviceKey} "
+                + $"[{entry.FitProfileKey}]: {fit.Verdict}{(outOfMemory ? " (ran out of VRAM before)" : "")}; {fit.Reason}");
         }
         if (assessed.Count == 0)
         {

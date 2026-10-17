@@ -25,7 +25,7 @@ the extension's source is consistent with it.
 │  ┌─────────────────────────────────────────────────────────────────────┐  │
 │  │  SwarmUI-HartsyInference-Backend extension (this repo)              │  │
 │  │                                                                     │  │
-│  │  SwarmUIHartsyInference : Extension        (entry point)            │  │
+│  │  HartsyInference : Extension               (entry point)            │  │
 │  │   registers the "hartsyinference" backend type, params, perms,      │  │
 │  │   web routes; cross-checks param feature flags against the          │  │
 │  │   backend's DeclaredFeatures at startup                             │  │
@@ -87,7 +87,7 @@ unpublished builds.
 
 ## Layers, top-down
 
-### 1. Extension entry point (`SwarmUIHartsyInference.cs`)
+### 1. Extension entry point (`HartsyInference.cs`)
 
 Inherits `SwarmUI.Core.Extension`. `OnPreInit()` registers model classes core doesn't know
 about (ACE-Step v1, Lance image/video, MusicGen, YuE, F-Lite) before model folders are

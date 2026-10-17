@@ -8,31 +8,14 @@ using ISSize = SixLabors.ImageSharp.Size;
 
 namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
-/// <summary>
-/// Pure-C# Canny edge preprocessor for ControlNet conditioning.
-/// Implements the standard 5-stage Canny pipeline:
-/// (1) grayscale conversion + Gaussian noise reduction,
-/// (2) Sobel gradient computation,
-/// (3) non-maximum suppression along the gradient direction,
-/// (4) double thresholding,
-/// (5) hysteresis edge tracking.
+/// <summary>Pure-C# Canny edge detector for ControlNet conditioning: grayscale, Sobel, non-maximum suppression, double threshold and hysteresis.
 ///
-/// <para>Output is a 3-channel RGB image where detected edges are white
-/// (<c>255,255,255</c>) on a black background — the format SDXL/SD1.5 Canny
-/// ControlNet checkpoints (<c>diffusers/controlnet-canny-sdxl-1.0</c>,
-/// <c>lllyasviel/sd-controlnet-canny</c>) were trained to consume.
-/// Tensor form is <c>[1, 3, H, W]</c> F32, normalized to <c>[0, 1]</c> —
-/// the convention diffusers' ControlNet expects on its conditioning input
-/// (the hint encoder bakes any further normalization into its weights).</para>
+/// <para>Output is white edges (<c>255,255,255</c>) on black as <c>[1, 3, H, W]</c> F32 in <c>[0, 1]</c>, the form the SD1.5 and SDXL Canny ControlNets were trained on.</para>
 ///
-/// <para>Defaults <c>low=100, high=200</c> match the cv2.Canny convention
-/// for parity with the reference workflow. Higher thresholds → fewer / cleaner
-/// edges; lower → more / noisier. v1 keeps these hardcoded; expose as advanced
-/// params in a follow-up if users ask.</para>
-/// </summary>
+/// <para>Thresholds default to <c>low=100, high=200</c>, matching the cv2.Canny convention.</para></summary>
 public static unsafe class CannyPreprocessor
 {
-    /// <summary>Run Canny on a Swarm <see cref="Image"/>, resize to (<paramref name="targetW"/>, <paramref name="targetH"/>) before processing, and return a <c>[1, 3, H, W]</c> F32 tensor in <c>[0, 1]</c> ready to hand to <see cref="HartsyInference.Diffusion.Adapters.ControlNet"/>. Caller owns the returned tensor.</summary>
+    /// <summary>Run Canny on a Swarm <see cref="Image"/>, resize to (<paramref name="targetW"/>, <paramref name="targetH"/>) before processing, and return a <c>[1, 3, H, W]</c> F32 tensor in <c>[0, 1]</c> ready to hand to <see cref="global::HartsyInference.Diffusion.Adapters.ControlNet"/>. Caller owns the returned tensor.</summary>
     public static Tensor Process(Image inputImage, int targetW, int targetH, int lowThreshold = 100, int highThreshold = 200)
     {
         if (lowThreshold < 0 || highThreshold <= lowThreshold || highThreshold > 255)
@@ -42,9 +25,7 @@ public static unsafe class CannyPreprocessor
         }
 
         byte[] gray = LoadResizedGrayscale(inputImage, targetW, targetH);
-        // NO Gaussian pre-blur: cv2.Canny (the convention the 100/200 thresholds come from — BFL's
-        // reference uses cv2.Canny(50, 200)) does not blur internally. The previous sigma-1.4 blur
-        // crushed soft-photo gradients below the strong threshold and produced near-empty edge maps.
+        // No Gaussian pre-blur: cv2.Canny does not blur internally, and a blur pushes soft-photo gradients below the strong threshold.
 
         // Sobel: separate Gx, Gy; magnitude + quantized direction (0, 45, 90, 135 degrees).
         float[] mag = new float[targetW * targetH];
@@ -57,7 +38,7 @@ public static unsafe class CannyPreprocessor
         // Double threshold + hysteresis: connect weak edges to strong ones via 8-connectivity flood.
         byte[] edges = HysteresisThreshold(mag, targetW, targetH, lowThreshold, highThreshold);
 
-        Logs.Verbose($"[HartsyInference][Canny] {targetW}x{targetH}, low={lowThreshold}, high={highThreshold} -> tensor [1, 3, {targetH}, {targetW}].");
+        Logs.Verbose($"[HartsyInference][Canny] Edge map ready: {targetW}x{targetH}, low={lowThreshold}, high={highThreshold} (tensor [1, 3, {targetH}, {targetW}]).");
         return EdgesToRgbTensor(edges, targetW, targetH);
     }
 
@@ -79,7 +60,7 @@ public static unsafe class CannyPreprocessor
         return bytes;
     }
 
-    /// <summary>3×3 Sobel: <c>Gx = [[-1,0,1],[-2,0,2],[-1,0,1]]</c>, <c>Gy = [[-1,-2,-1],[0,0,0],[1,2,1]]</c>. Computes magnitude (Euclidean) and quantizes the gradient direction into 4 bins (0, 45, 90, 135 degrees) for the NMS step. Boundary pixels left at zero — Canny edges along the image border are uncommon and the simpler boundary handling is worth it.</summary>
+    /// <summary>3×3 Sobel: <c>Gx = [[-1,0,1],[-2,0,2],[-1,0,1]]</c>, <c>Gy = [[-1,-2,-1],[0,0,0],[1,2,1]]</c>. Computes L1 magnitude and quantizes the gradient direction into 4 bins (0, 45, 90, 135 degrees) for NMS. Border pixels stay zero.</summary>
     private static void ComputeGradients(byte[] gray, int w, int h, float[] mag, byte[] dir)
     {
         for (int y = 1; y < h - 1; y++)
@@ -94,7 +75,7 @@ public static unsafe class CannyPreprocessor
                 int p20 = gray[(y + 1) * w + (x - 1)], p21 = gray[(y + 1) * w + x], p22 = gray[(y + 1) * w + (x + 1)];
                 int gx = -p00 + p02 - 2 * p10 + 2 * p12 - p20 + p22;
                 int gy = -p00 - 2 * p01 - p02 + p20 + 2 * p21 + p22;
-                // L1 magnitude — cv2.Canny's default (L2gradient=false), the scale its 0-255-ish
+                // L1 magnitude: cv2.Canny's default (L2gradient=false), the scale its 0-255-ish
                 // thresholds are calibrated against.
                 mag[idx] = MathF.Abs(gx) + MathF.Abs(gy);
 
@@ -111,7 +92,7 @@ public static unsafe class CannyPreprocessor
         }
     }
 
-    /// <summary>For each pixel, zero its magnitude unless it strictly exceeds the two neighbors along its quantized gradient direction. Standard Canny NMS: thins ridge plateaus down to single-pixel-wide edges.</summary>
+    /// <summary>Non-maximum suppression: zeroes each magnitude unless it is at least as large as both neighbors along its gradient direction, thinning edges to single pixels.</summary>
     private static void NonMaxSuppressionInPlace(float[] mag, byte[] dir, int w, int h)
     {
         // Use a separate output buffer to avoid in-place suppression reading already-zeroed neighbors.
@@ -150,8 +131,7 @@ public static unsafe class CannyPreprocessor
         }
 
         // BFS from every strong pixel; promote any reachable weak pixels to strong.
-        // 8-connectivity flood — diffusers' canny preprocessor uses the same connectivity
-        // via skimage.feature.canny defaults.
+        // 8-connectivity flood, as in diffusers' canny preprocessor (via skimage.feature.canny defaults).
         Queue<int> queue = new();
         for (int i = 0; i < result.Length; i++) if (result[i] == 2) queue.Enqueue(i);
         while (queue.Count > 0)
