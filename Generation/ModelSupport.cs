@@ -57,12 +57,9 @@ public static class ModelSupport
         ["flux-2"] = new("flux2", Kind.Image),
         ["flux-2-klein-4b"] = new("flux2", Kind.Image),
         ["flux-2-klein-9b"] = new("flux2", Kind.Image),
-        // Core owns FLUX.3 Klein's classes (SwarmUI #1570): mapped here, never re-registered. Keyed by string because core
-        // renamed flux-3-klein to flux-3-image-klein, and a field reference fails to build on any core without that name.
-        ["flux-3-image-klein"] = new("flux3", Kind.Image),
-        ["flux-3-klein"] = new("flux3", Kind.Image),
-        // Same id core registers (SwarmUI #1572); ModelClassRegistrations adds the classes only on a core that predates them.
-        [ModelClassRegistrations.MossImageCompatClassId] = new("moss-image", Kind.Image),
+        // Core owns the FLUX.3 Klein and MOSS-Image classes: mapped here, never re-registered.
+        [T2IModelClassSorter.CompatFlux3ImageKlein.ID] = new("flux3", Kind.Image),
+        [T2IModelClassSorter.CompatMossImage.ID] = new("moss-image", Kind.Image),
         ["chroma"] = new("chroma", Kind.Image),
         ["chroma-radiance"] = new("chroma-radiance", Kind.Image),
         ["zeta-chroma"] = new("zeta-chroma", Kind.Image),
