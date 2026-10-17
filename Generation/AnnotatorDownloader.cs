@@ -6,14 +6,7 @@ using SwarmUI.Utils;
 
 namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
-/// <summary>
-/// Download-on-demand for preprocessor/annotator checkpoints (depth estimators, pose detectors,
-/// edge nets). These are NOT Swarm T2I models — they never appear in the model browser and are
-/// often <c>.pth</c> rather than <c>.safetensors</c> — so <see cref="ModelAutoDownloader"/>'s
-/// model-set registration doesn't apply. Files land under <c>&lt;ModelRoot&gt;/preprocessors/</c>
-/// (the comfyui_controlnet_aux convention, adapted), with the same tmp-file + SHA-256 + atomic
-/// rename discipline as ModelAutoDownloader.
-/// </summary>
+/// <summary>Download-on-demand for preprocessor and annotator checkpoints (depth, pose, edge nets). These are not T2I models, so they skip <see cref="ModelAutoDownloader"/>'s model-set registration. Annotator files land in <c>&lt;ModelRoot&gt;/preprocessors/</c>.</summary>
 public static class AnnotatorDownloader
 {
     private static readonly ConcurrentDictionary<string, object> _locks = new();
@@ -22,7 +15,7 @@ public static class AnnotatorDownloader
     public static string EnsureAnnotator(string fileName, string url, string hash, Action<string> log)
         => EnsureFileInFolder("preprocessors", fileName, url, hash, log);
 
-    /// <summary>Like <see cref="EnsureAnnotator"/> but for an arbitrary <c>&lt;ModelRoot&gt;/&lt;subFolder&gt;</c> destination — used for non-T2I side files that live next to their consumers (e.g. the IP-Adapter FaceID checkpoints + companion LoRAs under <c>ipadapter/</c>).</summary>
+    /// <summary>Like <see cref="EnsureAnnotator"/> but for any <c>&lt;ModelRoot&gt;/&lt;subFolder&gt;</c>, e.g. IP-Adapter FaceID checkpoints and their LoRAs under <c>ipadapter/</c>.</summary>
     public static string EnsureFileInFolder(string subFolder, string fileName, string url, string hash, Action<string> log)
     {
         string folder = Path.Combine(Program.ServerSettings.Paths.ActualModelRoot, subFolder);
@@ -41,6 +34,7 @@ public static class AnnotatorDownloader
             Directory.CreateDirectory(folder);
             string tmp = path + ".tmp";
             log($"Downloading '{fileName}' from {url} ...");
+            HartsyLogs.Info($"Downloading '{fileName}' to '{folder}' because it is not installed yet.");
             try
             {
                 Utilities.DownloadFile(url, tmp, null).Wait(Program.GlobalProgramCancel);
@@ -51,16 +45,17 @@ public static class AnnotatorDownloader
                     if (actual != hash.ToLowerInvariant())
                     {
                         throw new InvalidDataException(
-                            $"'{fileName}' failed hash verification (expected {hash}, got {actual}) — corrupt download?");
+                            $"'{fileName}' failed hash verification (expected {hash}, got {actual}). The download may be corrupt.");
                     }
                 }
                 File.Move(tmp, path);
                 log($"'{fileName}' ready.");
+                HartsyLogs.Info($"Finished downloading '{fileName}'.");
                 return path;
             }
             catch (Exception ex)
             {
-                Logs.Error($"[HartsyInference] Download failed for '{fileName}': {ex.Message}");
+                HartsyLogs.Error($"Download failed for '{fileName}': {ex.Message}");
                 try { if (File.Exists(tmp)) File.Delete(tmp); } catch (IOException) { }
                 throw;
             }

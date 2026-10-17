@@ -4,7 +4,7 @@ using SwarmUI.Backends;
 namespace Hartsy.Extensions.HartsyInferenceBackend.Services;
 
 /// <summary>Every live HartsyInference backend and the device it runs on, as one immutable snapshot.</summary>
-/// <remarks><para>Read on the hot path — once per queued request — and written only when a backend starts or stops.
+/// <remarks><para>Read on the hot path (once per queued request) and written only when a backend starts or stops.
 /// Writers swap a new snapshot under a lock; readers take the current reference and never lock, so a busy queue never
 /// contends with a backend restart.</para>
 /// <para>Keyed by the backend instance, not its id: Swarm reuses an instance across settings edits (Init runs again),
@@ -19,7 +19,7 @@ public static class BackendDeviceRegistry
     /// <summary>The current snapshot. Safe to enumerate while backends start and stop.</summary>
     public static ImmutableDictionary<AbstractT2IBackend, BackendDeviceEntry> Entries => Volatile.Read(ref _entries);
 
-    /// <summary>Whether SwarmUI's scheduler can currently hand <paramref name="backend"/> a generation — the same
+    /// <summary>Whether SwarmUI's scheduler can currently hand <paramref name="backend"/> a generation: the same
     /// eligibility <c>BackendHandler</c> applies before any filter runs. A card that fails this cannot be the one a
     /// request waits for.</summary>
     public static bool IsDispatchable(AbstractT2IBackend backend) =>
