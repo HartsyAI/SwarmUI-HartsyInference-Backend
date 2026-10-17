@@ -35,6 +35,15 @@ public static class ModelClassRegistrations
     /// <summary>F-Lite compat + model class ID.</summary>
     public const string FLiteCompatClassId = "f-lite";
 
+    /// <summary>MOSS-Image compat + model class ID, the same id core registers (SwarmUI #1572).</summary>
+    public const string MossImageCompatClassId = "moss-image";
+
+    /// <summary>MOSS-Image LoRA model class ID, the same id core registers.</summary>
+    public const string MossImageLoraClassId = "moss-image/lora";
+
+    /// <summary>Wrappers core's class sorter accepts in front of a diffusion-model key (its <c>hasKey</c>).</summary>
+    private static readonly string[] DitKeyPrefixes = ["", "diffusion_model.", "model.diffusion_model.", "net.", "transformer."];
+
     /// <summary>Registers every extension-owned model class. Call EXACTLY once, at pre-init, and only for classes
     /// Swarm core does not already define: <c>T2IModelClassSorter.Register</c>/<c>RegisterCompat</c> are backed by
     /// <c>Dictionary.Add</c>, so re-registering an existing ID throws rather than overwriting.</summary>
@@ -45,6 +54,8 @@ public static class ModelClassRegistrations
         // MusicGen and YuE moved to AudioLab ownership (they are not SwarmUI-native music classes); their
         // compat/model class registrations left with them. Core itself owns ace-step-1_5 and minimax-music-3.
         RegisterFLite();
+        // MOSS-Image: newer core registers it (SwarmUI #1572); this only fills in what an older core lacks.
+        RegisterMossImage();
         // Qwen-Image 2.1: core registers the compat class, the model class and the VAE family itself (SwarmUI
         // 2de300f6, "Adds Qwen2.1 support"). Registering it here too would throw on Dictionary.Add at pre-init
         // and take the whole extension down. ModelSupport maps core's compat id; nothing to add here.
@@ -111,6 +122,58 @@ public static class ModelClassRegistrations
             IsThisModelOfClass = (model, header) =>
                 header is not null && header.ContainsKey("blocks.0.cross_attn.context_kv.weight"),
         });
+    }
+
+    /// <summary>MOSS-Image (OpenMOSS 5B): a copy of core's own registration (same ids, compat settings and keys), so a
+    /// core that predates it classifies the same files. Each id is skipped when core already has it, because
+    /// <c>Register</c>/<c>RegisterCompat</c> throw on a duplicate.</summary>
+    private static void RegisterMossImage()
+    {
+        if (!T2IModelClassSorter.CompatClasses.TryGetValue(MossImageCompatClassId, out T2IModelCompatClass compat))
+        {
+            compat = T2IModelClassSorter.RegisterCompat(new() { ID = MossImageCompatClassId, ShortCode = "MOSS", LorasTargetTextEnc = false, VaeFamily = T2IModelClassSorter.VaeFlux2 });
+        }
+        if (!T2IModelClassSorter.ModelClasses.ContainsKey(MossImageCompatClassId))
+        {
+            T2IModelClassSorter.Register(new T2IModelClass
+            {
+                ID = MossImageCompatClassId,
+                CompatClass = compat,
+                Name = "MOSS Image",
+                StandardWidth = 1024,
+                StandardHeight = 1024,
+                // Both keys sit in shard 1 of the diffusers folder, so that shard is the one entry; the engine loads its whole set.
+                IsThisModelOfClass = (model, header) =>
+                    HasDitKey(header, "shared_block_modulation.weight") && HasDitKey(header, "layers.0.proj.ffn_up_gate.weight"),
+            });
+        }
+        if (!T2IModelClassSorter.ModelClasses.ContainsKey(MossImageLoraClassId))
+        {
+            T2IModelClassSorter.Register(new T2IModelClass
+            {
+                ID = MossImageLoraClassId,
+                CompatClass = compat,
+                Name = "MOSS Image LoRA",
+                StandardWidth = 1024,
+                StandardHeight = 1024,
+                IsThisModelOfClass = (model, header) =>
+                    HasLoraKey(header, "layers.0.proj.ffn_up_gate") && HasLoraKey(header, "layers.41.proj.v"),
+            });
+        }
+    }
+
+    /// <summary>Whether <paramref name="header"/> holds <paramref name="key"/> bare or under one of <see cref="DitKeyPrefixes"/>.</summary>
+    private static bool HasDitKey(JObject header, string key)
+    {
+        return header is not null && DitKeyPrefixes.Any(prefix => header.ContainsKey(prefix + key));
+    }
+
+    /// <summary>Whether <paramref name="header"/> holds a LoRA for module <paramref name="key"/> in a spelling core's <c>hasLoraKey</c> accepts.</summary>
+    private static bool HasLoraKey(JObject header, string key)
+    {
+        return HasDitKey(header, $"{key}.lora_A.weight") || HasDitKey(header, $"{key}.lora_A") || HasDitKey(header, $"{key}.lora_A.default.weight")
+            || HasDitKey(header, $"{key}.lora_up.weight") || HasDitKey(header, $"{key}.lora.up.weight") || HasDitKey(header, $"{key}.lokr_w1")
+            || HasDitKey(header, $"lora_unet_{key.Replace('.', '_')}.lora_up.weight");
     }
 
     /// <summary>A Lance checkpoint is a folder with <c>llm_config.json</c> declaring the Qwen2.5-VL backbone and
