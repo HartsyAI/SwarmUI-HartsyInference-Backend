@@ -28,7 +28,7 @@ public static class HartsyInferenceWebAPI
         API.RegisterAPICall(HartsyInferenceListLoadedPipelines, false, HartsyInferencePermissions.PermAdminHartsyInference);
         API.RegisterAPICall(HartsyInferenceGetDeviceInfo, false, HartsyInferencePermissions.PermAdminHartsyInference);
         API.RegisterAPICall(HartsyInferenceClearCache, true, HartsyInferencePermissions.PermAdminHartsyInference);
-        Logs.Init("[HartsyInference] Web API routes registered ('supported-archs', 'probe-model', 'model-features', 'image-inputs', 'list-pipelines', 'device-info', 'clear-cache').");
+        HartsyLogs.Init("Web API routes registered ('supported-archs', 'probe-model', 'model-features', 'image-inputs', 'list-pipelines', 'device-info', 'clear-cache').");
     }
 
     /// <summary>Enumerate every live HartsyInference backend instance with its handler data.</summary>

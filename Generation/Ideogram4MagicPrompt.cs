@@ -103,13 +103,13 @@ public static class Ideogram4MagicPrompt
         }
         catch (Exception ex)
         {
-            Logs.Warning($"[HartsyInference][Ideogram4] Magic prompt output was not valid JSON " +
+            HartsyLogs.Warning($"[Ideogram4] Magic prompt output was not valid JSON " +
                 $"({ex.Message}); falling back to the plain prompt.");
             return plainPrompt;
         }
 #else
         // TODO(LLM-core): no-op until SwarmUI core ships the expanded LLM API (see file-top TODO).
-        Logs.Warning("[HartsyInference][Ideogram4] The magic prompt is not available in this build yet, so your prompt is "
+        HartsyLogs.WarnOnce("ideogram4-unavailable", "[Ideogram4] The magic prompt is not available in this build yet, so your prompt is "
             + "used as-is. Turn off the 'Ideogram 4 Magic Prompt' parameter to stop this warning.");
         return plainPrompt;
 #endif

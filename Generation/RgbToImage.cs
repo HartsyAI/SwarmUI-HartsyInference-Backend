@@ -6,10 +6,11 @@ using SixLabors.ImageSharp.Processing;
 using SwarmUI.Media;
 using ISImage = SixLabors.ImageSharp.Image;
 using Image = SwarmUI.Utils.Image;
+using EngineFluxPipeline = HartsyInference.Diffusion.Pipelines.FluxPipeline;
 
 namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
-/// <summary>Converts HartsyInference's HWC RGB byte output (the format <see cref="global::HartsyInference.Diffusion.Pipelines.FluxPipeline.GenerateFromTokens"/> returns) into a SwarmUI <see cref="Image"/> as PNG bytes.</summary>
+/// <summary>Converts HartsyInference's HWC RGB byte output (the format <see cref="EngineFluxPipeline.GenerateFromTokens"/> returns) into a SwarmUI <see cref="Image"/> as PNG bytes.</summary>
 public static class RgbToImage
 {
     /// <summary>Wraps an HWC-interleaved RGB byte array as a SwarmUI Image (PNG-encoded).</summary>

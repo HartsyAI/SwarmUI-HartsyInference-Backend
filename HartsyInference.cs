@@ -8,6 +8,7 @@ using HartsyInference.Engine.Registry;
 using Hartsy.Extensions.HartsyInferenceBackend.Backends;
 using Hartsy.Extensions.HartsyInferenceBackend.Services;
 using Hartsy.Extensions.HartsyInferenceBackend.WebAPI;
+using EngineH3ChainPlanner = HartsyInference.Engine.Recipes.Video.MiniMaxH3ChainPlanner;
 
 // Namespace must not contain "SwarmUI" (reserved for built-ins).
 namespace Hartsy.Extensions.HartsyInferenceBackend;
@@ -118,7 +119,7 @@ public class HartsyInference : Extension
 
     public override void OnPreInit()
     {
-        Logs.Init("[HartsyInference] Starting up.");
+        HartsyLogs.Init("Starting up.");
         // Model classes must be registered before model folders are scanned.
         Generation.ModelClassRegistrations.RegisterAll();
     }
@@ -135,7 +136,7 @@ public class HartsyInference : Extension
         }
         catch (Exception ex)
         {
-            Logs.Warning($"[HartsyInference] Could not add 'tcd' to the Sampler dropdown, so TCD-distilled models cannot be selected: {ex.Message}");
+            HartsyLogs.Warning($"Could not add 'tcd' to the Sampler dropdown, so TCD-distilled models cannot be selected: {ex.Message}");
         }
     }
 
@@ -155,7 +156,7 @@ public class HartsyInference : Extension
         }
         catch (Exception ex)
         {
-            Logs.Warning($"[HartsyInference] Could not add the Real-ESRGAN and SeedVR2 entries to the Refiner Upscale Method dropdown: {ex.Message}");
+            HartsyLogs.Warning($"Could not add the Real-ESRGAN and SeedVR2 entries to the Refiner Upscale Method dropdown: {ex.Message}");
         }
     }
 
@@ -180,18 +181,18 @@ public class HartsyInference : Extension
             if (found.Count > 0)
             {
                 T2IParamTypes.ConcatDropdownValsClean(ref SwarmUI.Builtin_ComfyUIBackend.ComfyUIBackendExtension.IPAdapterModels, found);
-                Logs.Debug($"[HartsyInference] Found {found.Count} IP-Adapter model file(s) for the IP-Adapter dropdown.");
+                HartsyLogs.Debug($"Found {found.Count} IP-Adapter model file(s) for the IP-Adapter dropdown.");
             }
         }
         catch (Exception ex)
         {
-            Logs.Warning($"[HartsyInference] Could not list IP-Adapter models, so the IP-Adapter dropdown may be empty: {ex.Message}");
+            HartsyLogs.Warning($"Could not list IP-Adapter models, so the IP-Adapter dropdown may be empty: {ex.Message}");
         }
     }
 
     public override void OnInit()
     {
-        Logs.Init("[HartsyInference] Registering parameters and web routes.");
+        HartsyLogs.Init("Registering parameters and web routes.");
 
         // Model-aware param visibility. "hartsyinference" only means "our backend is running", so without
         // this every param below shows under every model. See Assets/hartsy-params.js.
@@ -363,7 +364,7 @@ public class HartsyInference : Extension
         H3ChainContextFramesParam = T2IParamTypes.Register<int>(new(
             "H3 Chain Context Frames",
             "MiniMax-H3: how many frames of the previous segment are carried into the next as fixed context, which is what keeps the seams continuous.\nSnapped onto the chain's own grid (39, 90, 141, ...), the 17k+5 grid intersected with a whole number of 40 Hz audio rows; the default is the engine's own reference value. Refused (not silently adjusted) if the result leaves no room for new frames at the current frame count. Longer holds continuity better and costs that many re-denoised frames per segment.",
-            global::HartsyInference.Engine.Recipes.Video.MiniMaxH3ChainPlanner.DefaultContextFrames.ToString(), Min: 39, Max: 498, Step: 51,
+            EngineH3ChainPlanner.DefaultContextFrames.ToString(), Min: 39, Max: 498, Step: 51,
             Toggleable: true,
             Group: MiniMaxH3ParamGroup,
             FeatureFlag: "hartsyinference,hartsy_h3_chain",
@@ -903,7 +904,7 @@ public class HartsyInference : Extension
             {
                 if (!covered.Contains(flag))
                 {
-                    Logs.Error($"[HartsyInference] Param '{type.Name}' requires feature flag '{flag}', which this "
+                    HartsyLogs.Error($"Param '{type.Name}' requires feature flag '{flag}', which this "
                         + "backend does not advertise. Every generation using that param will be refused. "
                         + "Add the flag to HartsyInferenceBackend.DeclaredFeatures, or remove it from the param.");
                 }
@@ -918,7 +919,7 @@ public class HartsyInference : Extension
 
     public override void OnShutdown()
     {
-        Logs.Info("[HartsyInference] Shutting down.");
+        HartsyLogs.Info("Shutting down.");
         T2IEngine.PreGenerateEvent -= ModelFitGate.Prepare;
         // Per-instance shutdown is handled by the BackendHandler.
     }

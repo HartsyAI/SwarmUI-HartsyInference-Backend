@@ -33,7 +33,7 @@ public static class VideoOutputEncoder
             return RgbToImage.FromHwcRgb(frames[0], width, height);
         }
         (Process proc, string tmpFile, string audioTmp, MediaType type) = StartFfmpegEncode(width, height, fps, format, audio, cancel);
-        Logs.Debug($"[HartsyInference] Encoding {frames.Length} frames {width}x{height}@{fps}fps as '{format}'"
+        HartsyLogs.Debug($"Encoding {frames.Length} frames {width}x{height}@{fps}fps as '{format}'"
             + (audioTmp is not null ? $" with a {audio.SampleRate} Hz audio track" : ""));
         try
         {
@@ -57,7 +57,7 @@ public static class VideoOutputEncoder
     public static async Task<Image> EncodeStreamingAsync(IAsyncEnumerable<byte[]> frames, int width, int height, int fps, string format, CancellationToken cancel, AudioTrack audio = null)
     {
         (Process proc, string tmpFile, string audioTmp, MediaType type) = StartFfmpegEncode(width, height, fps, format, audio, cancel);
-        Logs.Debug($"[HartsyInference] Streaming-encoding {width}x{height}@{fps}fps as '{format}'"
+        HartsyLogs.Debug($"Streaming-encoding {width}x{height}@{fps}fps as '{format}'"
             + (audioTmp is not null ? $" with a {audio.SampleRate} Hz audio track" : "") + " (frame count unknown until EOF)");
         try
         {
@@ -134,15 +134,15 @@ public static class VideoOutputEncoder
     {
         if (!proc.HasExited)
         {
-            try { proc.Kill(); } catch (Exception ex) { Logs.Warning($"[HartsyInference] Could not stop the ffmpeg process: {ex.Message}"); }
+            try { proc.Kill(); } catch (Exception ex) { HartsyLogs.Warning($"Could not stop the ffmpeg process: {ex.Message}"); }
         }
         proc.Dispose();
         try { if (File.Exists(tmpFile)) File.Delete(tmpFile); }
-        catch (Exception ex) { Logs.Warning($"[HartsyInference] Could not delete temp video file '{tmpFile}' (you can remove it by hand): {ex.Message}"); }
+        catch (Exception ex) { HartsyLogs.Warning($"Could not delete temp video file '{tmpFile}' (you can remove it by hand): {ex.Message}"); }
         if (audioTmp is not null)
         {
             try { if (File.Exists(audioTmp)) File.Delete(audioTmp); }
-            catch (Exception ex) { Logs.Warning($"[HartsyInference] Could not delete temp audio file '{audioTmp}' (you can remove it by hand): {ex.Message}"); }
+            catch (Exception ex) { HartsyLogs.Warning($"Could not delete temp audio file '{audioTmp}' (you can remove it by hand): {ex.Message}"); }
         }
     }
 

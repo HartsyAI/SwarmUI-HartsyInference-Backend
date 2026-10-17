@@ -340,7 +340,7 @@ public static class ModelSupport
         {
             return null;
         }
-        Logs.Info($"[HartsyInference] LTX-2.5: '{known.DisplayName}' is missing, so downloading it to '{path}' through "
+        HartsyLogs.Info($"LTX-2.5: '{known.DisplayName}' is missing, so downloading it to '{path}' through "
             + "SwarmUI's known-model registry.");
         known.DownloadNow(session: input?.SourceSession).Wait();
         Program.RefreshAllModelSets();
@@ -382,7 +382,7 @@ public static class ModelSupport
         {
             return null;
         }
-        Logs.Info($"[HartsyInference] LTX-2.5: the Gemma-4 text encoder is missing, so downloading it to '{path}'.");
+        HartsyLogs.Info($"LTX-2.5: the Gemma-4 text encoder is missing, so downloading it to '{path}'.");
         Utilities.DownloadFile(Ltx25GemmaUrl, path, null, verifyHash: Ltx25GemmaHash, session: input?.SourceSession).Wait();
         Program.RefreshAllModelSets();
         if (!File.Exists(path))
@@ -535,7 +535,7 @@ public static class ModelSupport
         if (!userPickedVae && !string.IsNullOrEmpty(dir) && Directory.Exists(dir) && LooksLikeBundleDir(model, dir)
             && ScanCached(dir) is null)
         {
-            Logs.Debug($"[HartsyInference] LTX-2.5: loading the complete bundle already staged at '{dir}'.");
+            HartsyLogs.Debug($"LTX-2.5: loading the complete bundle already staged at '{dir}'.");
             return dir;
         }
         if (!TryPlanLtx25Parts(model, input, download: true, out Ltx25Parts parts, out string problem))
@@ -549,7 +549,7 @@ public static class ModelSupport
             throw new SwarmUserErrorException("HartsyInference: LTX-2.5 side models resolved but the staged set is "
                 + $"not loadable — {staleProblem}");
         }
-        Logs.Debug($"[HartsyInference] LTX-2.5 resolved through SwarmUI: video VAE '{Path.GetFileName(parts.VideoVae)}', "
+        HartsyLogs.Debug($"LTX-2.5 resolved through SwarmUI: video VAE '{Path.GetFileName(parts.VideoVae)}', "
             + $"audio VAE '{Path.GetFileName(parts.AudioVae)}', text encoder '{Path.GetFileName(parts.Gemma)}' "
             + $"(linked into '{staged}').");
         return staged;
@@ -572,7 +572,7 @@ public static class ModelSupport
             catch (Exception ex)
             {
                 // An unparseable neighbour is not fatal, since the Engine skips it too.
-                Logs.Verbose($"[HartsyInference] LTX-2.5 bundle scan skipped '{Path.GetFileName(file)}': {ex.Message}");
+                HartsyLogs.Verbose($"LTX-2.5 bundle scan skipped '{Path.GetFileName(file)}': {ex.Message}");
                 continue;
             }
             allKeys.AddRange(keys);

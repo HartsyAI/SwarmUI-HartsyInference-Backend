@@ -15,7 +15,7 @@ public static class HartsyQueueWebAPI
     public static void Register()
     {
         API.RegisterAPICall(HartsyGetQueueStatus, false, HartsyInferencePermissions.PermUseHartsyInference);
-        Logs.Init("[HartsyInference] Queue API route registered ('queue-status').");
+        HartsyLogs.Init("Queue API route registered ('queue-status').");
     }
 
     /// <summary>POST /API/HartsyGetQueueStatus - the whole server's queue, summed over every session, plus what each

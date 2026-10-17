@@ -71,7 +71,7 @@ public static class ModelFitGate
         catch (Exception ex)
         {
             Fits.AddOrUpdate(input, RequestFit.NoOpinion("assessment failed"));
-            Logs.Warning($"[HartsyInference] VRAM fit check skipped for this generation: {ex.Message}");
+            HartsyLogs.Warning($"VRAM fit check skipped for this generation: {ex.Message}");
         }
     }
 
@@ -88,15 +88,15 @@ public static class ModelFitGate
             // Prepare runs for every generation and always leaves an answer, so a miss means SwarmUI filtered a different
             // T2IParamInput than PreGenerateEvent received, turning routing off for this request. Warn the first time in this
             // process, Verbose after; remembered per request so repeated scheduler passes say nothing more.
-            string miss = "[HartsyInference] VRAM fit routing has no answer for this generation request: SwarmUI "
+            string miss = "VRAM fit routing has no answer for this generation request: SwarmUI "
                 + "filtered a request object that PreGenerateEvent never prepared, so it is routed without memory checks.";
             if (FirstTime("unprepared-request"))
             {
-                Logs.Warning(miss + " This means a SwarmUI change broke memory-aware routing; further misses log at Verbose.");
+                HartsyLogs.Warning(miss + " This means a SwarmUI change broke memory-aware routing; further misses log at Verbose.");
             }
             else
             {
-                Logs.Verbose(miss);
+                HartsyLogs.Verbose(miss);
             }
             Fits.AddOrUpdate(input, RequestFit.NoOpinion("not prepared"));
             return true;
@@ -143,7 +143,7 @@ public static class ModelFitGate
                     + "Lower the resolution or frame count, or use a GPU with more memory.",
             }),
         });
-        Logs.Warning($"[HartsyInference] '{fit.ModelName}' ran out of VRAM on {failed.Device} at workload {fit.Workload}. "
+        HartsyLogs.Warning($"'{fit.ModelName}' ran out of VRAM on {failed.Device} at workload {fit.Workload}. "
             + $"For {RecordLifetime.TotalMinutes:0} minutes, requests like it at least this large skip this card and equally "
             + "configured cards no larger. Lower the resolution or frame count, or use a GPU with more memory.");
         return !fit.Pinned && fit.Profiles.Any(other => other.Key != backend.FitProfileKey
@@ -194,7 +194,7 @@ public static class ModelFitGate
             if (Program.Backends.RunningBackendsOfType<SiBackend>().Any(BackendDeviceRegistry.IsDispatchable)
                 && FirstTime("empty-registry"))
             {
-                Logs.Warning("[HartsyInference] VRAM fit routing is off: HartsyInference backends are running but none "
+                HartsyLogs.Warning("VRAM fit routing is off: HartsyInference backends are running but none "
                     + "registered its device, so generations are routed without memory checks.");
             }
             return RequestFit.NoOpinion("no registered devices");
@@ -204,7 +204,7 @@ public static class ModelFitGate
         {
             if (FirstTime($"no-path:{model.Name}"))
             {
-                Logs.Warning($"[HartsyInference] VRAM fit routing is off for '{model.Name}': its checkpoint has no single "
+                HartsyLogs.Warning($"VRAM fit routing is off for '{model.Name}': its checkpoint has no single "
                     + "local path to size (a split LTX-2.5 install without a bundle folder), so it is routed without "
                     + "memory checks. Put all four LTX-2.5 files in one subfolder to enable memory-aware routing for it.");
             }
@@ -231,13 +231,13 @@ public static class ModelFitGate
             {
                 // One profile's engine failing (disposed mid-shutdown, unreadable side file) costs that profile its
                 // say, not the whole request its routing.
-                Logs.Debug($"[HartsyInference] Fit '{model.Name}' on {entry.FitProfileKey} not assessed: {ex.Message}");
+                HartsyLogs.Debug($"Fit '{model.Name}' on {entry.FitProfileKey} not assessed: {ex.Message}");
                 continue;
             }
             bool outOfMemory = fit.EffectiveTier != VramTier.Performance
                 && PresumedOutOfMemory(spec.LocalPath, shape, entry.FitProfileKey, entry.FitSettings, fit, request.Workload);
             assessed[entry.FitProfileKey] = (entry, fit, outOfMemory);
-            Logs.Debug($"[HartsyInference] Fit '{model.Name}' on {entry.DeviceName ?? entry.DeviceKey} "
+            HartsyLogs.Debug($"Fit '{model.Name}' on {entry.DeviceName ?? entry.DeviceKey} "
                 + $"[{entry.FitProfileKey}]: {fit.Verdict}{(outOfMemory ? " (ran out of VRAM before)" : "")}; {fit.Reason}");
         }
         if (assessed.Count == 0)

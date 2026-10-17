@@ -28,6 +28,12 @@ using HartsyInference.Engine.Registry;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
 using EngineImage = HartsyInference.Engine.Requests.ImageData;
+using EngineLogLevel = HartsyInference.Core.Logging.LogLevel;
+using EngineControlNetMode = HartsyInference.Diffusion.Adapters.ControlNetMode;
+using EngineExtras = HartsyInference.Engine.Features.RequestExtras;
+using EngineWanAnimate = HartsyInference.Engine.Recipes.Video.WanAnimateRecipePipeline;
+using EngineH3ChainPlanner = HartsyInference.Engine.Recipes.Video.MiniMaxH3ChainPlanner;
+using EngineH3Geometry = HartsyInference.Diffusion.Models.Denoisers.MiniMaxH3Geometry;
 
 namespace Hartsy.Extensions.HartsyInferenceBackend.Backends;
 
@@ -141,7 +147,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             {
                 // Warning, not Debug: hiding an option the user would otherwise expect deserves a visible reason.
                 string why = Guard(() => BackendFactory.CudaProbeFailureReason, "CUDA probe reason") ?? "no reason reported";
-                Logs.Warning($"[HartsyInference] ComputeBackend dropdown: excluding 'cuda': {why}");
+                HartsyLogs.Warning($"ComputeBackend dropdown: excluding 'cuda': {why}");
             }
             return ok;
         }
@@ -174,7 +180,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             }
             catch (Exception ex)
             {
-                Logs.Debug($"[HartsyInference] ComputeBackend dropdown: {what} failed ({ex.Message}).");
+                HartsyLogs.Debug($"ComputeBackend dropdown: {what} failed ({ex.Message}).");
                 return default;
             }
         }
@@ -253,18 +259,17 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             return;
         }
         // Pass everything through the bridge; Swarm's MinimumLevel does the filtering.
-        SiLogs.MinLevel = global::HartsyInference.Core.Logging.LogLevel.Verbose;
+        SiLogs.MinLevel = EngineLogLevel.Verbose;
         SiLogs.SetLogger((level, msg) =>
         {
-            msg = "[HartsyInference][Engine] " + msg;
             switch (level)
             {
-                case global::HartsyInference.Core.Logging.LogLevel.Verbose: Logs.Verbose(msg); break;
-                case global::HartsyInference.Core.Logging.LogLevel.Debug: Logs.Debug(msg); break;
-                case global::HartsyInference.Core.Logging.LogLevel.Info: Logs.Info(msg); break;
-                case global::HartsyInference.Core.Logging.LogLevel.Warning: Logs.Warning(msg); break;
-                case global::HartsyInference.Core.Logging.LogLevel.Error: Logs.Error(msg); break;
-                default: Logs.Info(msg); break;
+                case EngineLogLevel.Verbose: HartsyLogs.Verbose(msg, "Engine"); break;
+                case EngineLogLevel.Debug: HartsyLogs.Debug(msg, "Engine"); break;
+                case EngineLogLevel.Info: HartsyLogs.Info(msg, "Engine"); break;
+                case EngineLogLevel.Warning: HartsyLogs.Warning(msg, "Engine"); break;
+                case EngineLogLevel.Error: HartsyLogs.Error(msg, "Engine"); break;
+                default: HartsyLogs.Info(msg, "Engine"); break;
             }
         });
     }
@@ -281,7 +286,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             // A staged engine update cannot hot-swap into this process, so fail loudly rather than serve the old version.
             Status = BackendStatus.ERRORED;
             AddLoadStatus("Engine update staged — RESTART SwarmUI to load the new engine. This backend is disabled until you restart.");
-            Logs.Warning("[HartsyInference] Backend disabled: a newer engine is staged. Restart SwarmUI to load it (set AutoUpdate=aggressive to auto-restart).");
+            HartsyLogs.Warning("Backend disabled: a newer engine is staged. Restart SwarmUI to load it (set AutoUpdate=aggressive to auto-restart).");
             return;
         }
         try
@@ -401,7 +406,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             }
             catch (Exception ex)
             {
-                Logs.Warning($"[HartsyInference] Backend probe threw, treating as no usable GPU: {ex.Message}");
+                HartsyLogs.Warning($"Backend probe threw, treating as no usable GPU: {ex.Message}");
                 resolved = "cpu";
             }
 
@@ -418,7 +423,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                     + "Fix whichever of those is closest to working, or set this backend's ComputeBackend to 'cpu' "
                     + "explicitly to override.";
                 AddLoadStatus(msg);
-                Logs.Error($"[HartsyInference] Backend #{BackendData?.ID} refusing CPU fallback: {msg}");
+                HartsyLogs.Error($"Backend #{BackendData?.ID} refusing CPU fallback: {msg}");
                 return;
             }
             _resolvedComputeKind = resolved;
@@ -433,7 +438,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             // It also builds the backend, so an unusable explicit selector fails here.
             (string Key, string Name) device = EngineDeviceIdentity();
             AddLoadStatus($"Engine ready: {_engine.BackendDescription}{(device.Key is null ? "" : $" on {device.Name ?? device.Key} [{device.Key}]")}");
-            Logs.Info($"[HartsyInference] Using '{resolved}' compute on {device.Name ?? device.Key ?? "the engine's default device"}.");
+            HartsyLogs.Info($"Using '{resolved}' compute on {device.Name ?? device.Key ?? "the engine's default device"}.");
             // Everything besides the device that changes what fits: the tier and where the components run.
             string fitSettings = $"vram={Settings?.LowVram?.Trim().ToLowerInvariant()}|te={teSelector}|vae={vaeSelector}"
                 + $"|cfg={cfgParallelSelector}|shard={(enableDitSharding ? ditShardSelector : "")}";
@@ -448,13 +453,14 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             // unavailable", which would make BackendHandler skip us for routing.
             Status = BackendStatus.RUNNING;
             AddLoadStatus($"Ready. Drivable image families: {string.Join(", ", RecipeRegistry.RegisteredNames)}.");
-            Logs.Init($"[HartsyInference] Backend #{BackendData?.ID} live ({_engine.BackendDescription})");
+            HartsyLogs.Init($"Backend #{BackendData?.ID} live ({_engine.BackendDescription})");
         }
         catch (Exception ex)
         {
             Status = BackendStatus.ERRORED;
             AddLoadStatus($"Init failed: {ex.Message}");
-            Logs.Debug($"[HartsyInference] Backend #{BackendData?.ID} init failed: {ex}");
+            HartsyLogs.Error($"Backend #{BackendData?.ID} init failed: {ex.Message}");
+            HartsyLogs.Debug($"Backend #{BackendData?.ID} init failed in detail: {ex}");
             throw;
         }
     }
@@ -500,12 +506,12 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                     "different GPU_IDs expecting different cards, note that under Vulkan the ordinal is the loader's raw " +
                     "device index and software rasterizers occupy indices, so two different numbers can land on one card.";
                 AddLoadStatus($"WARNING: {warning}");
-                Logs.Warning($"[HartsyInference] {warning}");
+                HartsyLogs.Warning($"{warning}");
             }
         }
         catch (Exception ex)
         {
-            Logs.Warning($"[HartsyInference] Device-usage registration failed; memory-aware routing may not account for this backend's device: {ex.Message}");
+            HartsyLogs.Warning($"Device-usage registration failed; memory-aware routing may not account for this backend's device: {ex.Message}");
         }
     }
 
@@ -615,7 +621,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         string first = gpuId.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).FirstOrDefault() ?? "";
         if (!int.TryParse(first, out int ordinal) || ordinal < 0)
         {
-            Logs.Warning($"[HartsyInference] GPU_ID='{gpuId}' is not a valid device ordinal; letting the Engine choose.");
+            HartsyLogs.Warning($"GPU_ID='{gpuId}' is not a valid device ordinal; letting the Engine choose.");
             return null;
         }
         return ordinal;
@@ -638,11 +644,11 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         };
         if (tier is null && normalized != "auto")
         {
-            Logs.Warning($"[HartsyInference] LowVram='{mode}' is not recognized; using Auto. "
+            HartsyLogs.Warning($"LowVram='{mode}' is not recognized; using Auto. "
                 + "Valid: Auto, Performance, Balanced, Aggressive, Maximum.");
             normalized = "auto";
         }
-        Logs.Info($"[HartsyInference] VRAM mode: {(tier?.ToString() ?? "Auto")}"
+        HartsyLogs.Info($"VRAM mode: {(tier?.ToString() ?? "Auto")}"
             + (tier == VramTier.Performance ? " (models larger than VRAM will fail rather than stream)." : "."));
         return tier is VramTier resolved ? VramPolicy.For(resolved) : null;
     }
@@ -659,7 +665,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         string compat = model.ModelClass?.CompatClass?.ID;
         if (!ModelSupport.IsArchitectureSupported(compat))
         {
-            Logs.Debug($"[HartsyInference] LoadModel: architecture '{compat}' is not supported here. Returning false so another backend can handle it.");
+            HartsyLogs.Debug($"LoadModel: architecture '{compat}' is not supported here. Returning false so another backend can handle it.");
             return false;
         }
         // The Engine loads and caches pipelines lazily inside generate, keyed on checkpoint path and LoRA/component identity.
@@ -713,7 +719,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             {
                 promptPreview = promptPreview[..80] + "…";
             }
-            Logs.Verbose($"[HartsyInference] Backend #{BackendData?.ID} accepted job batch='{batchId}' model='{model.Name}' "
+            HartsyLogs.Verbose($"Backend #{BackendData?.ID} accepted job batch='{batchId}' model='{model.Name}' "
                 + $"compat='{compat}' family='{family.Id}' ({family.Kind}) prompt=\"{promptPreview}\"");
 
             CurrentModelName = model.Name;
@@ -737,7 +743,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             {
                 // One retry: a pipeline cached from an earlier, larger model often holds VRAM this request needs, and FreeMemory releases it.
                 // A second failure means the request does not fit.
-                Logs.Warning($"[HartsyInference] {first.Message} Freeing cached models and retrying once.");
+                HartsyLogs.Warning($"{first.Message} Freeing cached models and retrying once.");
                 await FreeMemory(false);
                 try
                 {
@@ -748,7 +754,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                     // Too big for this card: record it so routing skips this card and any with no more memory, then let Swarm re-route.
                     if (ModelFitGate.RecordFailure(input, this))
                     {
-                        Logs.Warning($"[HartsyInference] {second.Message} Redirecting '{model.Name}' to a GPU with more memory.");
+                        HartsyLogs.Warning($"{second.Message} Redirecting '{model.Name}' to a GPU with more memory.");
                         throw new PleaseRedirectException();
                     }
                     throw new SwarmReadableErrorException(DescribeVramFailure(second, family));
@@ -769,7 +775,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             int idx = 0;
             foreach (Image img in outputs)
             {
-                Logs.Verbose($"[HartsyInference] Yielding output {idx + 1}/{outputs.Length} batch='{batchId}' "
+                HartsyLogs.Verbose($"Yielding output {idx + 1}/{outputs.Length} batch='{batchId}' "
                     + $"(genTime={totalMs}ms, bytes={img.RawData?.Length ?? 0})");
                 takeOutput(new T2IEngine.ImageOutput
                 {
@@ -779,11 +785,11 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 });
                 idx++;
             }
-            Logs.Debug($"[HartsyInference] Job batch='{batchId}' complete: {outputs.Length} output(s) in {totalMs}ms.");
+            HartsyLogs.Debug($"Job batch='{batchId}' complete: {outputs.Length} output(s) in {totalMs}ms.");
         }
         catch (OperationCanceledException)
         {
-            Logs.Debug("[HartsyInference] Generation cancelled by user.");
+            HartsyLogs.Info("Generation cancelled by user.");
         }
         finally
         {
@@ -859,7 +865,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             return spec;
         }
         string files = string.Join(", ", missing.Select(a => $"{a.Repo}/{a.RepoPath}"));
-        Logs.Info($"[HartsyInference] {spec.Catalog.DisplayName}: fetching {missing.Count} file(s) on first use ({files}).");
+        HartsyLogs.Info($"{spec.Catalog.DisplayName}: fetching {missing.Count} file(s) on first use ({files}).");
         try
         {
             Dictionary<string, int> lastBucket = new();
@@ -869,10 +875,10 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 if (bucket > lastBucket.GetValueOrDefault(asset.FileName, -1))
                 {
                     lastBucket[asset.FileName] = bucket;
-                    Logs.Debug($"[HartsyInference] Downloading '{asset.FileName}': {fraction * 100:0}%");
+                    HartsyLogs.Debug($"Downloading '{asset.FileName}': {fraction * 100:0}%");
                 }
             }, cancel);
-            Logs.Info($"[HartsyInference] {spec.Catalog.DisplayName}: finished fetching {missing.Count} file(s).");
+            HartsyLogs.Info($"{spec.Catalog.DisplayName}: finished fetching {missing.Count} file(s).");
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -922,7 +928,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         }
         input.TryGet(ComfyUIBackendExtension.RefinerUpscaleMethod, out string method);
         string model = ResolveUpscaleModel(method, factor);
-        Logs.Debug($"[HartsyInference] Refiner upscale x{factor}: {width}x{height} to {targetWidth}x{targetHeight} via '{model}' (method '{method ?? "default"}').");
+        HartsyLogs.Debug($"Refiner upscale x{factor}: {width}x{height} to {targetWidth}x{targetHeight} via '{model}' (method '{method ?? "default"}').");
         if (model == SeedVr2UpscaleMethod)
         {
             string restoreModel = input.TryGet(HartsyInference.RestoreModelParam, out string picked) && !string.IsNullOrWhiteSpace(picked)
@@ -1032,7 +1038,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             }
             catch (NotSupportedException ex)
             {
-                Logs.Debug($"[HartsyInference] Streaming generation not available ({ex.Message}); falling back to buffered.");
+                HartsyLogs.Debug($"Streaming generation not available ({ex.Message}); falling back to buffered.");
             }
         }
 
@@ -1075,7 +1081,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         }
         if (audio is not null && !VideoOutputEncoder.FormatSupportsAudio(format))
         {
-            Logs.Warning($"[HartsyInference] Video format '{format}' cannot carry audio, so the {audio.SampleRate} Hz track is dropped. Choose 'h264-mp4', 'h265-mp4', 'prores' or 'webm' to keep it.");
+            HartsyLogs.Warning($"Video format '{format}' cannot carry audio, so the {audio.SampleRate} Hz track is dropped. Choose 'h264-mp4', 'h265-mp4', 'prores' or 'webm' to keep it.");
             audio = null;
         }
         return VideoOutputEncoder.Encode([.. frames], width, height, request.Fps ?? 25, format, cancel, audio);
@@ -1130,7 +1136,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     {
         MusicRequest request = BuildMusicRequest(input);
         AudioResult result = await _engine.Music.GenerateAsync(spec, request, progress, cancel);
-        Logs.Verbose($"[HartsyInference] Music: {result.DurationSeconds:0.0}s @ {result.SampleRate} Hz ({result.Format}).");
+        HartsyLogs.Verbose($"Music: {result.DurationSeconds:0.0}s @ {result.SampleRate} Hz ({result.Format}).");
         foreach (KeyValuePair<string, string> meta in result.Meta)
         {
             input.ExtraMeta[$"hartsy_{meta.Key}"] = meta.Value;
@@ -1151,7 +1157,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             if (threshold != lastLoggedThreshold)
             {
                 lastLoggedThreshold = threshold;
-                Logs.Verbose($"[HartsyInference] Progress batch='{batchId}' {RenderProgressBar(overall)} step {p.Step}/{p.TotalSteps}");
+                HartsyLogs.Verbose($"Progress batch='{batchId}' {RenderProgressBar(overall)} step {p.Step}/{p.TotalSteps}");
             }
             JObject previewObj = previewEncoder.TryEncode(p, batchId, overall);
             // Send the preview JObject when one was encoded (preview and percent in one message, as Comfy does), else just the percent.
@@ -1203,7 +1209,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 input.Get(T2IParamTypes.Height, DefaultImageSize),
                 input.Get(HartsyInference.Ideogram4MagicPromptModelParam, ""),
                 input.SourceSession,
-                msg => Logs.Verbose($"[HartsyInference][Ideogram4] {msg}"));
+                msg => HartsyLogs.Verbose($"[Ideogram4] {msg}"));
         }
         Image initImage = input.Get(T2IParamTypes.InitImage);
         Image maskImage = input.Get(T2IParamTypes.MaskImage);
@@ -1355,7 +1361,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 throw new SwarmUserErrorException(
                     $"HartsyInference: ControlNet '{cnModel.Name}' has no control image. Set the ControlNet Image (or an Init Image).");
             }
-            global::HartsyInference.Diffusion.Adapters.ControlNetMode mode = ControlNetPreprocessing.DetectMode(cnModel.RawFilePath);
+            EngineControlNetMode mode = ControlNetPreprocessing.DetectMode(cnModel.RawFilePath);
             AddLoadStatus($"ControlNet '{cnModel.Name}' → {mode} preprocessing.");
             EngineImage annotated = ControlNetPreprocessing.Preprocess(
                 mode, hint,
@@ -1377,16 +1383,16 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     }
 
     /// <summary>The engine's union-control token for a detected preprocessing mode. Each must be one that <c>ControlNetResolver.ResolveUnionType</c> recognizes.</summary>
-    private static string UnionTypeString(global::HartsyInference.Diffusion.Adapters.ControlNetMode mode) => mode switch
+    private static string UnionTypeString(EngineControlNetMode mode) => mode switch
     {
-        global::HartsyInference.Diffusion.Adapters.ControlNetMode.Depth => "depth",
-        global::HartsyInference.Diffusion.Adapters.ControlNetMode.OpenPose => "openpose",
-        global::HartsyInference.Diffusion.Adapters.ControlNetMode.Scribble => "softedge",
-        global::HartsyInference.Diffusion.Adapters.ControlNetMode.SoftEdge => "softedge",
-        global::HartsyInference.Diffusion.Adapters.ControlNetMode.Normal => "normal",
-        global::HartsyInference.Diffusion.Adapters.ControlNetMode.Segmentation => "segment",
-        global::HartsyInference.Diffusion.Adapters.ControlNetMode.Tile => "tile",
-        global::HartsyInference.Diffusion.Adapters.ControlNetMode.Inpaint => "repaint",
+        EngineControlNetMode.Depth => "depth",
+        EngineControlNetMode.OpenPose => "openpose",
+        EngineControlNetMode.Scribble => "softedge",
+        EngineControlNetMode.SoftEdge => "softedge",
+        EngineControlNetMode.Normal => "normal",
+        EngineControlNetMode.Segmentation => "segment",
+        EngineControlNetMode.Tile => "tile",
+        EngineControlNetMode.Inpaint => "repaint",
         // Canny + LineArt both drive the thin-line head.
         _ => "canny",
     };
@@ -1480,24 +1486,24 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             && input.TryGetRaw(ipaType, out object ipaRaw)
             && ipaRaw is string ipaModel && !string.IsNullOrWhiteSpace(ipaModel) && ipaModel != "None")
         {
-            extra[global::HartsyInference.Engine.Features.RequestExtras.IpAdapterModel] = ipaModel;
+            extra[EngineExtras.IpAdapterModel] = ipaModel;
         }
         if (input.Get(T2IParamTypes.ClipVisionModel) is T2IModel clipVision)
         {
-            extra[global::HartsyInference.Engine.Features.RequestExtras.IpAdapterClipVision] = clipVision.RawFilePath;
+            extra[EngineExtras.IpAdapterClipVision] = clipVision.RawFilePath;
         }
         // IP-Adapter scheduling/weighting: forward Comfy's own params (we don't re-register them).
         if (input.TryGet(ComfyUIBackendExtension.IPAdapterWeight, out double ipaWeight))
         {
-            extra[global::HartsyInference.Engine.Features.RequestExtras.IpAdapterWeight] = ipaWeight;
+            extra[EngineExtras.IpAdapterWeight] = ipaWeight;
         }
         if (input.TryGet(ComfyUIBackendExtension.IPAdapterStart, out double ipaStart))
         {
-            extra[global::HartsyInference.Engine.Features.RequestExtras.IpAdapterStart] = ipaStart;
+            extra[EngineExtras.IpAdapterStart] = ipaStart;
         }
         if (input.TryGet(ComfyUIBackendExtension.IPAdapterEnd, out double ipaEnd))
         {
-            extra[global::HartsyInference.Engine.Features.RequestExtras.IpAdapterEnd] = ipaEnd;
+            extra[EngineExtras.IpAdapterEnd] = ipaEnd;
         }
         if (input.TryGet(ComfyUIBackendExtension.IPAdapterWeightType, out string ipaWeightType)
             && !string.IsNullOrWhiteSpace(ipaWeightType))
@@ -1505,28 +1511,28 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             // Comfy live-appends "name///name (New)" variants; the engine wants the bare name and safely
             // falls back to "standard" for anything it doesn't recognize.
             int marker = ipaWeightType.IndexOf("///", StringComparison.Ordinal);
-            extra[global::HartsyInference.Engine.Features.RequestExtras.IpAdapterWeightType] = marker < 0 ? ipaWeightType : ipaWeightType[..marker];
+            extra[EngineExtras.IpAdapterWeightType] = marker < 0 ? ipaWeightType : ipaWeightType[..marker];
         }
         foreach ((int index, string unionType) in controlNetUnionTypes)
         {
-            extra[global::HartsyInference.Engine.Features.RequestExtras.ControlNetUnionTypePrefix + index.ToString(CultureInfo.InvariantCulture)] = unionType;
+            extra[EngineExtras.ControlNetUnionTypePrefix + index.ToString(CultureInfo.InvariantCulture)] = unionType;
         }
         // FLUX.1 Redux: Comfy's style-model params map onto the engine's redux.* keys. The model rides by name, resolved from the style_models folders.
         if (input.TryGet(ComfyUIBackendExtension.UseStyleModel, out string styleModel)
             && !string.IsNullOrWhiteSpace(styleModel) && styleModel != "None")
         {
-            extra[global::HartsyInference.Engine.Features.RequestExtras.ReduxStyleModel] = styleModel;
+            extra[EngineExtras.ReduxStyleModel] = styleModel;
             if (input.TryGet(ComfyUIBackendExtension.StyleModelMultiplyStrength, out double reduxMultiply))
             {
-                extra[global::HartsyInference.Engine.Features.RequestExtras.ReduxMultiply] = reduxMultiply;
+                extra[EngineExtras.ReduxMultiply] = reduxMultiply;
             }
             if (input.TryGet(ComfyUIBackendExtension.StyleModelMergeStrength, out double reduxMerge))
             {
-                extra[global::HartsyInference.Engine.Features.RequestExtras.ReduxMerge] = reduxMerge;
+                extra[EngineExtras.ReduxMerge] = reduxMerge;
             }
             if (input.TryGet(ComfyUIBackendExtension.StyleModelApplyStart, out double reduxApplyStart))
             {
-                extra[global::HartsyInference.Engine.Features.RequestExtras.ReduxApplyStart] = reduxApplyStart;
+                extra[EngineExtras.ReduxApplyStart] = reduxApplyStart;
             }
         }
         // Extension-registered custom params.
@@ -1545,8 +1551,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         {
             string modelPath = input.Get(T2IParamTypes.Model)?.RawFilePath ?? "";
             string modelName = System.IO.Path.GetFileNameWithoutExtension(modelPath).ToLowerInvariant();
-            global::HartsyInference.Diffusion.Adapters.ControlNetMode? toolsMode = modelName.Contains("canny") ? global::HartsyInference.Diffusion.Adapters.ControlNetMode.Canny
-                : modelName.Contains("depth") ? global::HartsyInference.Diffusion.Adapters.ControlNetMode.Depth
+            EngineControlNetMode? toolsMode = modelName.Contains("canny") ? EngineControlNetMode.Canny
+                : modelName.Contains("depth") ? EngineControlNetMode.Depth
                 : null;
             if (toolsMode is not null)
             {
@@ -1555,7 +1561,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                     toolsMode.Value, initImage,
                     input.Get(T2IParamTypes.Width, DefaultImageSize), input.Get(T2IParamTypes.Height, DefaultImageSize),
                     PreprocessBackend, msg => AddLoadStatus(msg));
-                extra[global::HartsyInference.Engine.Features.RequestExtras.FluxToolsControlImage] = annotated;
+                extra[EngineExtras.FluxToolsControlImage] = annotated;
             }
         }
         return extra;
@@ -1598,13 +1604,13 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             }
             else
             {
-                Logs.Warning("[HartsyInference] Both the Animate Reference Image param and a prompt-attached image "
+                HartsyLogs.Warning("Both the Animate Reference Image param and a prompt-attached image "
                     + "are set; the param wins and the prompt-attached image is ignored. Clear one of them to avoid this warning.");
             }
         }
         if (reference is not null)
         {
-            extra[global::HartsyInference.Engine.Recipes.Video.WanAnimateRecipePipeline.ReferenceImageKey] = ToEngineImage(reference);
+            extra[EngineWanAnimate.ReferenceImageKey] = ToEngineImage(reference);
         }
         Image poseVideo = input.Get(HartsyInference.AnimatePoseVideoParam);
         Image faceVideo = input.Get(HartsyInference.AnimateFaceVideoParam);
@@ -1708,7 +1714,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             ? totalRaw : null;
         bool contextSet = input.TryGet(HartsyInference.H3ChainContextFramesParam, out int contextRaw);
         int context = contextSet ? SnapChainContextFrames(contextRaw)
-            : global::HartsyInference.Engine.Recipes.Video.MiniMaxH3ChainPlanner.DefaultContextFrames;
+            : EngineH3ChainPlanner.DefaultContextFrames;
         if (contextSet && total is null)
         {
             throw new SwarmUserErrorException(
@@ -1717,10 +1723,10 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         }
         if (total is int t)
         {
-            int maxSegment = global::HartsyInference.Diffusion.Models.Denoisers.MiniMaxH3Geometry.AlignFrameCount(frames ?? 124);
+            int maxSegment = EngineH3Geometry.AlignFrameCount(frames ?? 124);
             try
             {
-                global::HartsyInference.Engine.Recipes.Video.MiniMaxH3ChainPlanner.Plan(t, context, maxSegment);
+                EngineH3ChainPlanner.Plan(t, context, maxSegment);
             }
             catch (ArgumentOutOfRangeException ex)
             {
@@ -1754,13 +1760,13 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         }
         if (IsMiniMaxH3(input))
         {
-            Logs.Debug("[HartsyInference] No frame count set, so leaving it to MiniMax-H3's own 124-frame default "
+            HartsyLogs.Debug("No frame count set, so leaving it to MiniMax-H3's own 124-frame default "
                 + "rather than Swarm's cross-family 25 (which would snap to 39 on H3's 17k+5 grid).");
             return null;
         }
         if (IsLtxVideo2(input))
         {
-            Logs.Debug("[HartsyInference] No frame count set, so leaving it to the LTX-2 recipe's own default rather "
+            HartsyLogs.Debug("No frame count set, so leaving it to the LTX-2 recipe's own default rather "
                 + "than Swarm's cross-family 25, which is not on LTX-2's 8n+1 grid.");
             return null;
         }
@@ -1834,7 +1840,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     {
         if (supplied > used)
         {
-            Logs.Warning($"[HartsyInference] {supplied} reference {what} attached but this model takes at most "
+            HartsyLogs.Warning($"{supplied} reference {what} attached but this model takes at most "
                 + $"{used}; the extra {what} were dropped. Remove the extras to avoid this warning.");
         }
     }
@@ -2614,7 +2620,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 if (File.Exists(updateMarker))
                 {
                     try { File.Delete(updateMarker); }
-                    catch (Exception mEx) { Logs.Debug($"[HartsyInference] Auto-update: couldn't clear update marker: {mEx.Message}"); }
+                    catch (Exception mEx) { HartsyLogs.Debug($"Auto-update: couldn't clear update marker: {mEx.Message}"); }
                 }
                 AddLoadStatus("Auto-update: engine is already up to date.");
                 return false;
@@ -2622,7 +2628,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             string pending = File.Exists(updateMarker) ? File.ReadAllText(updateMarker).Trim() : null;
             if (aggressive && string.Equals(pending, latest, StringComparison.Ordinal))
             {
-                Logs.Warning($"[HartsyInference] Auto-update: engine {latest} was already staged on a previous restart but the running engine is still {loaded}. "
+                HartsyLogs.Warning($"Auto-update: engine {latest} was already staged on a previous restart but the running engine is still {loaded}. "
                     + $"Not auto-restarting again (avoiding a boot loop). The rebuild's NuGet restore isn't resolving {latest}.");
                 AddLoadStatus($"Auto-update: {latest} did not apply after a restart — auto-restart paused to avoid a loop (see logs).");
                 return false; // run degraded on the old engine rather than bricking the backend
@@ -2631,7 +2637,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             string csproj = ExtensionProjectPath();
             if (csproj is null)
             {
-                Logs.Warning("[HartsyInference] Auto-update: the extension's '.csproj' file was not found next to the assembly; cannot rebuild.");
+                HartsyLogs.Warning("Auto-update: the extension's '.csproj' file was not found next to the assembly; cannot rebuild.");
                 return false;
             }
             AddLoadStatus($"Auto-update: verifying engine {latest} compiles against this extension (this can take a minute)...");
@@ -2641,7 +2647,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             (int code, string output) = await RunDotnet($"build \"{csproj}\" -c Release /p:RestoreForceEvaluate=true", dir);
             if (code != 0)
             {
-                Logs.Warning($"[HartsyInference] Auto-update: engine {latest} does not compile against this extension; staying on the current engine. Build output:\n{output}");
+                HartsyLogs.Warning($"Auto-update: engine {latest} does not compile against this extension; staying on the current engine. Build output:\n{output}");
                 AddLoadStatus($"Auto-update: engine {latest} failed to compile — keeping the current engine (see logs).");
                 return false;
             }
@@ -2659,18 +2665,18 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             }
             catch (Exception delEx)
             {
-                Logs.Warning($"[HartsyInference] Auto-update: couldn't invalidate cached build '{selfDll}' ({delEx.Message}). "
+                HartsyLogs.Warning($"Auto-update: couldn't invalidate cached build '{selfDll}' ({delEx.Message}). "
                     + $"Delete that file (or its folder under src/bin/extensions/) and restart to load engine {latest}.");
                 AddLoadStatus($"Auto-update: couldn't invalidate cached build — delete '{Path.GetFileName(selfDll)}' manually and restart.");
                 return false;
             }
-            Logs.Info($"[HartsyInference] Engine {latest} verified and the cached extension build was invalidated. SwarmUI will rebuild against the new engine on next start (an in-process library cannot be hot-swapped).");
+            HartsyLogs.Info($"Engine {latest} verified and the cached extension build was invalidated. SwarmUI will rebuild against the new engine on next start (an in-process library cannot be hot-swapped).");
             if (aggressive)
             {
-                Logs.Info("[HartsyInference] AutoUpdate is set to 'aggressive', so requesting a SwarmUI restart to rebuild and load the new engine.");
+                HartsyLogs.Info("AutoUpdate is set to 'aggressive', so requesting a SwarmUI restart to rebuild and load the new engine.");
                 AddLoadStatus($"Auto-update: engine {latest} verified — restarting SwarmUI to rebuild and apply.");
                 try { File.WriteAllText(updateMarker, latest); }
-                catch (Exception mEx) { Logs.Debug($"[HartsyInference] Auto-update: couldn't write update marker: {mEx.Message}"); }
+                catch (Exception mEx) { HartsyLogs.Debug($"Auto-update: couldn't write update marker: {mEx.Message}"); }
                 Program.RequestRestart();
                 return false; // process is restarting; no need to error the backend
             }
@@ -2679,7 +2685,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         }
         catch (Exception ex)
         {
-            Logs.Warning($"[HartsyInference] Auto-update failed; continuing with the current engine: {ex.ReadableString()}");
+            HartsyLogs.Warning($"Auto-update failed; continuing with the current engine: {ex.ReadableString()}");
             AddLoadStatus("Auto-update: failed (continuing with the current engine).");
             return false;
         }
@@ -2727,7 +2733,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         }
         catch (Exception ex)
         {
-            Logs.Warning($"[HartsyInference] Auto-update: NuGet version query failed; continuing with the current engine: {ex.ReadableString()}");
+            HartsyLogs.Warning($"Auto-update: NuGet version query failed; continuing with the current engine: {ex.ReadableString()}");
             return null;
         }
     }

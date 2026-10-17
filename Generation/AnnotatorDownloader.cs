@@ -34,7 +34,7 @@ public static class AnnotatorDownloader
             Directory.CreateDirectory(folder);
             string tmp = path + ".tmp";
             log($"Downloading '{fileName}' from {url} ...");
-            Logs.Info($"[HartsyInference] Downloading '{fileName}' to '{folder}' because it is not installed yet.");
+            HartsyLogs.Info($"Downloading '{fileName}' to '{folder}' because it is not installed yet.");
             try
             {
                 Utilities.DownloadFile(url, tmp, null).Wait(Program.GlobalProgramCancel);
@@ -50,12 +50,12 @@ public static class AnnotatorDownloader
                 }
                 File.Move(tmp, path);
                 log($"'{fileName}' ready.");
-                Logs.Info($"[HartsyInference] Finished downloading '{fileName}'.");
+                HartsyLogs.Info($"Finished downloading '{fileName}'.");
                 return path;
             }
             catch (Exception ex)
             {
-                Logs.Error($"[HartsyInference] Download failed for '{fileName}': {ex.Message}");
+                HartsyLogs.Error($"Download failed for '{fileName}': {ex.Message}");
                 try { if (File.Exists(tmp)) File.Delete(tmp); } catch (IOException) { }
                 throw;
             }
