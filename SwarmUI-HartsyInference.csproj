@@ -54,7 +54,7 @@
              RestoreNoHttpCache makes each restore ask nuget.org again. RestoreSources keeps that lookup on nuget.org, so a
              developer's local feed of alpha.N-local.M packs, which NuGet ranks above the published alpha.N, is never
              picked up (that is what broke every extension build on 2026-10-07 under the old floating alpha.*). -->
-        <PackageReference Include="HartsyInference" Version="*-*" />
+        <PackageReference Include="HartsyInference" Version="2.0.0-alpha.374" />
     </ItemGroup>
 
     <!-- LOCAL ENGINE: prebuilt DLLs from the HartsyInference Cli bin (its full runtime closure). Referenced
