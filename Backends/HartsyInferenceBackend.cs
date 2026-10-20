@@ -303,7 +303,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         {
             // A staged engine update cannot hot-swap into this process, so fail loudly rather than serve the old version.
             Status = BackendStatus.ERRORED;
-            AddLoadStatus("Engine update staged — RESTART SwarmUI to load the new engine. This backend is disabled until you restart.");
+            AddLoadStatus("Engine update staged. RESTART SwarmUI to load the new engine. This backend is disabled until you restart.");
             HartsyLogs.Warning("Backend disabled: a newer engine is staged. Restart SwarmUI to load it (set AutoUpdate=aggressive to auto-restart).");
             return;
         }
@@ -987,7 +987,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         if (result.Image?.Alpha is not { } alpha || alpha.Length != width * height)
         {
             throw new SwarmReadableErrorException(
-                "HartsyInference: background removal returned no alpha plane — the engine build predates 2.0.0-alpha.56.");
+                "HartsyInference: background removal returned no alpha plane: the engine build predates 2.0.0-alpha.56.");
         }
         return alpha;
     }
@@ -1697,7 +1697,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         if (hasFrames && hasRefs)
         {
             throw new SwarmUserErrorException(
-                "MiniMax-H3 cannot combine start/end-frame conditioning with reference media — fl2va and ref2va are "
+                "MiniMax-H3 cannot combine start/end-frame conditioning with reference media: fl2va and ref2va are "
                 + "separate tasks shipped as separate checkpoints, and their packed-layout coordinates overlap. "
                 + $"Remove either the {(initImage is not null ? "Init Image" : "Video End Frame")} or the media "
                 + "attached to the prompt.");
@@ -2159,7 +2159,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         if (wantsSchedule && (input.Get(T2IParamTypes.InitImage) is not null || input.Get(T2IParamTypes.MaskImage) is not null))
         {
             input.RefusalReasons.Add(
-                $"HartsyInference: the '{schedule}' scheduler can't be combined with an init image or mask — the init "
+                $"HartsyInference: the '{schedule}' scheduler can't be combined with an init image or mask: the init "
                 + "latent is noised at the model's own sigma, so a re-spaced schedule would start from the wrong "
                 + "noise level. Drop the scheduler.");
             return false;
@@ -2251,7 +2251,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     {
         if (input.Get(T2IParamTypes.InitImage) is not null)
         {
-            input.RefusalReasons.Add("HartsyInference: this is a music model — remove the Init Image.");
+            input.RefusalReasons.Add("HartsyInference: this is a music model. Remove the Init Image.");
             return false;
         }
         if (input.Get(T2IParamTypes.RefinerModel) is not null)
@@ -2277,8 +2277,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         if (hasSourceAudio && input.TryGet(HartsyInference.AceStepLmPlannerParam, out string lmModel) && lmModel != "none")
         {
             input.RefusalReasons.Add(
-                "HartsyInference: the ACE-Step edit modes and the 5 Hz LM planner both occupy the src_latents slot — "
-                + "set ACE-Step LM Planner to none, or remove the Source Audio.");
+                "HartsyInference: the ACE-Step edit modes and the 5 Hz LM planner both occupy the src_latents slot. "
+                + "Set ACE-Step LM Planner to none, or remove the Source Audio.");
             return false;
         }
         if (hasSourceAudio && input.Get(HartsyInference.AceStepEditModeParam, "continuation") == "repaint"
@@ -2375,7 +2375,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             && (videoSupported & VideoFeatures.Lora) == 0)
         {
             input.RefusalReasons.Add(
-                $"HartsyInference: LoRAs aren't supported on architecture '{compat}' (engine family '{family.Id}') — "
+                $"HartsyInference: LoRAs aren't supported on architecture '{compat}' (engine family '{family.Id}'), because "
                 + "that family's recipe never merges them. Remove the LoRA selection.");
             return false;
         }
@@ -2404,7 +2404,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         {
             input.RefusalReasons.Add(
                 $"HartsyInference: the '{upscaleMethod}' upscale method needs a refiner model's latent pass. Without a "
-                + "refiner this backend upscales in pixel space — pick a Pixel, Model, Real-ESRGAN or SeedVR2 method.");
+                + "refiner this backend upscales in pixel space. Pick a Pixel, Model, Real-ESRGAN or SeedVR2 method.");
             return false;
         }
         // A refiner model must come from a family whose recipe can consume an init image (the PostApply hand-off).
@@ -2426,7 +2426,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 if ((refFeatures & (ImageFeatures.Img2Img | ImageFeatures.RefEdit)) == 0)
                 {
                     input.RefusalReasons.Add(
-                        $"HartsyInference: '{refModel.Name}' ({refFamily.Id}) can't be a refiner — its recipe has no "
+                        $"HartsyInference: '{refModel.Name}' ({refFamily.Id}) can't be a refiner, because its recipe has no "
                         + "img2img path to consume the base image with. Pick a model whose family supports Init Image.");
                     return false;
                 }
@@ -2469,14 +2469,14 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             if (initMode == "reference" && (supported & ImageFeatures.RefEdit) == 0)
             {
                 input.RefusalReasons.Add(
-                    $"HartsyInference: reference-edit Init Image Mode isn't supported on '{compat}' (engine family '{family.Id}') — "
+                    $"HartsyInference: reference-edit Init Image Mode isn't supported on '{compat}' (engine family '{family.Id}'), because "
                     + "that family only does strength-based img2img. Set Init Image Mode to denoise or auto.");
                 return false;
             }
             if (initMode == "denoise" && (supported & ImageFeatures.Img2Img) == 0)
             {
                 input.RefusalReasons.Add(
-                    $"HartsyInference: denoise Init Image Mode isn't supported on '{compat}' (engine family '{family.Id}') — "
+                    $"HartsyInference: denoise Init Image Mode isn't supported on '{compat}' (engine family '{family.Id}'), because "
                     + "that family is a reference-edit model with no denoise-strength path. Set Init Image Mode to reference or auto.");
                 return false;
             }
@@ -2628,7 +2628,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             {
                 HartsyLogs.Warning($"Auto-update: engine {latest} was already staged on a previous restart but the running engine is still {loaded}. "
                     + $"Not auto-restarting again (avoiding a boot loop). The rebuild's NuGet restore isn't resolving {latest}.");
-                AddLoadStatus($"Auto-update: {latest} did not apply after a restart — auto-restart paused to avoid a loop (see logs).");
+                AddLoadStatus($"Auto-update: {latest} did not apply after a restart. Auto-restart paused to avoid a loop (see logs).");
                 return false; // run degraded on the old engine rather than bricking the backend
             }
 
@@ -2646,7 +2646,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             if (code != 0)
             {
                 HartsyLogs.Warning($"Auto-update: engine {latest} does not compile against this extension; staying on the current engine. Build output:\n{output}");
-                AddLoadStatus($"Auto-update: engine {latest} failed to compile — keeping the current engine (see logs).");
+                AddLoadStatus($"Auto-update: engine {latest} failed to compile. Keeping the current engine (see logs).");
                 return false;
             }
 
@@ -2665,20 +2665,20 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             {
                 HartsyLogs.Warning($"Auto-update: couldn't invalidate cached build '{selfDll}' ({delEx.Message}). "
                     + $"Delete that file (or its folder under src/bin/extensions/) and restart to load engine {latest}.");
-                AddLoadStatus($"Auto-update: couldn't invalidate cached build — delete '{Path.GetFileName(selfDll)}' manually and restart.");
+                AddLoadStatus($"Auto-update: couldn't invalidate cached build. Delete '{Path.GetFileName(selfDll)}' manually and restart.");
                 return false;
             }
             HartsyLogs.Info($"Engine {latest} verified and the cached extension build was invalidated. SwarmUI will rebuild against the new engine on next start (an in-process library cannot be hot-swapped).");
             if (aggressive)
             {
                 HartsyLogs.Info("AutoUpdate is set to 'aggressive', so requesting a SwarmUI restart to rebuild and load the new engine.");
-                AddLoadStatus($"Auto-update: engine {latest} verified — restarting SwarmUI to rebuild and apply.");
+                AddLoadStatus($"Auto-update: engine {latest} verified. Restarting SwarmUI to rebuild and apply.");
                 try { File.WriteAllText(updateMarker, latest); }
                 catch (Exception mEx) { HartsyLogs.Debug($"Auto-update: couldn't write update marker: {mEx.Message}"); }
                 Program.RequestRestart();
                 return false; // process is restarting; no need to error the backend
             }
-            AddLoadStatus($"Auto-update: engine {latest} staged — RESTART SwarmUI to load it.");
+            AddLoadStatus($"Auto-update: engine {latest} staged. RESTART SwarmUI to load it.");
             return true; // staged but not loaded: caller errors the backend so it won't run stale
         }
         catch (Exception ex)
