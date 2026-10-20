@@ -197,6 +197,9 @@ public class HartsyInference : Extension
         // Model-aware param visibility. "hartsyinference" only means "our backend is running", so without
         // this every param below shows under every model. See Assets/hartsy-params.js.
         ScriptFiles.Add("Assets/hartsy-params.js");
+        // Sections, plain labels, guide links and GPU lists for the backend card under Server > Backends.
+        ScriptFiles.Add("Assets/hartsy-backend-card.js");
+        StyleSheetFiles.Add("Assets/hartsy-backend-card.css");
 
         RegisterParameterRemaps();
 

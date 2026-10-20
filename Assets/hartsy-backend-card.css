@@ -1,0 +1,53 @@
+/* Sections on the HartsyInference backend card, added by hartsy-backend-card.js. */
+
+.hartsy-card-section {
+    border: 1px solid var(--bs-border-color, #444);
+    border-radius: 6px;
+    margin: 6px 0;
+    overflow: hidden;
+}
+
+.hartsy-card-section-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    cursor: pointer;
+    background: rgba(128, 128, 128, 0.12);
+    user-select: none;
+}
+
+.hartsy-card-section-header:hover {
+    background: rgba(128, 128, 128, 0.2);
+}
+
+.hartsy-card-section-caret {
+    display: inline-block;
+    width: 1em;
+}
+
+.hartsy-card-section-title {
+    font-weight: 600;
+    flex: 1;
+}
+
+/* Why a section is greyed out, or which choices clash. */
+.hartsy-card-section-notice {
+    padding: 4px 10px 0 10px;
+    font-size: 0.9em;
+    opacity: 0.85;
+    white-space: pre-line;
+}
+
+.hartsy-card-section-body {
+    padding: 6px 10px 10px 10px;
+}
+
+.hartsy-card-guide-link {
+    font-size: 0.85em;
+}
+
+/* A field or section the chosen compute backend cannot use. */
+.hartsy-card-inactive {
+    opacity: 0.45;
+}
