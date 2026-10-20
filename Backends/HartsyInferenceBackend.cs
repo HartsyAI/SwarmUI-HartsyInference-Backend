@@ -9,6 +9,7 @@ using FreneticUtilities.FreneticDataSyntax;
 using Newtonsoft.Json.Linq;
 using SwarmUI.Backends;
 using SwarmUI.Core;
+using SwarmUI.DataHolders;
 using SwarmUI.Media;
 using SwarmUI.Text2Image;
 using SwarmUI.Utils;
@@ -54,47 +55,55 @@ namespace Hartsy.Extensions.HartsyInferenceBackend.Backends;
 public class HartsyInferenceBackend : AbstractT2IBackend
 {
     /// <summary>Settings saved to Data/Backends.fds. Nested in the backend class so BackendHandler.RegisterBackendType can find it by reflection.</summary>
+    /// <remarks>Saved by field name, so renaming or retyping a field breaks every saved backend. Assets/hartsy-backend-card.js groups these fields into the card's sections, in this order.</remarks>
     public class HartsyInferenceBackendSettings : AutoConfiguration
     {
-        [ConfigComment("Compute backend to use.\n'Auto' (default) tries CUDA, then Vulkan, then CPU. Vulkan is how a non-NVIDIA GPU (AMD, Intel) gets used, so 'Auto' does not mean 'CUDA or nothing'.\nOnly options this machine can actually use are offered here: 'Cuda' only appears when an NVIDIA GPU is present AND a real test computation on it succeeds, not just that a driver reports a device (this catches a kernel built for the wrong GPU architecture, a missing PTX directory, or a driver/toolkit mismatch, before it surfaces mid-generation instead of here).\n'Vulkan' only appears when a real Vulkan GPU is present. Software rasterizers such as Mesa's lavapipe enumerate as Vulkan devices but are CPU implementations of it, slower than the CPU backend, so they do not count as a GPU here.\nThis list is built once per SwarmUI process start. If you plug in a GPU or fix a driver, restart SwarmUI to see it here.")]
+        [ConfigComment("Which hardware runs this backend. Auto picks the best one this machine supports.\nOnly choices that work on this machine are listed. After you change a GPU or driver, restart SwarmUI to refresh the list.")]
         [SettingsOptions(Impl = typeof(ComputeBackendOptions))]
         public string ComputeBackend = "auto";
 
-        [ConfigComment("Which GPU to use, if multiple are available.\nShould be a single number, like '0' (first GPU), '1' (second GPU), etc.\nIgnored for the CPU compute backend.\nUnder CUDA this is a CUDA device ordinal, which is NOT necessarily the same order nvidia-smi shows: CUDA enumerates fastest-first by default, so on a mixed-GPU machine '0' is the fastest card. To confirm which physical GPU you got, watch nvidia-smi memory while a generation runs.\nUnder Vulkan the numbering works differently. '0' (the default) means 'let the engine pick the best GPU'; any other number is the Vulkan loader's RAW device index. That raw list can include software rasterizers, which take up an index without being usable GPUs, so '1' is not necessarily your second card. The backend's startup log names the device it actually bound to, which is the reliable way to check.\nRun one backend per GPU to use several cards at once.")]
+        [ConfigComment("Which GPU this backend runs on.\nTo use more than one GPU, add one backend per GPU.\nNot used when Compute Backend is CPU.")]
+        [SettingsOptions(Impl = typeof(GpuChoices.MainGpuOptions))]
         public string GPU_ID = "0";
 
-        [ConfigComment("How hard the engine should work to fit a model in VRAM.\n\n'Auto' (default) reads your card's size to pick a starting posture, then measures free VRAM before each phase and streams only when the model would not otherwise fit. Cards with headroom keep the full-speed resident path, so this costs nothing when it isn't needed. Leave it here unless you have a reason not to.\n\n'Performance' never streams and never auto-evicts: everything loads and an oversized model fails with an out-of-VRAM error instead of running slowly. For operators who size their own workloads and want a hard failure.\n\n'Balanced' releases each phase's weights at its boundary so the next phase gets the space, and streams only when the measurement says it must.\n\n'Aggressive' always streams, halves the precision of cross-step caches, and shrinks chunk/tile sizes. Useful when sharing the GPU with another program, or to test the streamed path.\n\n'Maximum' adds activation offload, quantized compute and freeing after every generation, and will spill onto a second GPU when one is configured and idle. Last resort — every one of those costs speed, and some change numerics.\n\nStreaming is typically 5-8x slower than a fully-resident model, but it is what lets large models run on a 12GB card at all. Individual levers can be overridden per-generation under the 'VRAM & Memory' parameter group.\nThe older 'auto'/'on'/'off' values still load: 'on' becomes Aggressive and 'off' becomes Performance.")]
+        [ConfigComment("How hard the engine works to fit models into GPU memory.\nAuto is right for almost everyone. The other modes trade speed for memory.\nStreaming, which loads a model in pieces while it runs, needs CUDA.")]
         [ManualSettingsOptions(Impl = null, Vals = ["Auto", "Performance", "Balanced", "Aggressive", "Maximum"],
-            ManualNames = ["Auto (recommended)", "Performance (never stream, fail instead)", "Balanced (unload between phases)",
-                "Aggressive (always stream, half-precision caches)", "Maximum (every lever, may spill to a 2nd GPU)"])]
+            ManualNames = ["Auto (recommended)", "Performance (never stream)", "Balanced (unload between stages)",
+                "Aggressive (always stream)", "Maximum (save the most memory)"])]
         public string LowVram = "Auto";
 
-        [ConfigComment("GPU for the text encoders (CLIP / T5 / umT5), separate from the main GPU_ID.\nEmpty (default) = same GPU as everything else.\nSet to another CUDA ordinal (e.g. '1') to keep the multi-GB text encoders off the main card — the biggest VRAM win on video models (Wan's umT5 is T5-XXL-class) and Flux.\nMiniMax-H3 honours this too (its Qwen3-VL encoder is ~15 GB), and because the placement is deliberate the encoder's weights STAY RESIDENT between generations instead of being freed for the DiT — the second card has nothing else competing for the space.\nHeads up on mixed cards: the encoder produces slightly different embeddings on a different GPU architecture, so moving it changes the output for a given seed. It is deterministic run-to-run, just not identical to the same seed on the main card.\nThe number is a CUDA ordinal like GPU_ID (fastest-first, not nvidia-smi order).")]
-        public string TextEncoderGpuId = "";
-
-        [ConfigComment("GPU for the VAE encode/decode, separate from the main GPU_ID.\nEmpty (default) = same GPU as everything else.\nSet to another CUDA ordinal (e.g. '1') to run the decode's large activation footprint off the main card — useful when a big DiT stays resident and the full-res decode would otherwise force an evict/re-upload cycle every generation.\nMiniMax-H3 honours this for BOTH halves (keyframe/reference encode and the video+audio decode), and the weights stay resident between generations for the same reason as TextEncoderGpuId.\nThe latents cross to the other card as host tensors, so the denoise is bit-identical; only the decode kernels differ on a different GPU architecture (measured: a handful of 1/255 steps on H3, no structural change).\nThe number is a CUDA ordinal like GPU_ID (fastest-first, not nvidia-smi order).")]
-        public string VaeGpuId = "";
-
-        [ConfigComment("Second GPU to run CFG's negative-prompt branch on, concurrent with the positive branch on the main GPU_ID — a latency win (not a VRAM win) when the denoiser fits on BOTH cards, since the weights are REPLICATED, not split.\nEmpty (default) = off; CFG runs sequentially on GPU_ID as usual.\nSet to another CUDA ordinal (e.g. '1') to enable it. Wired for Wan video (T2V/TI2V single-expert; A14B MoE falls back to sequential) and Flux true-CFG (negative prompt + CFG > 1; guidance-embedded runs without a real negative branch record 'inapplicable').\nWhen the second card cannot hold a full replica of the denoiser, the generation SUCCEEDS but silently falls back to sequential — check the engine log for the '[CfgParallel]' line ('active' vs 'fell-back(...)') to confirm which path actually ran.\nThe number is a CUDA ordinal like GPU_ID (fastest-first, not nvidia-smi order).")]
-        public string CfgParallelGpuId = "";
-
-        [ConfigComment("Second GPU to pool VRAM with for large DiTs that don't fit on GPU_ID alone — the denoiser's block loop is SPLIT across both cards (not replicated), so this is a VRAM win, not a latency win (sequential pipeline split, same per-step speed as one card).\nVerified end-to-end on real weights for: Krea 2, Qwen-Image (20B — the flagship 'does not fit 24GB' case), MiniMax-H3 (fp8 build only; the bf16 build exceeds any two-consumer-card pool and keeps streaming), and Flux.1 (plain generations only — ControlNet/Kontext/inpaint/regional requests automatically fall back to unsharded with a log line). Chroma and HunyuanImage use the same machinery pending their checkpoints' verification runs.\nSharding disables the per-step CUDA graph and step-cache for the sharded model (a captured graph cannot span devices) — expect eager-path step times.\nEmpty (default) = off.\nSet to another CUDA ordinal (e.g. '1') to enable it. Cannot be combined with CfgParallelGpuId — they are two different ways to use a second GPU for the same model (VRAM pooling vs weight replication for latency) and were not designed to compose; the backend will fail to start if both are set.\nNote this also feeds the same placement list LLM text generation uses for layer-split placement, so enabling it may also change where text models place their layers.\nThe number is a CUDA ordinal like GPU_ID (fastest-first, not nvidia-smi order).")]
-        public string DitShardGpuId = "";
-
-        [ConfigComment("Second GPU to pool VRAM with for large LANGUAGE models (text LLMs and big audio LMs), WITHOUT enabling DiT sharding — the LM's layer stack is SPLIT across both cards (weights pooled, not replicated).\nText models (LLMAssistant etc.) layer-split exactly as they do when DitShardGpuId is set.\nBig audio LMs (YuE's 7B Stage-1 in AudioLab) additionally switch from the single-card Q4_K quantization default to UN-QUANTIZED checkpoint precision (bf16) pooled across both cards — the quality win the pooling exists for. Override the precision with the HARTSY_AUDIO_LM_QUANT env var (q4k|q8|off) on the service if needed.\nEmpty (default) = off. Redundant when DitShardGpuId is already set (that feeds the same shard list); if both are set they must agree.\nThe number is a CUDA ordinal like GPU_ID (fastest-first, not nvidia-smi order).")]
-        public string LmShardGpuId = "";
-
-        [ConfigComment("Path to the compiled kernel directory (the folder CONTAINING 'Ptx' and 'Spirv').\nEmpty = resolve next to the engine assemblies (the extension's own output folder), which is correct for a normal install.")]
-        public string KernelDirectory = "";
-
-        [ConfigComment("How many extra requests may queue up on this backend while one is generating.\n0 means a single live generation with nothing waiting (the scheduler routes further requests to other backends/GPUs immediately).\n1 (default) means a live generation plus one extra waiting in line before further requests route elsewhere.\n-1 makes this a UI-only instance that cannot do actual generations.\nGenerations always run one at a time on this backend (the queue just lets requests wait here instead of being sent elsewhere).")]
-        public int OverQueue = 1;
-
-        [ConfigComment("Per-step progress previews.\nThe Engine decides whether a given pipeline can produce preview pixels; when it doesn't, only the progress bar moves.\nTurn this off to skip JPEG-encoding previews entirely.")]
+        [ConfigComment("Show a preview image while a generation runs.\nTurn it off to save a little time.")]
         public bool Previews = true;
 
-        [ConfigComment("Whether to auto-update the HartsyInference engine (the in-process NuGet library) when this backend starts.\n'false' (default): never check.\n'true': on start, check NuGet for a newer engine build and, if found, download + rebuild the extension against it.\n'aggressive': same as 'true' but also clears the NuGet caches first (fixes a stuck floating-version restore) and automatically restarts SwarmUI to load the new build.\nThe engine is loaded in-process, so a staged update applies on the NEXT SwarmUI restart (a loaded DLL can't hot-swap). With 'true' you'll get a log line telling you to restart; 'aggressive' restarts for you.")]
+        [ConfigComment("Runs the text encoder on this GPU instead of the main one, which frees memory there.\nHelps most with large video models. A different GPU model can change results slightly.")]
+        [SettingsOptions(Impl = typeof(GpuChoices.SecondGpuOptions))]
+        public string TextEncoderGpuId = "";
+
+        [ConfigComment("Runs image and video decoding on this GPU instead of the main one, which frees memory there.\nUseful for large images and long videos.")]
+        [SettingsOptions(Impl = typeof(GpuChoices.SecondGpuOptions))]
+        public string VaeGpuId = "";
+
+        [ConfigComment("Splits a model that is too big for one GPU across the main GPU and this one.\nAdds memory, not speed. Can't be used together with CFG Parallel GPU.")]
+        [SettingsOptions(Impl = typeof(GpuChoices.SecondGpuOptions))]
+        public string DitShardGpuId = "";
+
+        [ConfigComment("Runs the negative prompt on this GPU at the same time as the main GPU, for faster steps.\nThe model must fit on both GPUs, and only some models use it. Can't be used together with Model Split GPU.")]
+        [SettingsOptions(Impl = typeof(GpuChoices.SecondGpuOptions))]
+        public string CfgParallelGpuId = "";
+
+        [ConfigComment("How many more generations can wait on this backend while it is busy.\nWith several backends, 0 sends extra generations to an idle backend right away.")]
+        [ManualSettingsOptions(Impl = null, Vals = ["0", "1", "2", "3", "4", "5"],
+            ManualNames = ["0 (send extras to other backends)", "1 (default)", "2", "3", "4", "5"])]
+        public int OverQueue = 1;
+
+        [ConfigComment("Whether to look for a newer HartsyInference engine when this backend starts.\nA new engine only loads after SwarmUI restarts, so this backend stays off until then.")]
+        [ManualSettingsOptions(Impl = null, Vals = ["false", "true", "aggressive"],
+            ManualNames = ["Don't update (default)", "Update, then wait for you to restart", "Update and restart SwarmUI automatically"])]
         public string AutoUpdate = "false";
+
+        [ConfigComment("Folder that holds the engine's compiled GPU kernels (the folder containing 'Ptx' and 'Spirv').\nLeave it empty, since the kernels ship with the extension. Only for kernels you moved or built yourself.")]
+        [SuggestionPlaceholder(Text = "Automatic (recommended)")]
+        public string KernelDirectory = "";
     }
 
     /// <summary>Builds the ComputeBackend dropdown from the kinds this machine can use, using <see cref="BackendFactory.ValidSelectors"/>.</summary>
@@ -107,7 +116,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         private static readonly Dictionary<string, string> KindLabels = new(StringComparer.OrdinalIgnoreCase)
         {
             ["auto"] = "Auto (recommended)",
-            ["cpu"] = "CPU (slow; F32-only, cannot run fp8/bf16 models)",
+            ["cpu"] = "CPU (very slow, can't run fp8 or bf16 models)",
             ["cuda"] = "CUDA (NVIDIA GPU)",
             ["vulkan"] = "Vulkan (any GPU)",
         };
@@ -152,10 +161,19 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             return ok;
         }
 
-        /// <summary>Names the CUDA card from the engine's <see cref="CudaTopology"/>, which is in CUDA ordinal order.</summary>
+        /// <summary>Says what Auto resolves to here, and names the CUDA card from the engine's <see cref="CudaTopology"/>, which is in CUDA ordinal order.</summary>
         /// <remarks>Not <see cref="NvidiaUtil"/>: nvidia-smi index order can differ from CUDA ordinals, so it could name the wrong card.</remarks>
         private static string Label(string kind)
         {
+            if (kind.Equals("auto", StringComparison.OrdinalIgnoreCase))
+            {
+                return GpuChoices.AutoKind switch
+                {
+                    "cuda" => "Auto: CUDA (recommended)",
+                    "vulkan" => "Auto: Vulkan (recommended)",
+                    _ => "Auto (no usable GPU found)",
+                };
+            }
             string baseLabel = KindLabels.TryGetValue(kind, out string label) ? label : kind;
             if (!kind.Equals("cuda", StringComparison.OrdinalIgnoreCase))
             {
@@ -292,7 +310,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         try
         {
             string requested = Settings?.ComputeBackend?.ToLowerInvariant() ?? "auto";
-            int? deviceOrdinal = ParseGpuId(Settings?.GPU_ID);
+            int? deviceOrdinal = MainGpuOrdinal(requested);
             VramPolicy? vramPolicy = ParseVramSetting(Settings?.LowVram);
 
             // Kernels live in the extension's output dir. BackendFactory resolves them beside the engine assemblies,
@@ -354,39 +372,15 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                     $"{ditShardSelector} (VRAM pooling, not a latency win).");
             }
 
-            // LM-only shard route: same shard device list, no DiT flag. Text LLMs layer-split; big audio LMs
-            // (YuE Stage-1) additionally default to un-quantized weights pooled across the pair.
-            int? lmShardOrdinal = ParseGpuId(Settings?.LmShardGpuId);
-            string lmShardSelector = null;
-            if (lmShardOrdinal.HasValue && lmShardOrdinal != (deviceOrdinal ?? 0))
-            {
-                if (ditShardOrdinal.HasValue && ditShardOrdinal != lmShardOrdinal)
-                {
-                    Status = BackendStatus.ERRORED;
-                    AddLoadStatus($"LmShardGpuId ({lmShardOrdinal}) and DitShardGpuId ({ditShardOrdinal}) point at " +
-                        "different ordinals — they share one shard device list. Set just DitShardGpuId (it implies " +
-                        "the LM split) or make them match.");
-                    return;
-                }
-                lmShardSelector = BackendFactory.WithOrdinal("cuda", lmShardOrdinal.Value);
-                BackendFactory.Validate(lmShardSelector);
-                if (!enableDitSharding)
-                {
-                    AddLoadStatus($"LM sharding enabled: large LMs layer-split across GPU {deviceOrdinal ?? 0} and " +
-                        $"{lmShardSelector} (VRAM pooled; YuE Stage-1 runs un-quantized by default).");
-                }
-            }
-            string shardSelector = ditShardSelector ?? lmShardSelector;
-
-            if (teSelector is not null || vaeSelector is not null || cfgParallelSelector is not null || shardSelector is not null)
+            if (teSelector is not null || vaeSelector is not null || cfgParallelSelector is not null || ditShardSelector is not null)
             {
                 placement = new PlacementConfig
                 {
                     TextEncoderDevice = teSelector,
                     VaeDevice = vaeSelector,
                     CfgParallelDevice = cfgParallelSelector,
-                    ShardDevices = shardSelector is not null
-                        ? new[] { BackendFactory.WithOrdinal(requested, deviceOrdinal ?? 0), shardSelector }
+                    ShardDevices = ditShardSelector is not null
+                        ? new[] { BackendFactory.WithOrdinal(requested, deviceOrdinal ?? 0), ditShardSelector }
                         : Array.Empty<string>(),
                     EnableDitSharding = enableDitSharding,
                 };
@@ -609,6 +603,10 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             ?.GetValue(null) as string;
         return (unavailable.GetValue(null) as string ?? probeFailure)?.Trim() ?? "no reason reported";
     }
+
+    /// <summary>GPU_ID as the device ordinal for <paramref name="selector"/>'s kind, or null on CPU, which has no device to pick.</summary>
+    /// <remarks>A non-zero ordinal on 'cpu' makes <see cref="BackendFactory.WithOrdinal"/> throw, which would stop the backend over a setting CPU ignores.</remarks>
+    private int? MainGpuOrdinal(string selector) => BackendFactory.Kind(selector) == "cpu" ? null : ParseGpuId(Settings?.GPU_ID);
 
     /// <summary>Parses GPU_ID into the device ordinal handed to the Engine. Only the first entry of a comma-separated list is used; null lets the Engine choose.</summary>
     /// <remarks><b>The ordinal is CUDA's, not <c>nvidia-smi</c>'s.</b> CUDA enumerates fastest-first, so on a mixed-GPU host <c>GPU_ID=0</c> may be a different card than <c>nvidia-smi</c> index 0.</remarks>
@@ -2048,7 +2046,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                     // Prefer Init's probed kind: Create would re-resolve 'auto' cheaply, which is the disagreement Init avoids.
                     // Otherwise the annotator could land on CPU, or on a card the probe rejected.
                     string selector = _resolvedComputeKind ?? Settings?.ComputeBackend?.ToLowerInvariant() ?? "auto";
-                    int? ordinal = ParseGpuId(Settings?.GPU_ID);
+                    int? ordinal = MainGpuOrdinal(selector);
                     AddLoadStatus($"Creating ControlNet annotator device (compute='{selector}', device={ordinal?.ToString() ?? "auto"})...");
                     // Create takes only a selector; the ordinal rides as a 'cuda:1' suffix (0 composes back to the bare kind).
                     _preprocessBackend = BackendFactory.Create(BackendFactory.WithOrdinal(selector, ordinal ?? 0));
@@ -2588,8 +2586,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     // ─────────────────────────────── 6. Engine auto-update ───────────────────────────────
 
     /// <summary>Checks NuGet for a newer HartsyInference engine and, when <c>AutoUpdate</c> opts in, stages a rebuild of this extension against it.</summary>
-    /// <remarks>The engine is an in-process library, so a staged update takes effect on the next SwarmUI start. 'aggressive' also clears NuGet caches
-    /// and calls <see cref="Program.RequestRestart"/>. Returns true when a newer engine was staged and this backend must refuse to run on the old one.
+    /// <remarks>The engine is an in-process library, so a staged update takes effect on the next SwarmUI start. 'aggressive' also
+    /// calls <see cref="Program.RequestRestart"/>. Returns true when a newer engine was staged and this backend must refuse to run on the old one.
     /// Returns false when up to date, when staging failed, when a restart is already underway, or when the boot-loop guard trips.</remarks>
     private async Task<bool> MaybeAutoUpdateEngine()
     {

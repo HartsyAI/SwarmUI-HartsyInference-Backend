@@ -10,6 +10,7 @@ using HartsyInference.Engine.Recipes;
 using HartsyInference.Engine.Variants;
 // The class name collides with the trailing namespace segment, so alias it explicitly.
 using SiBackend = Hartsy.Extensions.HartsyInferenceBackend.Backends.HartsyInferenceBackend;
+using GpuChoices = Hartsy.Extensions.HartsyInferenceBackend.Backends.GpuChoices;
 
 namespace Hartsy.Extensions.HartsyInferenceBackend.WebAPI;
 
@@ -28,7 +29,8 @@ public static class HartsyInferenceWebAPI
         API.RegisterAPICall(HartsyInferenceListLoadedPipelines, false, HartsyInferencePermissions.PermAdminHartsyInference);
         API.RegisterAPICall(HartsyInferenceGetDeviceInfo, false, HartsyInferencePermissions.PermAdminHartsyInference);
         API.RegisterAPICall(HartsyInferenceClearCache, true, HartsyInferencePermissions.PermAdminHartsyInference);
-        HartsyLogs.Init("Web API routes registered ('supported-archs', 'probe-model', 'model-features', 'image-inputs', 'list-pipelines', 'device-info', 'clear-cache').");
+        API.RegisterAPICall(HartsyInferenceListGpus, false, Permissions.ViewBackendsList);
+        HartsyLogs.Init("Web API routes registered ('supported-archs', 'probe-model', 'model-features', 'image-inputs', 'list-pipelines', 'device-info', 'clear-cache', 'list-gpus').");
     }
 
     /// <summary>Enumerate every live HartsyInference backend instance with its handler data.</summary>
@@ -306,7 +308,6 @@ public static class HartsyInferenceWebAPI
                 ["vae_gpu_id"] = backend.Settings?.VaeGpuId ?? "",
                 ["cfg_parallel_gpu_id"] = backend.Settings?.CfgParallelGpuId ?? "",
                 ["dit_shard_gpu_id"] = backend.Settings?.DitShardGpuId ?? "",
-                ["lm_shard_gpu_id"] = backend.Settings?.LmShardGpuId ?? "",
                 ["vram_mode"] = backend.Settings?.LowVram ?? "Auto",
                 ["usages"] = data.Usages,
             });
@@ -330,12 +331,27 @@ public static class HartsyInferenceWebAPI
                 ["vae_gpu_id"] = backend.Settings?.VaeGpuId ?? "",
                 ["cfg_parallel_gpu_id"] = backend.Settings?.CfgParallelGpuId ?? "",
                 ["dit_shard_gpu_id"] = backend.Settings?.DitShardGpuId ?? "",
-                ["lm_shard_gpu_id"] = backend.Settings?.LmShardGpuId ?? "",
                 ["vram_mode"] = backend.Settings?.LowVram ?? "Auto",
                 ["status"] = backend.Status.ToString(),
             });
         }
         return new JObject { ["success"] = true, ["devices"] = devices };
+    }
+
+    /// <summary>POST /API/HartsyInferenceListGpus: the GPU choices for one Compute Backend value, so the backend card can relist its
+    /// GPU field when Compute Backend changes. <c>kind</c> is the kind those choices belong to, with Auto resolved.</summary>
+    /// <remarks>Same permission as listing backend types, which already carry these choices for Auto.</remarks>
+    public static async Task<JObject> HartsyInferenceListGpus(Session session, string compute_backend = "auto")
+    {
+        await Task.CompletedTask;
+        (string kind, IReadOnlyList<GpuChoices.Choice> choices) = GpuChoices.ForCompute(compute_backend);
+        return new JObject
+        {
+            ["success"] = true,
+            ["kind"] = kind,
+            ["values"] = new JArray(choices.Select(c => c.Value)),
+            ["names"] = new JArray(choices.Select(c => c.Name)),
+        };
     }
 
     /// <summary>POST /API/HartsyInferenceClearCache: evict the pipeline cache. <paramref name="backend_id"/>
