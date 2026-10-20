@@ -34,9 +34,13 @@ Real overrides on `AbstractT2IBackend` / `AbstractBackend`, all implemented in t
 
 Nested `AutoConfiguration` class, persisted to `Data/Backends.fds`. The real fields today:
 
-`ComputeBackend`, `GPU_ID`, `LowVram`, `TextEncoderGpuId`, `VaeGpuId`, `CfgParallelGpuId`,
-`DitShardGpuId`, `LmShardGpuId`, `KernelDirectory`, `OverQueue` (int), `Previews` (bool),
-`AutoUpdate`.
+`ComputeBackend`, `GPU_ID`, `LowVram`, `Previews` (bool), `TextEncoderGpuId`, `VaeGpuId`,
+`DitShardGpuId`, `CfgParallelGpuId`, `OverQueue` (int), `AutoUpdate`, `KernelDirectory`.
+`Assets/hartsy-backend-card.js` groups them into the card's Basics, Multi-GPU and Advanced
+sections, and `Backends/GpuChoices.cs` fills the GPU dropdowns from the engine's device lists.
+
+`LmShardGpuId` was removed: nothing this backend runs reads the LM shard list (only AudioLab's
+YuE and CosyVoice do), and a value saved before the removal is ignored on load.
 
 There is no dtype field and no tile-VAE-threshold field — those existed early on and were
 removed because the engine never read them (dtype is per-model engine policy; VAE tiling is
@@ -45,7 +49,7 @@ decided from measured VRAM, not a pixel threshold). See
 note and for how params surface in the Swarm UI generally.
 
 The four GPU-placement fields (`TextEncoderGpuId`, `VaeGpuId`, `CfgParallelGpuId`,
-`DitShardGpuId`/`LmShardGpuId`) are documented in depth in
+`DitShardGpuId`) are documented in depth in
 [`15-Two-GPU-Setups.md`](./15-Two-GPU-Setups.md) — what each one buys you, the VRAM-vs-latency
 tradeoff, and quality deltas across mixed GPU architectures. This doc covers only how `Init`
 turns them into a `PlacementConfig` (next section).
@@ -59,16 +63,15 @@ turns them into a `PlacementConfig` (next section).
    the engine is an in-process library, so a fetched update can't hot-swap into the running
    process. See section 6 of the source file for the update/restart-loop-guard mechanics.
 3. Resolves `ComputeBackend` and `GPU_ID` into a requested backend string and an optional
-   device ordinal, and resolves `LowVram` into a `LowVramMode?` override.
+   device ordinal (none on CPU, which ignores `GPU_ID`), and resolves `LowVram` into a `LowVramMode?` override.
 4. Calls `BackendFactory.Validate(...)` on the main device **eagerly, before constructing the
    Engine**. The Engine builds its device lazily on first use, so without this eager check a
    bad `GPU_ID` would report `Status = RUNNING` and only fail mid-generation; validating here
    means a bad config shows up as `ERRORED` at startup instead.
 5. Repeats that same eager `BackendFactory.Validate` for each optional placement selector that
-   differs from the main ordinal — text-encoder GPU, VAE GPU, CFG-parallel GPU, DiT/LM shard
-   GPU — building up a `PlacementConfig` as it goes. `DitShardGpuId` and `LmShardGpuId` share
-   one shard-device list; if both are set and point at different ordinals, `Init` sets
-   `Status = ERRORED` and refuses rather than picking one silently.
+   differs from the main ordinal (text-encoder GPU, VAE GPU, CFG-parallel GPU, DiT shard GPU),
+   building up a `PlacementConfig` as it goes. DiT sharding and CFG parallelism cannot be
+   combined: the engine rejects that placement, and `Init` reports `ERRORED`.
 6. Refuses to start if `ComputeBackend` resolves to `cpu` when something other than `cpu` was
    requested — i.e., `'auto'` silently degraded because CUDA wasn't available. The CPU kernels
    are F32-only; loading fp8/bf16 checkpoint weights through them reads past the end of the

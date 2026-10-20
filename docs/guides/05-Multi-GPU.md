@@ -1,48 +1,73 @@
 # Multi-GPU
 
-HartsyInference supports two ways to use more than one GPU:
+HartsyInference can use more than one GPU in two ways:
 
 - **Separate jobs:** one backend per GPU. Different generations run on different cards at the same time.
-- **One job across cards:** one backend uses a second GPU for parts of the same generation.
+- **One job across cards:** one backend puts parts of the same generation on a second GPU.
 
 ## Separate jobs
 
 1. Add a HartsyInference backend for each GPU.
-2. Give each backend its own `GPU_ID`, starting from `0`.
-3. Leave the other GPU fields empty.
+2. On each backend, pick a different GPU in **GPU**. The list names each card.
+3. Leave the **Multi-GPU** section on **None**.
+4. Optional: under **Advanced**, set **Queue Size** to `0` on each backend. A second generation then goes to the idle GPU right away instead of waiting behind the first.
 
-SwarmUI sends each generation to a free backend. If you are not sure which card a number refers to, start one generation on each backend and watch `nvidia-smi` to see which card is busy. CUDA lists the fastest card first, so the order can differ from `nvidia-smi`.
+SwarmUI sends each generation to a free backend. The extension also checks whether the model fits each card's memory, so a large model is not sent to a small card just because that card was free.
+
+Under Vulkan, the first entry in **GPU** is **Auto**, which lets the engine pick the best GPU. The GPU that Vulkan lists first can only be reached through Auto. When a backend starts, its log names the GPU it uses.
 
 ## One job across two cards
 
-Set these fields on a single backend:
+These settings are in the card's **Multi-GPU** section. They need two NVIDIA GPUs that work with CUDA. When this machine does not have them, the section is greyed out and says why.
 
-| Field | Use it when |
-| --- | --- |
-| `TextEncoderGpuId` | Text encoders take a large share of VRAM, as with video models and FLUX. |
-| `VaeGpuId` | Decoding large images or video needs room on the main card. |
-| `DitShardGpuId` | The diffusion model is too large for one card. |
-| `LmShardGpuId` | A large language or audio language model needs more memory. |
-| `CfgParallelGpuId` | The model fits on both cards and you want faster steps. |
+Each list names your CUDA GPUs. The main GPU is marked `(main GPU)` and cannot be picked, because placing a part on the main GPU does nothing.
 
-Rules:
+| Setting | Saved as | Use it when |
+| --- | --- | --- |
+| Text Encoder GPU | `TextEncoderGpuId` | The text encoder takes a large share of memory, as with big video models. |
+| VAE GPU | `VaeGpuId` | Decoding large images or long videos needs room on the main GPU. |
+| Model Split GPU | `DitShardGpuId` | The model is too large for one GPU. |
+| CFG Parallel GPU | `CfgParallelGpuId` | The model fits on both GPUs and you want faster steps. |
 
-- `DitShardGpuId` and `CfgParallelGpuId` cannot be set together. The backend fails to start if both are set.
-- `DitShardGpuId` pools memory, so it can let a model run that does not fit on one card. It does not make each step faster.
-- `CfgParallelGpuId` adds speed only when the model fits on both cards. If the second card cannot hold a full copy, the generation still succeeds but runs one pass at a time. The engine log shows `[CfgParallel]` with `active` or `fell-back` to tell you which path ran.
+### Text Encoder GPU
 
-### Models verified with DitShardGpuId
+Runs the text encoder on the second GPU, which frees its memory on the main GPU. A text encoder on its own GPU stays loaded between generations. A different GPU model can change results slightly, but they stay the same from run to run.
+
+When it takes effect, the log says `Text encoder placed off the primary backend`.
+
+### VAE GPU
+
+Runs image and video encoding and decoding on the second GPU. The denoising itself does not change. A different GPU model can change a few pixel values slightly.
+
+When it takes effect, the log says `VAE encode/decode placed off the primary backend`.
+
+### Model Split GPU
+
+Splits the diffusion model across the main GPU and this one, so their memory adds up. It adds memory, not speed: steps are no faster than on one card, and can be a little slower.
+
+Verified models:
 
 - Krea 2
 - Qwen-Image 20B
 - MiniMax H3 (fp8 build)
-- FLUX.1, for plain generations. ControlNet, Kontext, inpainting, and regional prompts run unsharded.
+- FLUX.1, for plain generations. ControlNet, Kontext, inpainting, and regional prompts run unsplit.
 
 Other families may work through the same code path, but these are the ones verified end to end.
 
+### CFG Parallel GPU
+
+Runs the negative prompt pass on this GPU at the same time as the positive pass on the main GPU. It makes steps faster, but the model must fit on both GPUs. It only helps models that run a real negative prompt pass, such as Wan video, or FLUX with a negative prompt and CFG above 1.
+
+If the second GPU cannot hold the whole model, the generation still works but runs one pass at a time. The engine log shows `[CfgParallel]` with `active` or `fell-back`, so you can tell which happened.
+
+### Combinations that do not work
+
+- **Model Split GPU** and **CFG Parallel GPU** cannot be used together, and the backend does not start with both set. The card blocks picking both and explains why.
+- A Multi-GPU setting on the main GPU does nothing. The card marks the main GPU in each list.
+
 ## Check that both cards are used
 
-Start a generation and watch `nvidia-smi` on both cards. A sharded model shows memory on both GPUs. A single-card generation shows memory on one GPU only.
+Start a generation and watch `nvidia-smi`. A split model shows memory on both GPUs. A single-card generation shows memory on one GPU only. CUDA numbers GPUs fastest first, which can differ from the order `nvidia-smi` uses, so match the cards by name.
 
 ## More detail
 

@@ -26,13 +26,15 @@ public static void Register()
     API.RegisterAPICall(HartsyInferenceListLoadedPipelines, false, HartsyInferencePermissions.PermAdminHartsyInference);
     API.RegisterAPICall(HartsyInferenceGetDeviceInfo, false, HartsyInferencePermissions.PermAdminHartsyInference);
     API.RegisterAPICall(HartsyInferenceClearCache, true, HartsyInferencePermissions.PermAdminHartsyInference);
+    API.RegisterAPICall(HartsyInferenceListGpus, false, Permissions.ViewBackendsList);
 }
 ```
 
 The boolean is `isModifying` (true marks the call as a mutation).
 `GetSupportedArchs`, `ProbeModel` and `GetImageInputs` need only `use_hartsyinference`
-(default: power users); the other three need `admin_hartsyinference` (default:
-admins).
+(default: power users); `ListLoadedPipelines`, `GetDeviceInfo` and `ClearCache` need
+`admin_hartsyinference` (default: admins). `ListGpus` needs core's `view_backends_list`,
+the same permission as listing backend types.
 
 ## Routes
 
@@ -284,6 +286,36 @@ construction — so it's the same settings surface as
   ]
 }
 ```
+
+### `HartsyInferenceListGpus`
+
+`Task<JObject> HartsyInferenceListGpus(Session session, string compute_backend = "auto")`
+
+The GPU choices for one Compute Backend value, from `Backends/GpuChoices.cs`. The backend
+card script calls it to relist the GPU dropdown when Compute Backend changes. `kind` is the
+compute kind the choices belong to, with `auto` resolved to the kind it uses on this machine.
+Each list is built once per process from the engine's own device probes.
+
+| | |
+|---|---|
+| Method | POST |
+| Path | `/API/HartsyInferenceListGpus` |
+| Permission | `view_backends_list` |
+| Mutating | false |
+
+**Returns:**
+```json
+{
+  "success": true,
+  "kind": "vulkan",
+  "values": ["0"],
+  "names": ["Auto: NVIDIA GeForce RTX 2060 SUPER (8 GB)"]
+}
+```
+
+Under CUDA, values are CUDA ordinals for the GPUs that pass the engine's test computation.
+Under Vulkan, `0` lets the engine pick, and the rest are the loader's raw indices, without
+software rasterizers. On CPU the single entry is `0`.
 
 ### `HartsyInferenceClearCache`
 
