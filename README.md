@@ -1,263 +1,138 @@
 # HartsyInference for SwarmUI
 
-Generate images, videos, and music locally without managing Python, virtual environments, workflow servers, or a pile of separate add-ons.
-
-HartsyInference is a fast, all-in-one generation backend that runs inside [SwarmUI](https://github.com/mcmonkeyprojects/SwarmUI). You keep the familiar model picker, prompt box, history, previews, and generation controls. HartsyInference handles loading the model and creating the result in the same application.
+Local image, video, and music generation for [SwarmUI](https://github.com/mcmonkeyprojects/SwarmUI), powered by a pure C# inference engine. There is no Python environment, virtual environment, or second server to manage.
 
 ![A Dany fantasy portrait generated locally with Krea 2 and HartsyInference](Assets/readme/dany-hero.png)
 
-## Why HartsyInference feels easier
+![License: MIT](https://img.shields.io/badge/license-MIT-blue) ![Status: beta](https://img.shields.io/badge/status-beta-orange) ![SwarmUI extension](https://img.shields.io/badge/SwarmUI-extension-7c3aed)
 
-A **backend** is the part of SwarmUI that loads a model and turns your prompt into an image, video, or song. HartsyInference gives SwarmUI a local backend built in C#, so there is less to install, start, update, and troubleshoot.
+## Why HartsyInference
 
-| What you get | Why it matters |
+| Feature | What it means |
 | --- | --- |
-| **One application to start** | The generation engine runs inside SwarmUI. There is no second server to launch or keep connected. |
-| **No Python environment** | No virtual environment, package conflicts, or Python version to manage. |
-| **Useful features included** | Editing, inpainting, LoRAs, guided generation, previews, cancellation, and memory handling are available without collecting separate add-ons. |
-| **Automatic memory handling** | Models can use memory-saving behavior when they do not fit normally. Cards with enough room keep the faster path. |
-| **Images, video, and music together** | Use the same Generate tab and output history across supported model types. |
-| **Real multi-GPU support** | Run separate jobs in parallel or split one supported model across two cards. |
+| **One application** | The engine loads inside SwarmUI. You keep the model picker, prompt box, history, and previews you already use. |
+| **No Python** | The engine ships as a NuGet package that this extension references. You do not install it separately. |
+| **Images, video, and music** | One backend covers the image, video, and music model families listed below. |
+| **Memory handling** | `LowVram` streams weights only when a model would not otherwise fit. Cards with room keep the full-speed path. |
+| **Multiple GPUs** | Run separate jobs on separate cards, or split one supported model across two cards. |
 
-## Proof, not promises
+## Quick start
 
-| Example | Result |
+1. [Install the extension](docs/guides/01-Install.md) and restart SwarmUI.
+2. In **Server** > **Backends**, turn on **Show Advanced**, then add **HartsyInference (Pure C# Inference)**.
+3. Put a supported checkpoint in its model folder, refresh the model list, and select **Generate**.
+
+The [first generation guide](docs/guides/02-First-Generation.md) walks through each step with screenshots.
+
+## Requirements
+
+| Item | Details |
 | --- | --- |
-| Krea 2 Turbo | 1024 x 1024 in **4.50 seconds** on an RTX 4090 |
-| Qwen-Image 20B | 1024 x 1024 in **40.9 seconds** on an RTX 4090 |
-| Two-GPU generation | One Krea 2 job split across an RTX 4090 and RTX 3060 |
-| Model coverage | Image, video, editing, restoration, and music families in one backend |
+| SwarmUI | A current install on Windows or Linux. |
+| GPU | An NVIDIA GPU with a recent driver uses CUDA. AMD and Intel GPUs can use Vulkan. `ComputeBackend` set to `auto` tries CUDA, then Vulkan, then CPU. |
+| VRAM | Model size decides what fits. Smaller or quantized checkpoints fit on smaller cards. When a model does not fit, streaming makes it run, but the engine notes streaming is typically 5 to 8 times slower than a fully resident model. |
+| Disk | Model downloads range from a few GB to dozens of GB. |
+| Network | Needed for the first build and for model downloads. |
 
-The benchmark table and testing notes are available [below](#benchmarks).
+Model licenses differ from this extension's license. Check each model's page before you download it or use it commercially.
 
-## What you need
+## Supported models
 
-- A working SwarmUI installation on Windows or Linux.
-- An NVIDIA GPU with a current driver for practical image and video generation.
-- An internet connection for the first build and for model downloads.
-- Free drive space for the models you choose. Individual model downloads can range from a few GB to dozens of GB.
+Support depends on the model family and, for some controls, on the specific checkpoint. SwarmUI only shows controls that the selected model can use.
 
-### A practical hardware guide
-
-Model requirements vary, but these are useful starting points:
-
-| Hardware | What to expect |
+| Type | Families |
 | --- | --- |
-| **12 GB VRAM** | A good starting point for smaller image models and memory-saving versions of larger models. Large models will be slower when weights must move between system memory and the GPU. |
-| **24 GB VRAM** | A much wider choice of image and video models, with more room for full-speed operation. |
-| **Two NVIDIA GPUs** | Optional. Use both for parallel jobs, place parts of a model on different cards, or split a supported large model across them. |
+| **Images** | Stable Diffusion 1.5, SDXL, SD3 and SD3.5, FLUX.1, FLUX.2 (dev and Klein), FLUX.3 Klein, Qwen-Image and Qwen-Image 2.1 (including the Turbo build), Z-Image, Krea 2, Chroma (including Radiance), AuraFlow, F-Lite, Ideogram 4, Boogu, ERNIE-Image, Lumina 2, HunyuanImage 2.1, OmniGen 2, Anima, HiDream-I1, Kandinsky 5, Lance 3B, Lens, MOSS-Image, Mage-Flow |
+| **Video** | Wan 2.1 and 2.2 (text-to-video, VACE, Animate, and speech-to-video), HunyuanVideo, LTX-Video and LTX-Video 2, Kandinsky 5 video (Lite and Pro), Lance 3B video, MiniMax H3 |
+| **Music** | ACE-Step 1.5 and ACE-Step v1, MiniMax Music 3 |
 
-System memory and storage matter too. Larger models need more of both. If you are unsure, start with a smaller or quantized checkpoint and a 1024 x 1024 image.
+Editing and restoration tools appear when the selected model supports them:
 
-HartsyInference ships as a package dependency of this extension. You do not install the engine separately.
-
-> **Current status:** HartsyInference is in beta. Many model families and advanced tools work today, but exact feature support varies by model.
-
-## Installation
-
-### From SwarmUI
-
-Use this method when **SwarmUI-HartsyInference-Backend** appears in SwarmUI's extension list:
-
-1. Open **Server** > **Extensions**.
-2. Find **SwarmUI-HartsyInference-Backend**.
-3. Select **Install**.
-4. Let SwarmUI rebuild, then restart when prompted.
-
-### Manual installation
-
-Close SwarmUI, open a terminal in its extension folder, and clone the repository:
-
-```bash
-cd /path/to/SwarmUI/src/Extensions/
-git clone https://github.com/HartsyAI/SwarmUI-HartsyInference-Backend.git
-```
-
-Extensions are compiled, so restarting by itself is not enough. Rebuild SwarmUI:
-
-- On Windows, run `update-windows.bat` from the main SwarmUI folder.
-- On Linux, run `update-linuxmac.sh` from the main SwarmUI folder.
-
-Start SwarmUI after the build finishes.
-
-## Your first generation
-
-This is the complete path from an installed extension to a finished image.
-
-### 1. Add the backend
-
-1. Open **Server** > **Backends**.
-2. Turn on **Show Advanced**.
-3. Select **HartsyInference (Pure C# Inference)**.
-4. Keep `ComputeBackend`, `GPU_ID`, and `LowVram` at their defaults.
-5. Save and wait for the card to say **running backend**.
-
-For a normal one-GPU setup, leave all fields ending in `GpuId` empty.
-
-### 2. Add or choose a model
-
-HartsyInference uses SwarmUI's normal model folders and model picker. If you already have a compatible local checkpoint, refresh the model list and select it.
-
-For a straightforward first image, use a supported turbo or schnell image checkpoint that fits your GPU. Krea 2 Turbo and Z-Image Turbo are fast choices on higher-memory NVIDIA cards. Model licenses and hardware needs differ, so check the model page before downloading.
-
-Your model root is shown under **Server** > **Server Configuration** > **Paths** > **ModelRoot**. Place the checkpoint in the matching model folder, then refresh SwarmUI's model list.
-
-Some model families need companion files such as a text encoder or VAE. HartsyInference downloads known companion files when possible. If something cannot be prepared automatically, SwarmUI shows what is missing.
-
-### 3. Generate
-
-1. Open **Generate**.
-2. Pick your model.
-3. Enter a prompt.
-4. Select **Generate**.
-
-This example uses Krea 2 Turbo, eight steps, and a 1024 x 1024 canvas:
-
-![Krea 2 generating a Dany fantasy portrait through HartsyInference](Assets/readme/dany-generating.png)
-
-The finished result appears in the normal SwarmUI history. Select it to view the full image, prompt, settings, seed, and generation details.
-
-![The finished Dany fantasy portrait in SwarmUI's image preview](Assets/readme/dany-preview.png)
-
-## What you can create
-
-### Create images from a prompt
-
-Generate with families such as Stable Diffusion 1.5, SDXL, SD3, SD3.5, FLUX.1, FLUX.2, FLUX.3 Klein, Qwen-Image, Qwen-Image 2.1 (and its 8-step Turbo build), Z-Image, Krea 2, Chroma, AuraFlow, Anima, F-Lite, Ideogram 4, HunyuanImage, ERNIE-Image, MOSS-Image (Base and SFT), and Boogu.
-
-### Edit and repair images
-
-- Start from an existing image and control how much it changes.
-- Paint a mask over an area to replace or repair it.
-- Refine one model's result with another supported image model.
-- Enlarge a finished image with Real-ESRGAN or SeedVR2 (**Refiner Upscale** with no refiner model; **Refiner Upscale Method** picks the engine).
-- Cut the subject out as a transparent PNG with **Remove Background**.
-- Make seamless images for repeating textures and backgrounds.
-- Use supported reference-image models for instruction-based edits.
-
-### Guide the composition
-
-- Use pose, depth, edges, line art, soft edges, scribbles, normals, or segmentation maps to guide the result.
-- Use IP-Adapter variants to carry visual style, facial features, or identity from a reference image.
-- Stack supported ControlNets and LoRAs with individual strengths.
-
-These controls use names such as **ControlNet**, **IP-Adapter**, and **LoRA** in SwarmUI. They appear only when the selected model can use them.
-
-### Create and restore video
-
-Supported families include Wan 2.x, Wan VACE, Wan Animate, Wan speech-to-video, LTX-Video, LTX-2, HunyuanVideo, Kandinsky 5, and MiniMax H3.
-
-Depending on the model, SwarmUI can show controls for frame count, frame rate, format, image-to-video, reference media, trimming, boomerang playback, audio, and SeedVR2 restoration.
-
-### Create music
-
-ACE-Step checkpoints generate music from the normal Generate tab. Music controls appear after you choose a compatible model.
-
-### Stay in control
-
-HartsyInference supports live previews, cancellation, variation seeds, early step stopping, and readable errors. If a model cannot use a requested feature, the backend explains the problem instead of quietly ignoring the setting.
-
-## Backend settings
-
-Most users only need the defaults:
-
-| Setting | Default | What it does |
-| --- | --- | --- |
-| `ComputeBackend` | `auto` | Chooses the best available compute option. |
-| `GPU_ID` | `0` | Chooses the main GPU. |
-| `LowVram` | `auto` | Saves memory only when the model would not otherwise fit. |
-| `OverQueue` | `1` | Lets one request wait behind the active generation. |
-| `Previews` | on | Shows progress previews while generating. |
-| `AutoUpdate` | `false` | Keeps engine updates manual. |
-
-## Use more than one GPU
-
-### Run separate jobs at the same time
-
-Add one HartsyInference backend for each GPU. Give each backend a different `GPU_ID`. SwarmUI can then send different generations to different cards.
-
-### Split one model across two GPUs
-
-One backend can use a second GPU for the same generation:
-
-| Setting | Use it for |
-| --- | --- |
-| `TextEncoderGpuId` | Move prompt processing to a second GPU. |
-| `VaeGpuId` | Move image or video encoding and decoding to a second GPU. |
-| `DitShardGpuId` | Split a supported image or video model across two GPUs to combine their available memory. |
-| `LmShardGpuId` | Split a supported language or audio model across two GPUs. |
-| `CfgParallelGpuId` | Run two guidance passes at once when both cards can hold the model. |
-
-This backend used GPU 1 as the denoiser shard for a Krea 2 generation:
-
-![HartsyInference configured to shard a model onto a second GPU](Assets/readme/hartsy-backend-sharding.png)
-
-During that same job, SwarmUI showed both GPUs holding model data:
-
-![An RTX 4090 and RTX 3060 sharing one HartsyInference generation](Assets/readme/two-gpu-sharding.png)
-
-Sharding is mainly a way to gain memory. It does not always improve speed. See the [two-GPU guide](docs/15-Two-GPU-Setups.md) for examples and limits.
+- **Image to image:** start from an existing image and control how much it changes.
+- **Inpainting:** paint a mask over an area to replace or repair it, with grow, shrink, blur, and crop-to-mask controls.
+- **Refiner:** refine a result with a second supported image model.
+- **Upscale:** enlarge a finished image with Real-ESRGAN or SeedVR2 when no refiner model is set.
+- **Remove Background:** cut the subject out as a transparent PNG.
+- **Seamless tiling:** make images that repeat cleanly for textures and backgrounds.
+- **Guidance:** ControlNet, IP-Adapter, and LoRA, each with its own strength, when the model supports them.
 
 ## Benchmarks
 
-These results use the same request through the SwarmUI API on an RTX 4090. Each number is the warm median of three runs.
+These numbers come from the engine's [image scoreboard](https://github.com/HartsyAI/HartsyInference/blob/main/benchmarks/scoreboards/IMAGE.md). Each row is measured on an RTX 4090, with the same request sent through the SwarmUI API to HartsyInference and to ComfyUI. Each value is the warm median of three runs after one cold run. The faster time is in bold.
 
-| Model | Size | Steps | HartsyInference | ComfyUI |
-| --- | ---: | ---: | ---: | ---: |
-| Z-Image Turbo | 1024 x 1024 | 8 | **2.95 s** | 3.1 s |
-| Krea 2 Turbo | 1024 x 1024 | 8 | **4.50 s** | 6.5 s |
-| Qwen-Image 20B GGUF | 1024 x 1024 | 20 | **40.9 s** | 54.8 s |
+| Model | Steps | HartsyInference | ComfyUI |
+| --- | ---: | ---: | ---: |
+| Krea 2 Turbo | 8 | **4.5 s** | 6.5 s |
+| FLUX.1 Dev | 20 | **9.5 s** | 12.5 s |
+| Qwen-Image | 20 | **40.6 s** | 58.2 s |
+| Z-Image Turbo | 8 | 4.2 s | **3.1 s** |
+| SDXL | 20 | 10.9 s | **7.5 s** |
 
-Hardware, checkpoint format, available memory, drivers, and generation settings can change performance. Full test settings and newer results are in the [HartsyInference performance guide](https://github.com/HartsyAI/HartsyInference/blob/main/docs/PERFORMANCE.md) and [benchmark results](https://github.com/HartsyAI/HartsyInference/tree/main/benchmarks/results).
+HartsyInference is not faster on every model. The scoreboard lists every measured family, including the ones where ComfyUI is faster. Results depend on hardware, checkpoint format, drivers, and generation settings.
+
+## Backend settings
+
+Most people only need the defaults.
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `ComputeBackend` | `auto` | Picks CUDA, Vulkan, or CPU. Only options the machine can actually use are listed. |
+| `GPU_ID` | `0` | The GPU this backend uses. Run one backend per GPU. |
+| `LowVram` | `Auto` | How much the engine streams weights to save VRAM. `Auto` only streams when a model needs it. |
+| `OverQueue` | `1` | How many extra requests may wait behind the active generation. |
+| `Previews` | on | Shows per-step previews while a generation runs. |
+| `AutoUpdate` | `false` | Keeps engine updates manual. |
+
+Every field is explained in the [backend settings guide](docs/guides/03-Backend-Settings.md).
+
+## Use more than one GPU
+
+The simplest setup is one backend per GPU. Give each backend its own `GPU_ID`, and SwarmUI sends different generations to different cards.
+
+One backend can also use a second GPU for the same generation:
+
+| Setting | What it moves to the second GPU |
+| --- | --- |
+| `TextEncoderGpuId` | Text encoders (CLIP, T5, and similar). |
+| `VaeGpuId` | Image or video encoding and decoding. |
+| `DitShardGpuId` | The diffusion model itself, split across both cards to pool their memory. Verified for Krea 2, Qwen-Image 20B, MiniMax H3 (fp8), and FLUX.1 without ControlNet or inpaint. |
+| `LmShardGpuId` | Large language or audio language models, split across both cards. |
+| `CfgParallelGpuId` | The negative-prompt guidance pass, run alongside the positive pass. This speeds up generation when the model fits on both cards. |
+
+`DitShardGpuId` and `CfgParallelGpuId` cannot be set together. Sharding mainly adds memory, and does not always make generation faster. See the [multi-GPU guide](docs/guides/05-Multi-GPU.md) and the [two-GPU setup notes](docs/15-Two-GPU-Setups.md).
 
 ## Troubleshooting
 
-### The backend type is missing
+| Symptom | What to do |
+| --- | --- |
+| The HartsyInference backend type is missing | Turn on **Show Advanced** under **Server** > **Backends**. If it is still missing, check **Server** > **Logs** for build errors and restart SwarmUI. |
+| The extension does not load | Check **Server** > **Logs** for `Build of extension project` or `Failed to build extension`. Fix the reported error, then restart. |
+| The model is not listed | Confirm the file is inside your model root and in the right folder. Select the main checkpoint, not a VAE or text encoder. Refresh the model list. |
+| A control does not appear | Select the model first. SwarmUI shows controls based on the selected model. |
+| The model runs out of memory | Keep `LowVram` on `Auto`. Close other GPU programs, or try a smaller size or a smaller model. |
+| `ComputeBackend` does not offer CUDA | The list is built when SwarmUI starts. Fix the driver, then restart SwarmUI. |
 
-Turn on **Show Advanced** under **Server** > **Backends**. If it is still missing, rebuild SwarmUI and check **Server** > **Logs** for extension build errors.
+More detail is in the [troubleshooting guide](docs/guides/06-Troubleshooting.md). When you report a problem, include your OS, GPU, model name, generation settings, and the HartsyInference lines from **Server** > **Logs**. Do not post private prompts, images, or API keys.
 
-### The backend does not start
+## Documentation
 
-- Update your NVIDIA driver.
-- Keep `ComputeBackend` set to `auto`.
-- Confirm `GPU_ID` points to a real GPU.
-- Open **Server** > **Logs** and search for `HartsyInference`.
-- Rebuild SwarmUI after updating the extension or engine package.
+**Guides for users**
 
-### A model is missing
+- [01: Install](docs/guides/01-Install.md)
+- [02: First generation](docs/guides/02-First-Generation.md)
+- [03: Backend settings](docs/guides/03-Backend-Settings.md)
+- [04: Model folders](docs/guides/04-Model-Folders.md)
+- [05: Multi-GPU](docs/guides/05-Multi-GPU.md)
+- [06: Troubleshooting](docs/guides/06-Troubleshooting.md)
 
-- Confirm the checkpoint is under the configured SwarmUI model root.
-- Put it in the correct model folder.
-- Refresh the model list.
-- Make sure you selected the main checkpoint rather than a companion VAE or text encoder.
+**Reference for developers**
 
-### The model runs out of memory
-
-- Keep `LowVram` set to `auto`.
-- Close other programs using the GPU.
-- Try a smaller resolution, fewer video frames, or a smaller model version.
-- Use a second GPU for placement or sharding when available.
-
-### A control does not appear
-
-Choose the model first. SwarmUI shows controls based on what the selected model supports.
-
-### Report a problem
-
-Open an issue in this repository with your operating system, GPU, model name, generation settings, and the related HartsyInference lines from **Server** > **Logs**. Do not post private prompts, images, access tokens, or API keys.
-
-## More documentation
-
-The README covers installation and everyday use. Deeper references are available in [`docs/`](docs/):
-
+- [Overview](docs/00-Overview.md) and [architecture](docs/01-Architecture.md)
 - [Backend lifecycle](docs/06-Backend-Lifecycle.md)
 - [Parameters and feature flags](docs/07-Parameters-And-Feature-Flags.md)
 - [Web API routes](docs/08-Web-API-Routes.md)
 - [Known issues](docs/14-Known-Issues-And-TODO.md)
-- [Two-GPU setups](docs/15-Two-GPU-Setups.md)
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
-
-Model files keep their own licenses. Check each model's terms before using it, especially for commercial work.
+This extension is licensed under the [MIT License](LICENSE). Model files keep their own licenses.
