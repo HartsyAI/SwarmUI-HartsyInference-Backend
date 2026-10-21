@@ -15,7 +15,7 @@ SwarmUI sends each generation to a free backend. If you are not sure which card 
 
 ## One job across two cards
 
-Set these fields on a single backend:
+Set these fields on a single backend. They use CUDA, so they need two NVIDIA GPUs that work with CUDA. On a backend that uses Vulkan, setting any of them stops the backend with an error.
 
 | Field | Use it when |
 | --- | --- |

@@ -1,6 +1,6 @@
 # Model Folders
 
-HartsyInference uses SwarmUI's normal model folders. If a checkpoint shows up in SwarmUI's model list, HartsyInference can load it.
+HartsyInference uses SwarmUI's normal model folders. SwarmUI's model list shows every checkpoint in those folders, but this backend only runs the model families listed in the [README](../../README.md#supported-models). A checkpoint from another family still appears in the list, and this backend refuses to load it.
 
 ## Where the model root is
 
@@ -24,7 +24,7 @@ These are the folder names from SwarmUI's default path settings.
 
 A setting with a semicolon searches each listed folder.
 
-Video models follow SwarmUI's [video model guide](https://github.com/mcmonkeyprojects/SwarmUI/blob/master/docs/Video%20Model%20Support.md), which saves them to a `diffusion_models` folder under the model root.
+Video models do not share one folder. Each family has its own location. For example, LTX-Video and LTX-2.3 go in `Stable-Diffusion`, while LTX-2.5 and HunyuanVideo go in `diffusion_models`. Check your family's section in SwarmUI's [video model guide](https://github.com/mcmonkeyprojects/SwarmUI/blob/master/docs/Video%20Model%20Support.md) before you copy a video file.
 
 ## Add a checkpoint
 
