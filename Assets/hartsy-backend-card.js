@@ -306,6 +306,7 @@ class HartsyBackendCard {
             gpu.dataset.hartsySig = signature;
             if (reset && !list.values.includes(current)) {
                 gpu.value = list.values[0];
+                this.clearMainGpuChoices(cardBody);
             }
             else {
                 this.selectOrAdd(gpu, current);
