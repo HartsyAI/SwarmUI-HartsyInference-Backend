@@ -14,15 +14,15 @@ The HartsyInference backend type is hidden until you turn on **Show Advanced**.
 ## 2. Add the HartsyInference backend
 
 1. Select **HartsyInference (Pure C# Inference)**. A new backend card appears.
-2. Keep the defaults:
-   - `ComputeBackend`: `auto`
-   - `GPU_ID`: `0`
-   - `LowVram`: `Auto (recommended)`
+2. Keep the defaults in the **Basics** section:
+   - **Compute Backend**: Auto
+   - **GPU**: the GPU you want to use. With one GPU, keep the first entry.
+   - **VRAM Mode**: Auto (recommended)
 3. Save the backend. Wait until the card shows that the backend is running.
 
 <!-- TODO screenshot: the new HartsyInference backend card, with the default settings visible and the status showing running. Capture at 2x on a 1440 px wide window. -->
 
-For a single GPU, leave the other GPU fields empty. The [backend settings guide](03-Backend-Settings.md) explains every field.
+For a single GPU, leave the **Multi-GPU** section on **None**. The [backend settings guide](03-Backend-Settings.md) explains every field.
 
 ## 3. Put a model in the right folder
 

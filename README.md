@@ -72,34 +72,33 @@ HartsyInference is not faster on every model. The scoreboard lists every measure
 
 ## Backend settings
 
-Most people only need the defaults.
+Most people only need the defaults. The card groups its settings into **Basics**, **Multi-GPU**, and **Advanced**, and each `?` links to the guide.
 
 | Setting | Default | What it does |
 | --- | --- | --- |
-| `ComputeBackend` | `auto` | Picks CUDA, Vulkan, or CPU. Only options the machine can actually use are listed. |
-| `GPU_ID` | `0` | The GPU this backend uses. Run one backend per GPU. |
-| `LowVram` | `Auto` | How much the engine streams weights to save VRAM. `Auto` only streams when a model needs it. |
-| `OverQueue` | `1` | How many extra requests may wait behind the active generation. |
-| `Previews` | on | Shows per-step previews while a generation runs. |
-| `AutoUpdate` | `false` | Keeps engine updates manual. |
+| Compute Backend | Auto | Picks CUDA, Vulkan, or CPU. Only options the machine can actually use are listed. |
+| GPU | `0` | The GPU this backend uses, listed by name. Run one backend per GPU. |
+| VRAM Mode | Auto | How hard the engine works to fit models into GPU memory. Auto only saves memory when a model needs it. |
+| Previews | On | Shows a preview image while a generation runs. |
+| Queue Size (Advanced) | `1` | How many more generations may wait on this backend while it is busy. |
+| Engine Updates (Advanced) | Don't update | Keeps engine updates manual. |
 
-Every field is explained in the [backend settings guide](docs/guides/03-Backend-Settings.md).
+Every setting is explained in the [backend settings guide](docs/guides/03-Backend-Settings.md).
 
 ## Use more than one GPU
 
-The simplest setup is one backend per GPU. Give each backend its own `GPU_ID`, and SwarmUI sends different generations to different cards.
+The simplest setup is one backend per GPU. Pick a different **GPU** on each backend, and SwarmUI sends different generations to different cards.
 
-One backend can also use a second GPU for the same generation:
+One backend can also use a second NVIDIA GPU for the same generation, from the card's **Multi-GPU** section:
 
 | Setting | What it moves to the second GPU |
 | --- | --- |
-| `TextEncoderGpuId` | Text encoders (CLIP, T5, and similar). |
-| `VaeGpuId` | Image or video encoding and decoding. |
-| `DitShardGpuId` | The diffusion model itself, split across both cards to pool their memory. Verified for Krea 2, Qwen-Image 20B, MiniMax H3 (fp8), and FLUX.1 without ControlNet or inpaint. |
-| `LmShardGpuId` | Large language or audio language models, split across both cards. |
-| `CfgParallelGpuId` | The negative-prompt guidance pass, run alongside the positive pass. This speeds up generation when the model fits on both cards. |
+| Text Encoder GPU | Text encoders (CLIP, T5, and similar). |
+| VAE GPU | Image or video encoding and decoding. |
+| Model Split GPU | The diffusion model itself, split across both cards to pool their memory. Verified for Krea 2, Qwen-Image 20B, MiniMax H3 (fp8), and FLUX.1 without ControlNet or inpaint. |
+| CFG Parallel GPU | The negative-prompt guidance pass, run alongside the positive pass. This speeds up generation when the model fits on both cards. |
 
-`DitShardGpuId` and `CfgParallelGpuId` cannot be set together. Sharding mainly adds memory, and does not always make generation faster. See the [multi-GPU guide](docs/guides/05-Multi-GPU.md) and the [two-GPU setup notes](docs/15-Two-GPU-Setups.md).
+Model Split GPU and CFG Parallel GPU cannot be set together. Sharding mainly adds memory, and does not always make generation faster. See the [multi-GPU guide](docs/guides/05-Multi-GPU.md) and the [two-GPU setup notes](docs/15-Two-GPU-Setups.md).
 
 ## Troubleshooting
 
@@ -109,8 +108,8 @@ One backend can also use a second GPU for the same generation:
 | The extension does not load | Check **Server** > **Logs** for `Build of extension project` or `Failed to build extension`. Fix the reported error, then restart. |
 | The model is not listed | Confirm the file is inside your model root and in the right folder. Select the main checkpoint, not a VAE or text encoder. Refresh the model list. |
 | A control does not appear | Select the model first. SwarmUI shows controls based on the selected model. |
-| The model runs out of memory | Keep `LowVram` on `Auto`. Close other GPU programs, or try a smaller size or a smaller model. |
-| `ComputeBackend` does not offer CUDA | The list is built when SwarmUI starts. Fix the driver, then restart SwarmUI. |
+| The model runs out of memory | Keep **VRAM Mode** on Auto. Close other GPU programs, or try a smaller size or a smaller model. |
+| **Compute Backend** does not offer CUDA | The list is built when SwarmUI starts, and the log says why CUDA was left out. Fix the driver, then restart SwarmUI. NVIDIA cards older than the engine's CUDA kernels run on Vulkan instead. |
 
 More detail is in the [troubleshooting guide](docs/guides/06-Troubleshooting.md). When you report a problem, include your OS, GPU, model name, generation settings, and the HartsyInference lines from **Server** > **Logs**. Do not post private prompts, images, or API keys.
 

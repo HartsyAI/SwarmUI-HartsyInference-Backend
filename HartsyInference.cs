@@ -197,6 +197,9 @@ public class HartsyInference : Extension
         // Model-aware param visibility. "hartsyinference" only means "our backend is running", so without
         // this every param below shows under every model. See Assets/hartsy-params.js.
         ScriptFiles.Add("Assets/hartsy-params.js");
+        // Sections, plain labels, guide links and GPU lists for the backend card under Server > Backends.
+        ScriptFiles.Add("Assets/hartsy-backend-card.js");
+        StyleSheetFiles.Add("Assets/hartsy-backend-card.css");
 
         RegisterParameterRemaps();
 
@@ -248,7 +251,7 @@ public class HartsyInference : Extension
 
         AnimatePoseVideoParam = T2IParamTypes.Register<Image>(new(
             "Animate Pose Video",
-            "Wan-Animate: an already-rendered pose/skeleton driving video (OpenPose/DWPose colored limbs).\nOverrides auto-preprocessing for the pose branch — supply this when you have a pre-rendered skeleton.",
+            "Wan-Animate: an already-rendered pose/skeleton driving video (OpenPose/DWPose colored limbs).\nOverrides auto-preprocessing for the pose branch. Supply this when you have a pre-rendered skeleton.",
             null,
             Toggleable: true,
             Group: WanAnimateParamGroup,
@@ -291,7 +294,7 @@ public class HartsyInference : Extension
         // control a user needs; the context length is the fidelity/cost knob and stays at the reference default.
         AnimateTotalFramesParam = T2IParamTypes.Register<int>(new(
             "Animate Total Frames",
-            "Wan-Animate: total length of the finished video, generated as back-to-back chunks of 'Video Frames' each.\nLeave off (or at or below Video Frames) for a single chunk. Every chunk after the first re-renders and discards a short motion-context prefix, so the driving video must be at least this long — a shorter one freezes on its last frame.",
+            "Wan-Animate: total length of the finished video, generated as back-to-back chunks of 'Video Frames' each.\nLeave off (or at or below Video Frames) for a single chunk. Every chunk after the first re-renders and discards a short motion-context prefix, so the driving video must be at least this long. A shorter one freezes on its last frame.",
             "0", Min: 0, Max: 2048, Step: 4,
             Toggleable: true,
             Group: WanAnimateParamGroup,
@@ -311,7 +314,7 @@ public class HartsyInference : Extension
 
         AnimateColorCorrectionParam = T2IParamTypes.Register<double>(new(
             "Animate Color Correction",
-            "Wan-Animate chunked generation: strength of the per-chunk color correction. Each chunk after the first is color-matched (Lab mean/std) to the reference image, so color drift cannot compound across chunks.\n1 (default) = fully matched, 0 = off. Only multi-chunk (Total Frames) generations are affected — the first chunk is never touched.",
+            "Wan-Animate chunked generation: strength of the per-chunk color correction. Each chunk after the first is color-matched (Lab mean/std) to the reference image, so color drift cannot compound across chunks.\n1 (default) = fully matched, 0 = off. Only multi-chunk (Total Frames) generations are affected, and the first chunk is never touched.",
             "1", Min: 0, Max: 1, Step: 0.05,
             Toggleable: true,
             Group: WanAnimateParamGroup,
@@ -321,7 +324,7 @@ public class HartsyInference : Extension
 
         AnimatePoseStrengthParam = T2IParamTypes.Register<double>(new(
             "Animate Pose Strength",
-            "Wan-Animate-2: how strongly the driving video's motion steers the generation (ComfyUI pose_strength) — above 1 over-drives the motion, below 1 under-drives it, and 0 does not fully mute the driving branch.\n1 (default) is the trained behaviour. This is a deliberate stylization knob, NOT a fix for washed-out or hazy output — that comes from running a checkpoint at the wrong steps/CFG, not from strength.\nAnimate-2 checkpoints only; Wan-Animate V1 refuses a non-default value.",
+            "Wan-Animate-2: how strongly the driving video's motion steers the generation (ComfyUI pose_strength). Above 1 over-drives the motion, below 1 under-drives it, and 0 does not fully mute the driving branch.\n1 (default) is the trained behaviour. This is a deliberate stylization knob, NOT a fix for washed-out or hazy output, which comes from running a checkpoint at the wrong steps/CFG, not from strength.\nAnimate-2 checkpoints only; Wan-Animate V1 refuses a non-default value.",
             "1", Min: 0, Max: 2, Step: 0.05,
             Toggleable: true,
             Group: WanAnimateParamGroup,
@@ -331,7 +334,7 @@ public class HartsyInference : Extension
 
         AnimateReferenceStrengthParam = T2IParamTypes.Register<double>(new(
             "Animate Reference Strength",
-            "Wan-Animate-2: how strongly the character reference image is attended (ComfyUI reference_image_strength) — above 1 weights identity harder, below 1 loosens it.\n1 (default) is the trained behaviour. This is a deliberate stylization knob, NOT a fix for washed-out or hazy output — that comes from running a checkpoint at the wrong steps/CFG, not from strength.\nAnimate-2 checkpoints only; Wan-Animate V1 refuses a non-default value.",
+            "Wan-Animate-2: how strongly the character reference image is attended (ComfyUI reference_image_strength). Above 1 weights identity harder, below 1 loosens it.\n1 (default) is the trained behaviour. This is a deliberate stylization knob, NOT a fix for washed-out or hazy output, which comes from running a checkpoint at the wrong steps/CFG, not from strength.\nAnimate-2 checkpoints only; Wan-Animate V1 refuses a non-default value.",
             "1", Min: 0, Max: 2, Step: 0.05,
             Toggleable: true,
             Group: WanAnimateParamGroup,
@@ -375,7 +378,7 @@ public class HartsyInference : Extension
 
         CfgRescaleParam = T2IParamTypes.Register<double>(new(
             "CFG Rescale",
-            "Pulls a high-CFG-Scale guided prediction back toward the conditional prediction's magnitude, reducing the oversaturated/burnt-highlights look that high CFG Scale causes.\n0 (default) = off. 0.7 is a reasonable starting point at CFG Scale 10+. Only SDXL honors this today.\nNot the same math as ComfyUI's RescaleCFG node — this rescales per-token L2 norm, not per-sample standard deviation — so the same numeric value produces a different-strength effect.",
+            "Pulls a high-CFG-Scale guided prediction back toward the conditional prediction's magnitude, reducing the oversaturated/burnt-highlights look that high CFG Scale causes.\n0 (default) = off. 0.7 is a reasonable starting point at CFG Scale 10+. Only SDXL honors this today.\nNot the same math as ComfyUI's RescaleCFG node (this rescales per-token L2 norm, not per-sample standard deviation), so the same numeric value produces a different-strength effect.",
             "0", Min: 0, Max: 1, Step: 0.05,
             Toggleable: true,
             Group: T2IParamTypes.GroupAlternateGuidance,
@@ -416,7 +419,7 @@ public class HartsyInference : Extension
 
         Ideogram4MagicPromptParam = T2IParamTypes.Register<bool>(new(
             "Ideogram 4 Magic Prompt",
-            "Rewrite your plain prompt into Ideogram 4's structured JSON caption using a running LLM backend, the way Ideogram's own stack does.\nRequires an LLM backend (Server > Backends — LlamaSharp, Anthropic, or remote). When off (default), your prompt is sent to the model as-is (which also works).",
+            "Rewrite your plain prompt into Ideogram 4's structured JSON caption using a running LLM backend, the way Ideogram's own stack does.\nRequires an LLM backend (Server > Backends: LlamaSharp, Anthropic, or remote). When off (default), your prompt is sent to the model as-is (which also works).",
             "false",
             // Toggleable: a flagged param that is always sent would force "hartsyinference" onto every generation
             // and refuse the Comfy backend, which lacks the flag.
@@ -440,7 +443,7 @@ public class HartsyInference : Extension
             Description: "Per-generation overrides of this backend's VRAM mode. Every setting here defaults to "
                 + "following the backend, so leave them alone unless you are targeting one specific behaviour.\n"
                 + "Levers that bake into a loaded model (quantized compute, spilling onto a second GPU) are backend "
-                + "settings instead — changing those per generation would reload the model.");
+                + "settings instead, since changing those per generation would reload the model.");
 
         VramModeParam = T2IParamTypes.Register<string>(new(
             "VRAM Mode",
@@ -456,7 +459,7 @@ public class HartsyInference : Extension
             "VRAM Weight Streaming",
             "Stream the denoiser's weights through VRAM a few blocks at a time instead of holding all of them.\n"
                 + "'On' forces it even when everything would fit (typically 5-8x slower, but it is what makes a large model run on a small card).\n"
-                + "'Off' forbids it — an oversized model fails instead.\nOnly models with a block-structured denoiser can honour this.",
+                + "'Off' forbids it, so an oversized model fails instead.\nOnly models with a block-structured denoiser can honour this.",
             "Backend default",
             Toggleable: true,
             Group: VramParamGroup,
@@ -467,7 +470,7 @@ public class HartsyInference : Extension
         VramKeepResidentParam = T2IParamTypes.Register<string>(new(
             "VRAM Keep Models Resident",
             "Keep this model's weights on the GPU after the generation finishes, so the next one skips the re-upload.\n"
-                + "'Off' frees them every time — slower back-to-back, but it leaves the card free for other work.",
+                + "'Off' frees them every time: slower back-to-back, but it leaves the card free for other work.",
             "Backend default",
             Toggleable: true,
             Group: VramParamGroup,
@@ -477,8 +480,8 @@ public class HartsyInference : Extension
 
         VramPhaseUnloadParam = T2IParamTypes.Register<string>(new(
             "VRAM Phase Unload",
-            "Release each stage's weights at its boundary — the text encoder before denoising, the denoiser before "
-                + "the VAE decode — so the next stage gets the space.\nCosts a re-upload per stage; often the difference "
+            "Release each stage's weights at its boundary (the text encoder before denoising, the denoiser before "
+                + "the VAE decode), so the next stage gets the space.\nCosts a re-upload per stage; often the difference "
                 + "between fitting and an out-of-VRAM error.",
             "Backend default",
             Toggleable: true,
@@ -490,7 +493,7 @@ public class HartsyInference : Extension
         VramCachePrecisionParam = T2IParamTypes.Register<string>(new(
             "VRAM Cache Precision",
             "Storage precision for the caches that persist across steps (KV caches, Wan-Animate's driving cache).\n"
-                + "'Half' roughly halves their size but diverges from the reference maths — it changes the output slightly.\n"
+                + "'Half' roughly halves their size but diverges from the reference maths, so it changes the output slightly.\n"
                 + "'Full' keeps exact numerics whatever it costs, which is what a parity comparison needs.",
             "Backend default",
             Toggleable: true,
@@ -502,7 +505,7 @@ public class HartsyInference : Extension
         VramActivationOffloadParam = T2IParamTypes.Register<string>(new(
             "VRAM Activation Offload",
             "Page cross-step activations out to system RAM as they are produced.\nTrades a PCIe round trip per step for "
-                + "their full size on the card. A last resort — it is suppressed automatically while a captured CUDA graph is live.",
+                + "their full size on the card. A last resort. It is suppressed automatically while a captured CUDA graph is live.",
             "Backend default",
             Toggleable: true,
             Group: VramParamGroup,
@@ -524,8 +527,8 @@ public class HartsyInference : Extension
         VramChunkScaleParam = T2IParamTypes.Register<double>(new(
             "VRAM Chunk Scale",
             "Scales the chunk/tile size a model decodes in. 1.0 leaves the model's own default alone; 0.5 halves it.\n"
-                + "This is the lever for work whose peak is activations rather than weights — VAE decodes, vocoders, "
-                + "3D grid decodes — where streaming weights does nothing at all.",
+                + "This is the lever for work whose peak is activations rather than weights (VAE decodes, vocoders, "
+                + "3D grid decodes), where streaming weights does nothing at all.",
             "1.0",
             Min: 0.1, Max: 1.0, Step: 0.05,
             Toggleable: true,
@@ -536,12 +539,12 @@ public class HartsyInference : Extension
 
         // Not "Video Restore": the pass also runs on stills, and this group toggles the whole pass.
         VideoRestoreParamGroup = new("Restore / Upscale", Toggles: true, Open: false, IsAdvanced: true,
-            Description: "SeedVR2 restoration pass over the finished generation — video frames before muxing, or a "
+            Description: "SeedVR2 restoration pass over the finished generation: video frames before muxing, or a "
                 + "still image after generation.");
 
         RestoreModelParam = T2IParamTypes.Register<string>(new(
             "Restore Model",
-            "Restore/upscale the generated output with SeedVR2 — video frames before muxing, or a still image after generation.\nToggle ON to enable; the weights are fetched on first use.",
+            "Restore/upscale the generated output with SeedVR2: video frames before muxing, or a still image after generation.\nToggle ON to enable; the weights are fetched on first use.",
             "seedvr2-3b",
             Toggleable: true,
             Group: VideoRestoreParamGroup,
@@ -573,7 +576,7 @@ public class HartsyInference : Extension
 
         RestoreClipFramesParam = T2IParamTypes.Register<int>(new(
             "Restore Clip Frames",
-            "Frames per restore chunk (rounded to the model's (n-1)%4==0 contract). Lower on tight VRAM — fp32 720p-area needs ~5. Ignored for stills.",
+            "Frames per restore chunk (rounded to the model's (n-1)%4==0 contract). Lower on tight VRAM: fp32 720p-area needs ~5. Ignored for stills.",
             "5",
             Min: 1, Max: 121, Step: 4,
             Toggleable: true,
@@ -770,7 +773,7 @@ public class HartsyInference : Extension
 
         AceStepErgTagParam = T2IParamTypes.Register<bool>(new(
             "ACE-Step V1 ERG Tag",
-            "ACE-Step v1: entropy-rectifying guidance on the tag branch — the unconditional pass sees a weakened (not zeroed) text encoding. Upstream default is on. v1 checkpoints only.",
+            "ACE-Step v1: entropy-rectifying guidance on the tag branch. The unconditional pass sees a weakened (not zeroed) text encoding. Upstream default is on. v1 checkpoints only.",
             "true",
             Toggleable: true,
             Group: AceStepGuidanceGroup,

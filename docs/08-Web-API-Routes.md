@@ -1,4 +1,4 @@
-# 08 — Web API Routes
+# 08: Web API Routes
 
 Extra HTTP routes the extension adds to Swarm's WebAPI. Registered in
 `WebAPI/HartsyInferenceWebAPI.cs`. Pattern mirrors `ComfyUIBackend/ComfyUIWebAPI.cs`.
@@ -9,7 +9,7 @@ The Comfy extension has many extra routes because it's *bridging two processes*:
 saving/reading/listing/deleting workflows, redirecting to the Comfy process
 (`ComfyBackendDirect/{*Path}`), returning generated workflow JSON, installing
 custom node packs, extracting LoRAs, compiling TensorRT engines. We're
-in-process and have no workflow IR — most of those concerns vanish.
+in-process and have no workflow IR, so most of those concerns vanish.
 
 Our routes are about diagnostics, cache management, and architecture coverage.
 All of them are read-only except `HartsyInferenceClearCache`.
@@ -26,13 +26,15 @@ public static void Register()
     API.RegisterAPICall(HartsyInferenceListLoadedPipelines, false, HartsyInferencePermissions.PermAdminHartsyInference);
     API.RegisterAPICall(HartsyInferenceGetDeviceInfo, false, HartsyInferencePermissions.PermAdminHartsyInference);
     API.RegisterAPICall(HartsyInferenceClearCache, true, HartsyInferencePermissions.PermAdminHartsyInference);
+    API.RegisterAPICall(HartsyInferenceListGpus, false, Permissions.ViewBackendsList);
 }
 ```
 
 The boolean is `isModifying` (true marks the call as a mutation).
 `GetSupportedArchs`, `ProbeModel` and `GetImageInputs` need only `use_hartsyinference`
-(default: power users); the other three need `admin_hartsyinference` (default:
-admins).
+(default: power users); `ListLoadedPipelines`, `GetDeviceInfo` and `ClearCache` need
+`admin_hartsyinference` (default: admins). `ListGpus` needs core's `view_backends_list`,
+the same permission as listing backend types.
 
 ## Routes
 
@@ -64,10 +66,10 @@ engine can drive today and what's mapped but not yet registered.
 The response also carries `features` and `sampling` (keyed by compat class) and
 `image_inputs`: the `GetImageInputs` answer for every drivable main-model class
 (sub-classes such as `/lora` and `/vae` skipped), keyed by Swarm model class
-ID — so a client can size its upload flow for every architecture in one call.
+ID, so a client can size its upload flow for every architecture in one call.
 
 `supported` holds compat-class IDs (`ModelSupport.SupportedArchitectures`),
-not the engine's internal family IDs — a mapped family only counts as
+not the engine's internal family IDs. A mapped family only counts as
 supported once `RecipeRegistry`/`VideoRecipeRegistry` actually has a recipe
 for it, checked live at call time. `pending` is an object, compat class ID to
 the `WhyNotSupported` reason string, for classes that are mapped to a family
@@ -140,10 +142,10 @@ known to Swarm's `Stable-Diffusion` model set, without loading it.
 ```
 
 `state` is one of `supported`, `pending`, `unsupported`. When not supported,
-`reason` is `ModelSupport.WhyNotSupported(compat_class)` — the same string
+`reason` is `ModelSupport.WhyNotSupported(compat_class)`, the same string
 that ends up in `GetSupportedArchs`'s `pending` map.
 
-**Returns (failure)** — `model_name` missing, the `Stable-Diffusion` model
+**Returns (failure):** `model_name` missing, the `Stable-Diffusion` model
 set isn't registered, or the named model doesn't exist:
 ```json
 { "success": false, "error": "Model 'nonexistent.safetensors' not found." }
@@ -166,7 +168,7 @@ refused for its images.
 | Permission | `use_hartsyinference` |
 | Mutating | false |
 
-**Inputs** — `model_name` (preferred; Wan and MiniMax-H3 narrow per checkpoint
+**Inputs:** `model_name` (preferred; Wan and MiniMax-H3 narrow per checkpoint
 file) or `arch_id`, a Swarm model class ID, sent to the engine as the variant
 hint. A bare compat class ID is accepted as `arch_id` and answers for the
 family as a whole.
@@ -203,7 +205,7 @@ family as a whole.
 | `mask` | Whether a Mask Image (inpainting) applies. |
 | `endFrame` | Whether a Video End Image applies. |
 
-**Returns (failure)** — neither input given, model not found, or the
+**Returns (failure):** neither input given, model not found, or the
 architecture isn't drivable (`error` is `WhyNotSupported`, and `arch_id` /
 `compat_class` are echoed):
 ```json
@@ -255,8 +257,8 @@ verbatim.
 `Task<JObject> HartsyInferenceGetDeviceInfo(Session session)`
 
 Reports each live backend's *configured* compute target. This is not a
-hardware scan — the engine doesn't expose device enumeration ahead of backend
-construction — so it's the same settings surface as
+hardware scan (the engine doesn't expose device enumeration ahead of backend
+construction), so it's the same settings surface as
 `HartsyInferenceListLoadedPipelines` minus `current_model`/`usages`.
 
 | | |
@@ -285,6 +287,36 @@ construction — so it's the same settings surface as
 }
 ```
 
+### `HartsyInferenceListGpus`
+
+`Task<JObject> HartsyInferenceListGpus(Session session, string compute_backend = "auto")`
+
+The GPU choices for one Compute Backend value, from `Backends/GpuChoices.cs`. The backend
+card script calls it to relist the GPU dropdown when Compute Backend changes. `kind` is the
+compute kind the choices belong to, with `auto` resolved to the kind it uses on this machine.
+Each list is built once per process from the engine's own device probes.
+
+| | |
+|---|---|
+| Method | POST |
+| Path | `/API/HartsyInferenceListGpus` |
+| Permission | `view_backends_list` |
+| Mutating | false |
+
+**Returns:**
+```json
+{
+  "success": true,
+  "kind": "vulkan",
+  "values": ["0"],
+  "names": ["Auto: NVIDIA GeForce RTX 2060 SUPER (8 GB)"]
+}
+```
+
+Under CUDA, values are CUDA ordinals for the GPUs that pass the engine's test computation.
+Under Vulkan, `0` lets the engine pick, and the rest are the loader's raw indices, without
+software rasterizers. On CPU the single entry is `0`.
+
 ### `HartsyInferenceClearCache`
 
 `Task<JObject> HartsyInferenceClearCache(Session session, int backend_id = -1, bool free_system_ram = false)`
@@ -310,7 +342,7 @@ The only mutating route.
 
 `backend_id = -1` (the default) clears every HartsyInference backend;
 otherwise only the backend with that ID. `free_system_ram` is passed through
-to `FreeMemory` to also drop CPU-side copies. There's no per-model eviction —
+to `FreeMemory` to also drop CPU-side copies. There's no per-model eviction:
 `FreeMemory` clears a backend's whole resident pipeline, not one entry. A
 `backend_id` that matches nothing still returns success with
 `backends_cleared: 0`.
@@ -325,17 +357,17 @@ to `FreeMemory` to also drop CPU-side copies. There's no per-model eviction —
 Comparing against `ComfyUIBackend/ComfyUIWebAPI.cs`'s registrations:
 
 - `ComfySaveWorkflow`, `ComfyReadWorkflow`, `ComfyListWorkflows`,
-  `ComfyDeleteWorkflow` — we have no workflow IR to save/read/list/delete
-- `ComfyBackendDirect/{*Path}` passthrough — no separate Comfy process to
+  `ComfyDeleteWorkflow`: we have no workflow IR to save/read/list/delete
+- `ComfyBackendDirect/{*Path}` passthrough: no separate Comfy process to
   redirect to
-- `ComfyGetGeneratedWorkflow` — no JSON IR to return
-- `ComfyInstallFeatures` — no custom node packs
-- `ComfyListTorchInstalls`, `ComfyUpdateTorch`, `ComfyGetNodeTypesForBackend`
-  — no Python/torch install and no node types to enumerate
-- `DoLoraExtractionWS` (diff two checkpoints, write a LoRA) — not yet; open
+- `ComfyGetGeneratedWorkflow`: no JSON IR to return
+- `ComfyInstallFeatures`: no custom node packs
+- `ComfyListTorchInstalls`, `ComfyUpdateTorch`, `ComfyGetNodeTypesForBackend`:
+  no Python/torch install and no node types to enumerate
+- `DoLoraExtractionWS` (diff two checkpoints, write a LoRA): not yet; open
   item in [`11-Comfy-Parity-Punchlist.md`](./11-Comfy-Parity-Punchlist.md)
   (Tier 3)
-- `DoTensorRTCreateWS` — not yet; same punchlist tier
+- `DoTensorRTCreateWS`: not yet; same punchlist tier
 
 ## Architecture coverage
 
