@@ -19,7 +19,7 @@ Fix the error the build reports, then restart SwarmUI.
 ## The extension shows as installed but the backend does not start
 
 - Confirm **Compute Backend** is Auto.
-- Confirm **GPU** names a real device. An entry marked `(saved value)` is not a GPU this machine offers, so pick one from the list.
+- Confirm **GPU** names a GPU this machine has. An entry marked `(saved value)` is not a GPU this machine offers. Pick one from the list, or the backend stops with an error.
 - Update your GPU driver, then restart SwarmUI.
 
 ## CUDA is not offered in Compute Backend
