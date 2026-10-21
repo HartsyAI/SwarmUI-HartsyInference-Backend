@@ -106,7 +106,21 @@ class HartsyBackendCard {
             cardBody.dataset.hartsyGpuReset = 'true';
             this.applyGpuList(cardBody);
         }
+        if (name == 'GPU_ID') {
+            this.clearMainGpuChoices(cardBody);
+        }
         this.applyRules(cardBody);
+    }
+
+    /** Clears a second-GPU choice that now names the main GPU, since the backend ignores a placement on its own main GPU. */
+    clearMainGpuChoices(cardBody) {
+        let main = this.valueOf(cardBody, 'GPU_ID');
+        for (let name of this.secondGpuFields) {
+            let select = cardBody.querySelector(`select[data-name="${name}"]`);
+            if (select && main != '' && select.value == main) {
+                select.value = '';
+            }
+        }
     }
 
     /**
@@ -368,6 +382,9 @@ class HartsyBackendCard {
         }
         else if (gpuCount == 1) {
             notes.push('These settings need a second NVIDIA GPU.');
+        }
+        if (main != null && main != '' && this.secondGpuFields.some(name => this.valueOf(cardBody, name) == main)) {
+            notes.push('A GPU setting in this section names the main GPU, so the backend ignores it. Set it to None.');
         }
         let notice = box.querySelector('.hartsy-card-section-notice');
         let text = notes.join('\n');
