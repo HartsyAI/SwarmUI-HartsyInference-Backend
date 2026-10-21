@@ -8,10 +8,12 @@ HartsyInference supports two ways to use more than one GPU:
 ## Separate jobs
 
 1. Add a HartsyInference backend for each GPU.
-2. Give each backend its own `GPU_ID`, starting from `0`.
+2. Give each backend its own `GPU_ID`: `0`, then `1`, and so on on CUDA. On Vulkan, see the note below.
 3. Leave the other GPU fields empty.
 
-SwarmUI sends each generation to a free backend. If you are not sure which card a number refers to, start one generation on each backend and watch `nvidia-smi` to see which card is busy. CUDA lists the fastest card first, so the order can differ from `nvidia-smi`.
+On CUDA, each number is a different card. SwarmUI sends each generation to a free backend. If you are not sure which card a number refers to, start one generation on each backend and watch `nvidia-smi` to see which card is busy. CUDA lists the fastest card first, so the order can differ from `nvidia-smi`.
+
+On Vulkan, `0` means the engine picks the best GPU, and that card may be one another backend uses. When you run several backends on Vulkan, give each one a non-zero number, and check each backend's log to confirm which GPU it bound to.
 
 ## One job across two cards
 
