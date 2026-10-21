@@ -14,7 +14,7 @@ HartsyInference can use more than one GPU in two ways:
 
 SwarmUI sends each generation to a free backend. The extension also checks whether the model fits each card's memory, so a large model is not sent to a small card just because that card was free.
 
-Under Vulkan, the first entry in **GPU** is **Auto**, which lets the engine pick the best GPU. The GPU that Vulkan lists first can only be reached through Auto. When a backend starts, its log names the GPU it uses.
+Under Vulkan, the first entry in **GPU** is **Auto**, which lets the engine pick the best GPU. That card may be one another backend uses. When you run several backends on Vulkan, choose a specific GPU for each one, and do not use Auto on any of them. When a backend starts, its log names the GPU it uses.
 
 ## One job across two cards
 
