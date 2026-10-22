@@ -4,7 +4,9 @@ using System.Runtime.CompilerServices;
 using Hartsy.Extensions.HartsyInferenceBackend.Generation;
 using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Engine.Dispatch;
+using HartsyInference.Engine.Planning;
 using HartsyInference.Engine.Planning.Memory;
+using HartsyInference.Engine.Requests;
 using SwarmUI.Backends;
 using SwarmUI.Core;
 using SwarmUI.Text2Image;
@@ -210,7 +212,27 @@ public static class ModelFitGate
             }
             return RequestFit.NoOpinion("no local checkpoint path");
         }
-        MemoryEstimateRequest request = SiBackend.MapMemoryEstimateRequest(input, family);
+        // A video size the user left unset is estimated at the one the engine's planner resolves for the family, so the estimate matches the recipe's output.
+        VideoEffectiveSettings videoPlan = null;
+        if (family.Kind == ModelSupport.Kind.Video)
+        {
+            VideoRequest planRequest = new()
+            {
+                Prompt = "",
+                Width = input.TryGet(T2IParamTypes.Width, out int planWidth) ? planWidth : null,
+                Height = input.TryGet(T2IParamTypes.Height, out int planHeight) ? planHeight : null,
+            };
+            try
+            {
+                videoPlan = entries[0].Engine.VideoPlanning.PlanAsync(spec, planRequest).GetAwaiter().GetResult().EffectiveSettings;
+            }
+            catch (Exception ex)
+            {
+                HartsyLogs.Debug($"Fit '{model.Name}' not assessed: the engine could not plan its size: {ex.Message}");
+                return RequestFit.NoOpinion("no video plan");
+            }
+        }
+        MemoryEstimateRequest request = SiBackend.MapMemoryEstimateRequest(input, family, videoPlan);
         string shape = RequestShape(input, request);
 
         Dictionary<string, (BackendDeviceEntry Entry, MemoryFit Fit, bool OutOfMemory)> assessed = [];
