@@ -23,6 +23,7 @@ using SiLogs = HartsyInference.Core.Logging.Logs;
 using HartsyInference.Cuda;
 using HartsyInference.Engine;
 using HartsyInference.Engine.Dispatch;
+using HartsyInference.Engine.Planning;
 using HartsyInference.Engine.Planning.Memory;
 using HartsyInference.Engine.Recipes;
 using HartsyInference.Engine.Registry;
@@ -35,6 +36,7 @@ using EngineExtras = HartsyInference.Engine.Features.RequestExtras;
 using EngineWanAnimate = HartsyInference.Engine.Recipes.Video.WanAnimateRecipePipeline;
 using EngineH3ChainPlanner = HartsyInference.Engine.Recipes.Video.MiniMaxH3ChainPlanner;
 using EngineH3Geometry = HartsyInference.Diffusion.Models.Denoisers.MiniMaxH3Geometry;
+using EngineH3Recipe = HartsyInference.Engine.Recipes.Video.MiniMaxH3Recipe;
 
 namespace Hartsy.Extensions.HartsyInferenceBackend.Backends;
 
@@ -1041,6 +1043,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         }
 
         VideoGenerationResult generated = await _engine.Video.GenerateAsync(spec, request, progress, cancel);
+        int fps = generated.Fps ?? throw new InvalidOperationException("HartsyInference: the video result reports no frame rate, so it cannot be muxed.");
         List<byte[]> frames = [];
         int width = 0, height = 0;
         foreach (VideoFrame frame in generated.Frames)
@@ -1082,13 +1085,15 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             HartsyLogs.Warning($"Video format '{format}' cannot carry audio, so the {audio.SampleRate} Hz track is dropped. Choose 'h264-mp4', 'h265-mp4', 'prores' or 'webm' to keep it.");
             audio = null;
         }
-        return VideoOutputEncoder.Encode([.. frames], width, height, request.Fps ?? 25, format, cancel, audio);
+        return VideoOutputEncoder.Encode([.. frames], width, height, fps, format, cancel, audio);
     }
 
     /// <summary>The streaming path of <see cref="GenerateVideo"/>: pipes frames from <c>IVideoService.GenerateFramesAsync</c> into <see cref="VideoOutputEncoder.EncodeStreamingAsync"/> as they decode.</summary>
     /// <remarks>Peeks one frame for width/height, since the request's own size is snapped per family. Callers only reach this with no audio track, matching the GenerateVideo gate.</remarks>
     private async Task<Image> GenerateVideoStreaming(ModelSpec spec, VideoRequest request, string format, IProgress<StepPreview> progress, CancellationToken cancel)
     {
+        // The stream carries no result object, so the frame rate comes from the planner, which resolves the family's rate when the request leaves it unset.
+        int fps = (await _engine.VideoPlanning.PlanAsync(spec, request, cancel)).EffectiveSettings.Fps;
         IAsyncEnumerator<VideoFrame> frames = _engine.Video.GenerateFramesAsync(spec, request, progress, cancel).GetAsyncEnumerator(cancel);
         if (!await frames.MoveNextAsync())
         {
@@ -1098,7 +1103,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         VideoFrame first = frames.Current;
         // RgbFramesFrom takes ownership of `frames`: its finally disposes it once the encoder drains or unwinds the stream.
         return await VideoOutputEncoder.EncodeStreamingAsync(
-            RgbFramesFrom(first, frames), first.Width, first.Height, request.Fps ?? 25, format, cancel);
+            RgbFramesFrom(first, frames), first.Width, first.Height, fps, format, cancel);
     }
 
     /// <summary>Yields <paramref name="first"/>'s RGB bytes, then the rest of <paramref name="remaining"/>: the peek-and-reprepend glue for <see cref="GenerateVideoStreaming"/>.</summary>
@@ -1621,8 +1626,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         {
             Prompt = input.Get(T2IParamTypes.Prompt) ?? "",
             NegativePrompt = input.Get(T2IParamTypes.NegativePrompt),
-            Width = input.Get(T2IParamTypes.Width, DefaultVideoWidth),
-            Height = input.Get(T2IParamTypes.Height, DefaultVideoHeight),
+            Width = NullableInt(input, T2IParamTypes.Width),
+            Height = NullableInt(input, T2IParamTypes.Height),
             Steps = NullableInt(input, T2IParamTypes.VideoSteps) ?? NullableInt(input, T2IParamTypes.Steps),
             CfgScale = input.TryGet(T2IParamTypes.VideoCFG, out double videoCfg) ? (float)videoCfg
                 : input.TryGet(T2IParamTypes.CFGScale, out double baseCfg) ? (float)baseCfg : null,
@@ -1655,9 +1660,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             VideoSwapPercent = input.TryGet(T2IParamTypes.VideoSwapPercent, out double swapPercent) && swapPercent != 0.5
                 ? swapPercent : null,
             VideoResolution = input.Get(T2IParamTypes.VideoResolution, null),
-            // Swarm's cross-family fallback of 25 is wrong for LTX-2, whose default is 24. Send a value, not null: LTX-2 does not report
-            // the fps it used, so a null would mux at the encoder's 25 and play 4% fast.
-            Fps = input.Get(T2IParamTypes.VideoFPS, IsLtxVideo2(input) ? 24 : 25),
+            Fps = NullableInt(input, T2IParamTypes.VideoFPS),
             VideoFormat = input.Get(T2IParamTypes.VideoFormat, null),
             // Boomerang is applied to the decoded frames on the way out (see GenerateVideo) so the Engine
             // doesn't waste a second pass; the flag is still carried for pipelines that want it.
@@ -1721,7 +1724,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         }
         if (total is int t)
         {
-            int maxSegment = EngineH3Geometry.AlignFrameCount(frames ?? 124);
+            int maxSegment = EngineH3Geometry.AlignFrameCount(frames ?? new EngineH3Recipe().Defaults.Frames.Value);
             try
             {
                 EngineH3ChainPlanner.Plan(t, context, maxSegment);
@@ -1744,40 +1747,13 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     }
 
     /// <summary>The requested frame count, or null to let the family's own default stand.</summary>
-    /// <remarks>Core's frame params default to 25 for every family. On MiniMax-H3 that snaps to 39 frames (1.6 s), and 25 is off LTX-2's 8n+1 grid.
-    /// Null when neither param is set lets each recipe pick its own default (124 frames for H3).</remarks>
-    private static int? ResolveFrames(T2IParamInput input)
-    {
-        if (input.TryGet(T2IParamTypes.Text2VideoFrames, out int t2vFrames) && t2vFrames > 0)
-        {
-            return t2vFrames;
-        }
-        if (input.TryGet(T2IParamTypes.VideoFrames, out int videoFrames) && videoFrames > 0)
-        {
-            return videoFrames;
-        }
-        if (IsMiniMaxH3(input))
-        {
-            HartsyLogs.Debug("No frame count set, so leaving it to MiniMax-H3's own 124-frame default "
-                + "rather than Swarm's cross-family 25 (which would snap to 39 on H3's 17k+5 grid).");
-            return null;
-        }
-        if (IsLtxVideo2(input))
-        {
-            HartsyLogs.Debug("No frame count set, so leaving it to the LTX-2 recipe's own default rather "
-                + "than Swarm's cross-family 25, which is not on LTX-2's 8n+1 grid.");
-            return null;
-        }
-        return 25;
-    }
+    /// <remarks>Null when neither param is set, so each recipe picks its own length.</remarks>
+    private static int? ResolveFrames(T2IParamInput input) =>
+        NullableInt(input, T2IParamTypes.Text2VideoFrames) ?? NullableInt(input, T2IParamTypes.VideoFrames);
 
     /// <summary>Whether the selected model is MiniMax-H3, by core's own compat class rather than a name guess.</summary>
     private static bool IsMiniMaxH3(T2IParamInput input) =>
         input.Get(T2IParamTypes.Model)?.ModelClass?.CompatClass?.ID == T2IModelClassSorter.CompatMiniMaxH3.ID;
-
-    /// <summary>Whether the selected model is any LTX-2.x (2, 2.3 or 2.5, which share core's compat class).</summary>
-    private static bool IsLtxVideo2(T2IParamInput input) =>
-        input.Get(T2IParamTypes.Model)?.ModelClass?.CompatClass?.ID == T2IModelClassSorter.CompatLtxv2.ID;
 
     /// <summary>Whether the selected checkpoint is Wan-Animate or Wan-Animate-2.</summary>
     /// <remarks>Animate shares Wan's compat classes, so the engine's header-sniffed variant detection decides: only Animate claims <see cref="VideoFeatures.DrivingVideo"/>.</remarks>
@@ -1932,22 +1908,17 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     /// <summary>Image width/height when the request leaves them unset.</summary>
     public const int DefaultImageSize = 1024;
 
-    /// <summary>Video width when the request leaves it unset.</summary>
-    public const int DefaultVideoWidth = 704;
-
-    /// <summary>Video height when the request leaves it unset.</summary>
-    public const int DefaultVideoHeight = 480;
-
     /// <summary>The geometry and VRAM overrides a generation will run with, for the engine's memory estimate, so routing judges what will actually run.</summary>
-    /// <remarks>Frames stay null when the request leaves them to the family; the engine then substitutes the recipe's own.</remarks>
-    public static MemoryEstimateRequest MapMemoryEstimateRequest(T2IParamInput input, ModelSupport.Family family)
+    /// <remarks>Frames stay null when the request leaves them to the family; the engine then substitutes the recipe's own.
+    /// The estimate takes a concrete size, so a video size the user left unset takes the one the engine's planner resolved (<paramref name="videoPlan"/>).</remarks>
+    public static MemoryEstimateRequest MapMemoryEstimateRequest(T2IParamInput input, ModelSupport.Family family, VideoEffectiveSettings videoPlan)
     {
         ArgumentNullException.ThrowIfNull(input);
         ArgumentNullException.ThrowIfNull(family);
         bool video = family.Kind == ModelSupport.Kind.Video;
         return new MemoryEstimateRequest(
-            input.Get(T2IParamTypes.Width, video ? DefaultVideoWidth : DefaultImageSize),
-            input.Get(T2IParamTypes.Height, video ? DefaultVideoHeight : DefaultImageSize),
+            input.Get(T2IParamTypes.Width, video ? videoPlan.Width : DefaultImageSize),
+            input.Get(T2IParamTypes.Height, video ? videoPlan.Height : DefaultImageSize),
             video ? ResolveFrames(input) : 1,
             Vram: MapVramOverrides(input));
     }

@@ -227,9 +227,11 @@ pixels to encode) or a plain `{batch_index, overall_percent, current_percent}` o
 
 - **Thin mapper, not a workflow builder.** All architecture-specific behavior — which
   components a family needs, how LoRA/ControlNet/IP-Adapter compose, sampling defaults —
-  lives in the Engine's recipes. The extension only has to know a compat-class string maps
-  to a family id; it never has to know *how* that family generates. This is what keeps
-  `ModelSupport.cs` at ~250 lines instead of growing a per-architecture loader for every
+  lives in the Engine's recipes. For video, the extension sends frames and FPS only when
+  the user set them, and width and height whenever the host supplies them, so the recipe's
+  defaults apply to whatever is left null. The extension only has to know a compat-class
+  string maps to a family id; it never has to know *how* that family generates. This is what
+  keeps `ModelSupport.cs` at ~250 lines instead of growing a per-architecture loader for every
   new model family the Engine adds.
 - **The honesty guard.** `IsValidForThisBackend` checks every composition feature a request
   would need against what the Engine's own recipe for that family declares

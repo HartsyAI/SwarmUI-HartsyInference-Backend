@@ -14,14 +14,15 @@ in every backend (CPU/CUDA/Vulkan) and every modality assembly
 `<PackageReference>`:
 
 ```xml
-<PackageReference Include="HartsyInference" Version="2.0.0-alpha.22" />
+<PackageReference Include="HartsyInference" Version="*-*" />
 ```
 
 There is no git submodule — the extension's `Vendor/` folder contains only a
-`.gitkeep`. The version is pinned to an **exact** prerelease, not a range: the engine's
-own type surface (constructors, request records, feature enums) is the
-contract, and it does shift between alpha builds, so a floating range would
-let an incompatible engine silently restore under this extension. `RestoreNoHttpCache`
+`.gitkeep`. The version floats: `*-*` resolves to the newest prerelease published on nuget.org, and
+`RestoreSources` is set to nuget.org alone so a locally packed build is never picked up.
+There is no lock file, so each restore takes the newest engine. The engine's type surface
+(constructors, request records, feature enums) does shift between alpha builds, so a build
+break after an engine release is expected and is fixed in this extension. `RestoreNoHttpCache`
 is set in the csproj so a freshly-published alpha isn't hidden behind NuGet's
 ~30-minute flat-container cache.
 

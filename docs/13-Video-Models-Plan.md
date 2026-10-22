@@ -92,17 +92,21 @@ Entries reuse Comfy's canonical names/URLs/hashes so files are shared with Comfy
       `GenerateFromEmbeddings(...)`.
 
 ### V1.3 Parameter mapping (`HartsyInferenceBackend.BuildVideoRequest`/`ResolveFrames`)
-- [x] Frames come from `Text2VideoFrames`/`VideoFrames` when set; when unset the
-      extension sends a flat 25 for Wan/LTX (only MiniMax-H3 defers to the recipe), so
-      `WanVideoRecipe`/`LtxVideoRecipe`'s own `VideoDefaults` (33 / 97 frames) never
-      actually apply on this path — deliberate per `ResolveFrames`' own comment, not an
-      oversight, but worth knowing. Steps/CFG (main `Steps`/`CFGScale` — Comfy's
-      `VideoSteps`/`VideoCFG` belong to the I2V flow only), FPS (`VideoFPS`, default 24;
-      also feeds LTX's `frameRate`), and resolution (snapped ÷16 Wan / ÷32 LTX) all
-      mirror Comfy's exact reads — frame counts snap to the model's `4n+1`/`8n+1` rule
-      and log the adjustment rather than rejecting. Sigma shift / scheduler defaults are
-      baked into the pipelines (Wan flow-shift 5.0; LTX dynamic μ shift), no extra
-      params exposed.
+- [x] The extension sends only what the user set. Frames come from `Text2VideoFrames`/
+      `VideoFrames` when set, else null; FPS (`VideoFPS`) is sent only when set, else null.
+      Width and height are sent when present, else null. A null lets the engine's
+      per-family recipe fill the value from its `VideoDefaults`. The extension re-declares no model default, so
+      the recipe's own values apply on every path. Host limitations: SwarmUI's UI always
+      sends Steps/CFG (`Steps`/`CFGScale`, not toggleable; Comfy's `VideoSteps`/`VideoCFG`
+      belong to the I2V flow only) and always sends Width/Height (not toggleable in core,
+      so the UI's own resolution value always arrives). Frame counts and FPS are toggleable
+      in core, so they reach the engine as null when toggled off. Frame counts snap to the
+      model's `4n+1`/`8n+1` rule and log the adjustment rather than rejecting. Sigma shift
+      / scheduler defaults are baked into the pipelines (Wan flow-shift 5.0; LTX dynamic μ
+      shift), no extra params exposed.
+      Muxing uses the frame rate the engine reports (`VideoGenerationResult.Fps`); the
+      streaming path, which has no result object, asks `IVideoPlanningService.PlanAsync`
+      for `EffectiveSettings.Fps`. Neither path defaults to a literal.
 
 ### V1.4 Video output (`Generation/VideoOutputEncoder.cs`)
 - [x] C# twin of `SwarmSaveAnimationWS.py`: resolves ffmpeg via `Utilities.FfmegLocation`,
@@ -223,11 +227,10 @@ What did need building:
   because the audio VAE carries the same tail under `audio_vae.`), an `audio_vae.` prefix or
   `vocoder.mel_stft.mel_basis` for the audio VAE, and the engine's own
   `LtxVideo2CheckpointConverter.IsDiffusionVideoVae` for the refusal case.
-- **Frames/FPS.** LTX-2.x now defers its frame count to the recipe rather than taking
-  Swarm's cross-family 25 (which is not on LTX-2's 8n+1 grid), and defaults FPS to 24 — the
-  recipe's default, core's own param default, and what Swarm's docs recommend. FPS is sent
-  as a value rather than null on purpose: the LTX-2 pipeline doesn't report the fps it used
-  on `VideoGenerationResult`, so a null would generate at 24 and mux at the encoder's 25.
+- **Frames/FPS/size.** LTX-2.x takes its frame count and FPS from the recipe unless the user
+  set them (see the V1.3 mapping), so its 8n+1 length and 24 fps come from the engine rather
+  than from the extension. Muxing uses the fps the engine reports, and the
+  streaming path reads it from the planner; neither falls back to 24 or 25 in the extension.
 - **Streaming stays off for joint-AV families.** The streaming path has no `AudioTrack` to
   give ffmpeg, so it is now gated on core's `HasJointAVLatents` (LTX-2.x and MiniMax-H3)
   rather than only on *input* audio. Without that gate a generated soundtrack would be
