@@ -113,7 +113,8 @@ descriptor's `Recipe` identity. The variant's display name is not on the descrip
 `Task<JObject> HartsyInferenceGetModelDefaults(Session session, string model_name)`
 
 Returns the recipe defaults the engine declares for **one** model's resolved family and variant, read from
-`IInferenceEngine.Recipes.Describe` (through `ModelSupport.Describe`). The gen page shows the video defaults
+the engine's recipe catalog (`RecipeCatalog.Describe`, the same catalog `IInferenceEngine.Recipes` exposes, held as
+`ModelSupport.Recipes`). The gen page shows the video defaults
 (frames, fps) as placeholder text on the toggleable params. It never writes them into a field: the engine applies
 these values itself to any param left untoggled. Nothing is computed here, and the route is read-only.
 

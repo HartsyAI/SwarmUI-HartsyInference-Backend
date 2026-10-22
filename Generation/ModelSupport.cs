@@ -176,9 +176,16 @@ public static class ModelSupport
         {
             return null;
         }
+        return DescribeSpec(BuildSpec(model, family, stageBundles: false));
+    }
+
+    /// <summary>The Engine's recipe descriptor for <paramref name="spec"/>, or null when the family it routes to (variant
+    /// routing can move a spec to another family) has no recipe.</summary>
+    public static ModelDescriptor DescribeSpec(ModelSpec spec)
+    {
         try
         {
-            return Recipes.Describe(BuildSpec(model, family, stageBundles: false));
+            return Recipes.Describe(spec);
         }
         catch (RecipeNotRegisteredException)
         {

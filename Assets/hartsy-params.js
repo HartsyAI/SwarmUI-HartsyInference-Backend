@@ -160,7 +160,11 @@ const HartsyModelDefaults = {
             delete this.pending[key];
             this.byModel[key] = data && data.success ? data.descriptor : null;
             reviseBackendFeatureSet();
-        }, 0, () => { delete this.pending[key]; });
+        }, 0, () => {
+            // A model with no recipe answers with an error; cache that so it is not asked again on every refresh.
+            delete this.pending[key];
+            this.byModel[key] = null;
+        });
     },
 
     /** Shows a video descriptor's defaults as placeholder text, or clears them for any other model. */

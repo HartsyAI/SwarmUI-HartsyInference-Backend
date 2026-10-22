@@ -44,12 +44,12 @@ public static class ImageInputs
             return null;
         }
         ModelSupport.Family family = ModelSupport.Resolve(compat);
-        // Music has no image or video recipe to describe; IsArchitectureSupported guarantees the others are registered.
+        // Music has no image or video recipe to describe.
         if (family.Kind == ModelSupport.Kind.Music)
         {
             return None();
         }
-        ModelDescriptor descriptor = ModelSupport.Recipes.Describe(SpecFor(family, modelClassId));
+        ModelDescriptor descriptor = ModelSupport.DescribeSpec(SpecFor(family, modelClassId));
         return descriptor switch
         {
             ImageModelDescriptor image => DescribeImage(image.Features, image.InputLimits),
