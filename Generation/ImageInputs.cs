@@ -1,22 +1,23 @@
 using Newtonsoft.Json.Linq;
 using SwarmUI.Text2Image;
 using HartsyInference.Engine;
+using HartsyInference.Engine.Catalog;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Recipes;
 
 namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
 /// <summary>What images a model takes as input: how many, in which modes, whether one is required, and whether a mask or end frame applies. Feeds the <c>HartsyInferenceGetImageInputs</c> route and this backend's image refusals.</summary>
-/// <remarks>Every number comes from the engine's per-variant answers (<see cref="ModelCapabilities"/>), so a Qwen-Image
+/// <remarks>Every number comes from the engine's recipe descriptors (<see cref="ModelSupport.Describe"/>), so a Qwen-Image
 /// base and Edit build, or a Wan I2V and Animate checkpoint, are described as what they resolve to.</remarks>
 public static class ImageInputs
 {
     /// <summary>Most prompt images a reference-conditioned video family is handed (the MiniMax-H3 reference node's cap).</summary>
     public const int MaxReferenceImages = 9;
 
-    /// <summary>The engine's input-image limits for a concrete model's resolved variant.</summary>
+    /// <summary>The engine's input-image limits for a concrete model's resolved variant; text-only when its family has no recipe.</summary>
     public static ImageInputLimits LimitsFor(T2IModel model, ModelSupport.Family family) =>
-        ModelCapabilities.ImageInputLimitsFor(ModelSupport.BuildSpec(model, family, stageBundles: false));
+        (ModelSupport.Describe(model, family) as ImageModelDescriptor)?.InputLimits ?? ImageInputLimits.TextOnly;
 
     /// <summary>The route's <c>inputs</c> object for a concrete model; null when its compat class is not drivable here.</summary>
     public static JObject Describe(T2IModel model)
@@ -43,12 +44,16 @@ public static class ImageInputs
             return null;
         }
         ModelSupport.Family family = ModelSupport.Resolve(compat);
-        ModelSpec spec = SpecFor(family, modelClassId);
-        return family.Kind switch
+        // Music has no image or video recipe to describe.
+        if (family.Kind == ModelSupport.Kind.Music)
         {
-            ModelSupport.Kind.Image =>
-                DescribeImage(ModelCapabilities.ImageFeaturesFor(spec), ModelCapabilities.ImageInputLimitsFor(spec)),
-            ModelSupport.Kind.Video => DescribeVideo(ModelCapabilities.VideoFeaturesFor(spec), compat, modelClassId),
+            return None();
+        }
+        ModelDescriptor descriptor = ModelSupport.DescribeSpec(SpecFor(family, modelClassId));
+        return descriptor switch
+        {
+            ImageModelDescriptor image => DescribeImage(image.Features, image.InputLimits),
+            VideoModelDescriptor video => DescribeVideo(video.Features, compat, modelClassId),
             _ => None(),
         };
     }

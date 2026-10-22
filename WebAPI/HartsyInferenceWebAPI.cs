@@ -1,3 +1,6 @@
+using System.IO;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using Newtonsoft.Json.Linq;
 using SwarmUI.Accounts;
 using SwarmUI.Backends;
@@ -6,8 +9,9 @@ using SwarmUI.Text2Image;
 using SwarmUI.Utils;
 using SwarmUI.WebAPI;
 using Hartsy.Extensions.HartsyInferenceBackend.Generation;
+using HartsyInference.Engine.Catalog;
+using HartsyInference.Engine.Planning;
 using HartsyInference.Engine.Recipes;
-using HartsyInference.Engine.Variants;
 // The class name collides with the trailing namespace segment, so alias it explicitly.
 using SiBackend = Hartsy.Extensions.HartsyInferenceBackend.Backends.HartsyInferenceBackend;
 using GpuChoices = Hartsy.Extensions.HartsyInferenceBackend.Backends.GpuChoices;
@@ -20,17 +24,24 @@ namespace Hartsy.Extensions.HartsyInferenceBackend.WebAPI;
 /// directly. See docs/08-Web-API-Routes.md.</remarks>
 public static class HartsyInferenceWebAPI
 {
+    /// <summary>The engine's wire form of a <see cref="ModelDescriptor"/>: camelCase members and enums by name, as its HTTP API writes them.</summary>
+    private static readonly JsonSerializerOptions DescriptorJson = new(JsonSerializerDefaults.Web)
+    {
+        Converters = { new JsonStringEnumConverter() },
+    };
+
     public static void Register()
     {
         API.RegisterAPICall(HartsyInferenceGetSupportedArchs, false, HartsyInferencePermissions.PermUseHartsyInference);
         API.RegisterAPICall(HartsyInferenceProbeModel, false, HartsyInferencePermissions.PermUseHartsyInference);
         API.RegisterAPICall(HartsyInferenceGetModelFeatures, false, HartsyInferencePermissions.PermUseHartsyInference);
+        API.RegisterAPICall(HartsyInferenceGetModelDefaults, false, HartsyInferencePermissions.PermUseHartsyInference);
         API.RegisterAPICall(HartsyInferenceGetImageInputs, false, HartsyInferencePermissions.PermUseHartsyInference);
         API.RegisterAPICall(HartsyInferenceListLoadedPipelines, false, HartsyInferencePermissions.PermAdminHartsyInference);
         API.RegisterAPICall(HartsyInferenceGetDeviceInfo, false, HartsyInferencePermissions.PermAdminHartsyInference);
         API.RegisterAPICall(HartsyInferenceClearCache, true, HartsyInferencePermissions.PermAdminHartsyInference);
         API.RegisterAPICall(HartsyInferenceListGpus, false, Permissions.ViewBackendsList);
-        HartsyLogs.Init("Web API routes registered ('supported-archs', 'probe-model', 'model-features', 'image-inputs', 'list-pipelines', 'device-info', 'clear-cache', 'list-gpus').");
+        HartsyLogs.Init("Web API routes registered ('supported-archs', 'probe-model', 'model-features', 'model-defaults', 'image-inputs', 'list-pipelines', 'device-info', 'clear-cache', 'list-gpus').");
     }
 
     /// <summary>Enumerate every live HartsyInference backend instance with its handler data.</summary>
@@ -224,7 +235,7 @@ public static class HartsyInferenceWebAPI
             return error;
         }
         ModelSupport.Family family = ModelSupport.Resolve(model.ModelClass?.CompatClass?.ID);
-        ResolvedModelVariant variant = ModelSupport.ResolveVariant(model);
+        RecipeIdentity recipe = family is null ? null : ModelSupport.Describe(model, family)?.Recipe;
         return new JObject
         {
             ["success"] = true,
@@ -235,9 +246,42 @@ public static class HartsyInferenceWebAPI
                 ModelSupport.Kind.Video => ModelSupport.SupportedVideoFeatures(model).ToString(),
                 _ => "None",
             }),
-            ["variant"] = variant?.Id,
-            ["variant_name"] = variant?.Variant.DisplayName,
-            ["variant_source"] = variant?.Source.ToString().ToLowerInvariant(),
+            ["variant"] = recipe?.VariantId,
+            ["variant_source"] = recipe?.VariantSource?.ToString().ToLowerInvariant(),
+        };
+    }
+
+    /// <summary>POST /API/HartsyInferenceGetModelDefaults: the recipe defaults the engine declares for ONE model's resolved
+    /// family and variant, for the gen page to show as placeholders. Read-only: nothing is set on a request, and the engine
+    /// applies these itself to any value left unset.</summary>
+    /// <remarks>Returns <c>{ success, model_name, installed, descriptor }</c>. <c>descriptor</c> is the engine's
+    /// <c>ModelDescriptor</c> wire form, whose <c>$type</c> is <c>image</c> or <c>video</c>. An unknown model, or a family
+    /// with no image or video recipe, answers <c>success: false</c> with an <c>error</c>.</remarks>
+    public static async Task<JObject> HartsyInferenceGetModelDefaults(Session session, string model_name)
+    {
+        await Task.CompletedTask;
+        if (!TryFindModel(model_name, out T2IModel model, out JObject error))
+        {
+            return error;
+        }
+        string compat = model.ModelClass?.CompatClass?.ID;
+        ModelSupport.Family family = ModelSupport.Resolve(compat);
+        ModelDescriptor descriptor = family is null ? null : ModelSupport.Describe(model, family);
+        if (descriptor is null)
+        {
+            return new JObject
+            {
+                ["success"] = false,
+                ["model_name"] = model.Name,
+                ["error"] = $"No recipe defaults for '{model.Name}': its architecture '{compat}' has no image or video recipe in this engine build.",
+            };
+        }
+        return new JObject
+        {
+            ["success"] = true,
+            ["model_name"] = model.Name,
+            ["installed"] = File.Exists(model.RawFilePath),
+            ["descriptor"] = JObject.Parse(JsonSerializer.Serialize(descriptor, DescriptorJson)),
         };
     }
 

@@ -7,9 +7,9 @@ using SwarmUI.Core;
 using SwarmUI.Text2Image;
 using SwarmUI.Utils;
 using HartsyInference.Engine;
+using HartsyInference.Engine.Catalog;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Recipes;
-using HartsyInference.Engine.Variants;
 using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.SafeTensors;
 
@@ -142,7 +142,7 @@ public static class ModelSupport
         Family family = Resolve(model?.ModelClass?.CompatClass?.ID);
         return family is null || family.Kind != Kind.Image
             ? ImageFeatures.None
-            : ModelCapabilities.ImageFeaturesFor(BuildSpec(model, family, stageBundles: false));
+            : (Describe(model, family) as ImageModelDescriptor)?.Features ?? ImageFeatures.None;
     }
 
     /// <summary>The conditioning the Engine's video recipe for <paramref name="compatClass"/> declares. <see cref="VideoFeatures.None"/> for non-video families. Asked of the registry at call time, like <see cref="SupportedFeatures(string)"/>.</summary>
@@ -162,15 +162,35 @@ public static class ModelSupport
         {
             return VideoFeatures.None;
         }
-        VideoFeatures features = ModelCapabilities.VideoFeaturesFor(BuildSpec(model, family, stageBundles: false));
+        VideoFeatures features = (Describe(model, family) as VideoModelDescriptor)?.Features ?? VideoFeatures.None;
         return family.Id == "minimax-h3" ? MiniMaxH3TaskFeatures(features, model.RawFilePath) : features;
     }
 
-    /// <summary>The variant the Engine resolves <paramref name="model"/> to, with the evidence that decided it; null for an unmapped model or a family with no variants.</summary>
-    public static ResolvedModelVariant ResolveVariant(SwarmUI.Text2Image.T2IModel model)
+    /// <summary>The Engine's recipe descriptor for <paramref name="model"/>'s resolved family and variant: its defaults, features,
+    /// input limits and the variant it resolved to. Null when the family has no recipe for its modality, so callers keep the
+    /// answer they gave before the catalog existed (no features, text-only, no variant).</summary>
+    public static ModelDescriptor Describe(SwarmUI.Text2Image.T2IModel model, Family family)
     {
-        Family family = Resolve(model?.ModelClass?.CompatClass?.ID);
-        return family is null ? null : ModelCapabilities.ResolveVariant(BuildSpec(model, family, stageBundles: false));
+        // The catalog describes image and video recipes; music has none.
+        if (family.Kind == Kind.Music)
+        {
+            return null;
+        }
+        return DescribeSpec(BuildSpec(model, family, stageBundles: false));
+    }
+
+    /// <summary>The Engine's recipe descriptor for <paramref name="spec"/>, or null when the family it routes to (variant
+    /// routing can move a spec to another family) has no recipe.</summary>
+    public static ModelDescriptor DescribeSpec(ModelSpec spec)
+    {
+        try
+        {
+            return Recipes.Describe(spec);
+        }
+        catch (RecipeNotRegisteredException)
+        {
+            return null;
+        }
     }
 
     /// <summary>Narrows the recipe's MiniMax-H3 task union to this checkpoint's task, so an fl2va model does not advertise reference features. MiniMax-H3 ships fl2va (first/last frame) and ref2va (references) as separate checkpoints.
@@ -211,6 +231,10 @@ public static class ModelSupport
             + $"{family.Kind.ToString().ToLowerInvariant()} recipe is registered for it in this engine build. "
             + $"Currently drivable: {drivable}.";
     }
+
+    /// <summary>The Engine's recipe catalog, shared by every caller in this extension. Stateless, so one static instance serves
+    /// these static callers before any backend has loaded an engine.</summary>
+    public static IRecipeCatalog Recipes { get; } = new RecipeCatalog();
 
     /// <summary>Compat classes the Engine can drive right now.</summary>
     public static IReadOnlyCollection<string> SupportedArchitectures =>
