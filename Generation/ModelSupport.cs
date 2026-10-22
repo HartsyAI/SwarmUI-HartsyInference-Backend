@@ -178,7 +178,7 @@ public static class ModelSupport
         }
         try
         {
-            return _recipes.Describe(BuildSpec(model, family, stageBundles: false));
+            return Recipes.Describe(BuildSpec(model, family, stageBundles: false));
         }
         catch (RecipeNotRegisteredException)
         {
@@ -225,8 +225,9 @@ public static class ModelSupport
             + $"Currently drivable: {drivable}.";
     }
 
-    /// <summary>The Engine's recipe catalog. Stateless, so a static instance serves these static callers before any backend has loaded an engine.</summary>
-    private static readonly IRecipeCatalog _recipes = new RecipeCatalog();
+    /// <summary>The Engine's recipe catalog, shared by every caller in this extension. Stateless, so one static instance serves
+    /// these static callers before any backend has loaded an engine.</summary>
+    public static IRecipeCatalog Recipes { get; } = new RecipeCatalog();
 
     /// <summary>Compat classes the Engine can drive right now.</summary>
     public static IReadOnlyCollection<string> SupportedArchitectures =>
