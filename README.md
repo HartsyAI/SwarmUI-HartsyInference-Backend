@@ -34,7 +34,7 @@ The [first generation guide](docs/guides/02-First-Generation.md) walks through e
 | Disk | Model downloads range from a few GB to dozens of GB. |
 | Network | Needed for the first build and for model downloads. |
 
-Model licenses differ from this extension's license. Check each model's page before you download it or use it commercially.
+Model licenses differ from this extension's license. Check each model's page before you download it or use it commercially. Fibo 2.0 (Bria) is CC-BY-NC-4.0, so non-commercial use only.
 
 ## Supported models
 
@@ -42,7 +42,7 @@ Support depends on the model family and, for some controls, on the specific chec
 
 | Type | Families |
 | --- | --- |
-| **Images** | Stable Diffusion 1.5, SDXL, SD3 and SD3.5, FLUX.1, FLUX.2 (dev and Klein), FLUX.3 Klein, Qwen-Image and Qwen-Image 2.1 (including the Turbo build), Z-Image, Krea 2, Chroma (including Radiance), AuraFlow, F-Lite, Ideogram 4, Boogu, ERNIE-Image, Lumina 2, HunyuanImage 2.1, OmniGen 2, Anima, HiDream-I1, Kandinsky 5, Lance 3B, Lens, MOSS-Image, Mage-Flow |
+| **Images** | Stable Diffusion 1.5, SDXL, SD3 and SD3.5, FLUX.1, FLUX.2 (dev and Klein), FLUX.3 Klein, Qwen-Image and Qwen-Image 2.1 (including the Turbo build), Z-Image, Krea 2, Chroma (including Radiance), AuraFlow, F-Lite, Ideogram 4, Boogu, ERNIE-Image, Lumina 2, HunyuanImage 2.1, OmniGen 2, Anima, HiDream-I1, Kandinsky 5, Lance 3B, Lens, MOSS-Image, Mage-Flow, Fibo 2.0 |
 | **Video** | Wan 2.1 and 2.2 (text-to-video, VACE, Animate, and speech-to-video), HunyuanVideo, LTX-Video and LTX-Video 2, Kandinsky 5 video (Lite and Pro), Lance 3B video, MiniMax H3 |
 | **Music** | ACE-Step 1.5 and ACE-Step v1, MiniMax Music 3 |
 
