@@ -101,9 +101,9 @@ Entries reuse Comfy's canonical names/URLs/hashes so files are shared with Comfy
       belong to the I2V flow only) and always sends Width/Height (not toggleable in core,
       so the UI's own resolution value always arrives). Frame counts and FPS are toggleable
       in core, so they reach the engine as null when toggled off. Frame counts snap to the
-      model's `4n+1`/`8n+1` rule and log the adjustment rather than rejecting. Sigma shift
-      / scheduler defaults are baked into the pipelines (Wan flow-shift 5.0; LTX dynamic μ
-      shift), no extra params exposed.
+      model's `4n+1`/`8n+1` rule and log the adjustment rather than rejecting. Sampler,
+      scheduler and shift come from the engine's recipe or, where the recipe leaves them
+      null, from the family's pipeline; no extra params are exposed.
       Muxing uses the frame rate the engine reports (`VideoGenerationResult.Fps`); the
       streaming path, which has no result object, asks `IVideoPlanningService.PlanAsync`
       for `EffectiveSettings.Fps`. Neither path defaults to a literal.
@@ -122,8 +122,8 @@ Entries reuse Comfy's canonical names/URLs/hashes so files are shared with Comfy
       with progress bridged (no latent preview yet at this point — that's V3).
       `IsValidForThisBackend`/`ValidateVideo` refuse per-checkpoint now, not per-family:
       each conditioning object (InitImage, EndFrame, references, driving video, LoRAs)
-      is checked against `ModelSupport.SupportedVideoFeatures(model)`, which asks the
-      engine's `ModelCapabilities` for the resolved variant rather than hard-coding
+      is checked against `ModelSupport.SupportedVideoFeatures(model)`, which reads the
+      engine's recipe descriptor for the resolved variant rather than hard-coding
       what's refused — refiners over video are refused unconditionally. LTX-2 compat IDs
       fall to the standard unsupported-architecture refusal. Cancellation (`_cancelCts`)
       checked per progress callback and in the muxer.

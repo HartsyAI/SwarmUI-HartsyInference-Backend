@@ -135,15 +135,15 @@ engine's own output for `wan-21-14b` (its default `base` variant), wrapped in th
   "installed": true,
   "descriptor": {
     "$type": "video",
-    "defaults": { "revision": 1, "steps": 50, "cfgScale": 5, "width": 832, "height": 480, "frames": 33, "fps": 25,
+    "defaults": { "revision": 2, "steps": 50, "cfgScale": 6, "width": 832, "height": 480, "frames": 81, "fps": 24,
                   "flowShift": null, "audioFlowShift": null, "sampler": null, "scheduler": null,
                   "lockedFields": "None", "referenceSizing": "Native" },
     "constraints": { "frames": { "step": 4, "offset": 1, "normalization": "SnapNearest", "max": null } },
     "features": "InitImage, Lora, PromptWeighting",
     "sampling": { "samplers": [], "schedules": [] },
-    "recipe": { "familyId": "wan-21-14b", "revision": 1, "variantId": "base", "variantSource": "Default", "profileId": null },
+    "recipe": { "familyId": "wan-21-14b", "revision": 2, "variantId": "base", "variantSource": "Default", "profileId": null },
     "modality": "Video",
-    "variants": ["vace", "animate", "s2v", "ti2v-5b", "animate2", "base"],
+    "variants": ["vace", "animate", "s2v", "ti2v-5b", "i2v-22-14b", "animate2", "base"],
     "profileBound": false
   }
 }
