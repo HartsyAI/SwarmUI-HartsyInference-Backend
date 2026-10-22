@@ -1724,7 +1724,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         }
         if (total is int t)
         {
-            int maxSegment = EngineH3Geometry.AlignFrameCount(frames ?? new EngineH3Recipe().Defaults.Frames.Value);
+            int maxSegment = EngineH3Geometry.AlignFrameCount(frames ?? new EngineH3Recipe().Defaults.Frames);
             try
             {
                 EngineH3ChainPlanner.Plan(t, context, maxSegment);

@@ -22,6 +22,7 @@ public static void Register()
     API.RegisterAPICall(HartsyInferenceGetSupportedArchs, false, HartsyInferencePermissions.PermUseHartsyInference);
     API.RegisterAPICall(HartsyInferenceProbeModel, false, HartsyInferencePermissions.PermUseHartsyInference);
     API.RegisterAPICall(HartsyInferenceGetModelFeatures, false, HartsyInferencePermissions.PermUseHartsyInference);
+    API.RegisterAPICall(HartsyInferenceGetModelDefaults, false, HartsyInferencePermissions.PermUseHartsyInference);
     API.RegisterAPICall(HartsyInferenceGetImageInputs, false, HartsyInferencePermissions.PermUseHartsyInference);
     API.RegisterAPICall(HartsyInferenceListLoadedPipelines, false, HartsyInferencePermissions.PermAdminHartsyInference);
     API.RegisterAPICall(HartsyInferenceGetDeviceInfo, false, HartsyInferencePermissions.PermAdminHartsyInference);
@@ -100,12 +101,55 @@ from `HartsyInferenceGetSupportedArchs` only covers the moment before it answers
   "model_name": "qwen_image_edit_2509_fp8_e4m3fn.safetensors",
   "features": ["img2img", "inpaint", "refedit", "lora", "controlnet"],
   "variant": "edit-plus",
-  "variant_name": "Qwen-Image-Edit-Plus",
   "variant_source": "callerhint"
 }
 ```
-`variant` is null for a family that declares no variants. `variant_source` is one of `structure`,
-`callerhint`, `metadata`, `filename` (a guess) or `default`.
+`variant` is null for a family that declares no variants. `variant_source` is the engine's `ModelVariantSource`
+lowercased (`structure`, `callerhint`, `metadata`, `filename` for a guess, or `default`), read from the recipe
+descriptor's `Recipe` identity. The variant's display name is not on the descriptor, so this route no longer returns one.
+
+### `HartsyInferenceGetModelDefaults`
+
+`Task<JObject> HartsyInferenceGetModelDefaults(Session session, string model_name)`
+
+Returns the recipe defaults the engine declares for **one** model's resolved family and variant, read from
+`IInferenceEngine.Recipes.Describe` (through `ModelSupport.Describe`). The gen page shows the video defaults
+(frames, fps) as placeholder text on the toggleable params. It never writes them into a field: the engine applies
+these values itself to any param left untoggled. Nothing is computed here, and the route is read-only.
+
+| | |
+|---|---|
+| Method | POST |
+| Path | `/API/HartsyInferenceGetModelDefaults` |
+| Permission | `use_hartsyinference` |
+| Mutating | false |
+
+**Returns (success):** `descriptor` is the engine's `ModelDescriptor` wire form, serialized with System.Text.Json
+(camelCase members, enums by name). Its `$type` is `image` or `video`. No file paths are included. The sample is the
+engine's own output for `wan-21-14b` (its default `base` variant), wrapped in the route's envelope:
+```json
+{
+  "success": true,
+  "model_name": "wan2.1_t2v_14B_fp8.safetensors",
+  "installed": true,
+  "descriptor": {
+    "$type": "video",
+    "defaults": { "revision": 1, "steps": 50, "cfgScale": 5, "width": 832, "height": 480, "frames": 33, "fps": 25,
+                  "flowShift": null, "audioFlowShift": null, "sampler": null, "scheduler": null,
+                  "lockedFields": "None", "referenceSizing": "Native" },
+    "constraints": { "frames": { "step": 4, "offset": 1, "normalization": "SnapNearest", "max": null } },
+    "features": "InitImage, Lora, PromptWeighting",
+    "sampling": { "samplers": [], "schedules": [] },
+    "recipe": { "familyId": "wan-21-14b", "revision": 1, "variantId": "base", "variantSource": "Default", "profileId": null },
+    "modality": "Video",
+    "variants": ["vace", "animate", "s2v", "ti2v-5b", "animate2", "base"],
+    "profileBound": false
+  }
+}
+```
+
+**Returns (error):** an unknown model, or a family with no image or video recipe (for example a music family), answers
+`{ "success": false, "model_name": "...", "error": "..." }`.
 
 ### `HartsyInferenceProbeModel`
 
@@ -156,7 +200,7 @@ set isn't registered, or the named model doesn't exist:
 `Task<JObject> HartsyInferenceGetImageInputs(Session session, string model_name = "", string arch_id = "")`
 
 What images a model takes as input, for the variant the engine resolves it to
-(`ModelCapabilities`), so Qwen-Image base and Edit builds, or Wan I2V and
+(the engine's recipe descriptors), so Qwen-Image base and Edit builds, or Wan I2V and
 Animate checkpoints, are described as what they are. The same engine limits
 drive the backend's refusals, so a request sized from this answer is not
 refused for its images.

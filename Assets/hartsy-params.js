@@ -125,6 +125,57 @@ const HartsyModelFeatures = {
 };
 
 /**
+ * Recipe defaults per model, from HartsyInferenceGetModelDefaults. They show only as placeholder text on the video
+ * params the user can toggle. Nothing is written into a field: the engine applies these values itself to any param
+ * left untoggled.
+ */
+const HartsyModelDefaults = {
+    /** "model|class" -> the route's descriptor, or null when it has none. Keyed on the class like HartsyModelFeatures. */
+    byModel: {},
+
+    /** Keys with a request in flight, so a burst of revisions sends one. */
+    pending: {},
+
+    /** Video param id -> the descriptor's defaults field its placeholder shows. */
+    videoPlaceholders: { videoframes: 'frames', text2videoframes: 'frames', videofps: 'fps' },
+
+    key(modelName, arch) {
+        return `${modelName}|${arch}`;
+    },
+
+    /** The model's descriptor, or null when not fetched yet or it has none. */
+    get(modelName, arch) {
+        let key = this.key(modelName, arch);
+        return modelName && key in this.byModel ? this.byModel[key] : null;
+    },
+
+    /** Fetch the model's defaults once, then re-run the feature-set changers so the placeholders follow. */
+    request(modelName, arch) {
+        let key = this.key(modelName, arch);
+        if (!modelName || key in this.byModel || this.pending[key]) {
+            return;
+        }
+        this.pending[key] = true;
+        genericRequest('HartsyInferenceGetModelDefaults', { model_name: modelName }, data => {
+            delete this.pending[key];
+            this.byModel[key] = data && data.success ? data.descriptor : null;
+            reviseBackendFeatureSet();
+        }, 0, () => { delete this.pending[key]; });
+    },
+
+    /** Shows a video descriptor's defaults as placeholder text, or clears them for any other model. */
+    showPlaceholders(descriptor) {
+        let video = descriptor && descriptor['$type'] == 'video' ? descriptor.defaults : null;
+        for (let [paramId, field] of Object.entries(this.videoPlaceholders)) {
+            let elem = document.getElementById(`input_${paramId}`);
+            if (elem) {
+                elem.placeholder = video ? `${video[field]}` : '';
+            }
+        }
+    },
+};
+
+/**
  * Core params that only work on some families, keyed by the engine ImageFeatures/VideoFeatures flag that
  * has to be present. Core shows every one of these for every model; the backend then refuses at generate
  * time (IsValidForThisBackend), which is far too late. The per-architecture feature map comes from
@@ -380,6 +431,11 @@ featureSetChangers.push(() => {
     if (hartsyUp && compat && !modelFeatures) {
         HartsyModelFeatures.request(currentModelHelper.curModel, currentModelHelper.curArch);
     }
+    let defaults = hartsyUp && compat ? HartsyModelDefaults.get(currentModelHelper.curModel, currentModelHelper.curArch) : null;
+    if (hartsyUp && compat && !defaults) {
+        HartsyModelDefaults.request(currentModelHelper.curModel, currentModelHelper.curArch);
+    }
+    HartsyModelDefaults.showPlaceholders(defaults);
     HartsyCoreGating.apply(compat, !hasAnyComfyBackend(), modelFeatures);
     let active = HartsyParamConfig.activeFlags(currentModelHelper.curCompatClass, currentModelHelper.curModel, modelFeatures);
     let inactive = HartsyParamConfig.allFlags.filter(f => !active.includes(f));
