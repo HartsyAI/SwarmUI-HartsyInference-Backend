@@ -1833,7 +1833,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             // come from Text2AudioStyle. An empty prompt means instrumental.
             Prompt = input.Get(T2IParamTypes.Prompt) ?? "",
             Genre = input.Get(T2IParamTypes.Text2AudioStyle, "") ?? "",
-            Duration = input.Get(T2IParamTypes.Text2AudioDuration, 10d),
+            // Unset unless the user toggled it on, so the engine's recipe picks the family's duration.
+            Duration = input.TryGet(T2IParamTypes.Text2AudioDuration, out double duration) ? duration : null,
             Vram = MapVramOverrides(input),
             Seed = seed < 0 ? Random.Shared.Next() : (int)(seed & 0x7FFFFFFF),
             InferSteps = NullableInt(input, T2IParamTypes.Steps),
