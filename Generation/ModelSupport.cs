@@ -74,6 +74,8 @@ public static class ModelSupport
         ["lens"] = new("lens", Kind.Image),
         ["krea-2"] = new("krea2", Kind.Image),
         ["mage-flow"] = new("mage-flow", Kind.Image),
+        // Core owns the fibo-2 compat class (Bria Fibo 2.0, CC-BY-NC-4.0). Text-to-image only; the Engine refuses references, a negative prompt and non-Euler samplers.
+        ["fibo-2"] = new("fibo2", Kind.Image),
 
         // ── Video (Engine VideoRecipeRegistry family ids; the Wan compat classes are registered verbatim,
         //    and WanVideoRecipe sniffs the checkpoint header to route the VACE / Animate / S2V variants) ──
