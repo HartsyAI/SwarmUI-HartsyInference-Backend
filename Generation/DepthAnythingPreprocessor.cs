@@ -1,10 +1,8 @@
-using SixLabors.ImageSharp.PixelFormats;
 using SwarmUI.Utils;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.PyTorch;
 using HartsyInference.Vision.DepthAnything;
-using ISImage = SixLabors.ImageSharp.Image;
 using EngineDepthPreprocessor = HartsyInference.Vision.DepthAnything.DepthAnythingPreprocessor;
 
 namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
@@ -26,11 +24,7 @@ public static class DepthPreprocessor
     {
         if (input is null) throw new ArgumentNullException(nameof(input));
 
-        using var src = ISImage.Load<Rgb24>(input.RawData);
-        int srcW = src.Width;
-        int srcH = src.Height;
-        byte[] rgb = new byte[srcW * srcH * 3];
-        src.CopyPixelDataTo(rgb);
+        (byte[] rgb, int srcW, int srcH) = RgbToImage.ToHwcRgb(input);
 
         float[] unitDepth;
         // The lock spans forward + free, not just the load: the model object is one shared instance, its forward

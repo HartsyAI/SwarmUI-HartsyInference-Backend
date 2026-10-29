@@ -1,12 +1,8 @@
-using SixLabors.ImageSharp.PixelFormats;
-using SixLabors.ImageSharp.Processing;
 using SwarmUI.Utils;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.PyTorch;
 using HartsyInference.Vision.Annotators;
-using ISImage = SixLabors.ImageSharp.Image;
-using ISSize = SixLabors.ImageSharp.Size;
 
 namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
@@ -209,16 +205,8 @@ public static class AnnotatorControlPreprocessors
     {
         int w = Math.Max(multiple, targetWidth / multiple * multiple);
         int h = Math.Max(multiple, targetHeight / multiple * multiple);
-        using var src = ISImage.Load<Rgb24>(input.RawData);
-        src.Mutate(ctx => ctx.Resize(new ResizeOptions
-        {
-            Size = new ISSize(w, h),
-            Mode = ResizeMode.Stretch,
-            Sampler = KnownResamplers.Bicubic,
-        }));
-        byte[] rgb = new byte[w * h * 3];
-        src.CopyPixelDataTo(rgb);
-        return (rgb, w, h);
+        (byte[] decoded, int srcW, int srcH) = RgbToImage.ToHwcRgb(input);
+        return (RgbToImage.ResizeHwcRgb(decoded, srcW, srcH, w, h), w, h);
     }
 
     private static unsafe Tensor UnitMapToConditioning(float[] unit, int w, int h, int targetWidth, int targetHeight)

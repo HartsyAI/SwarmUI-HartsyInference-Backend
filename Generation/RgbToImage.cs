@@ -1,10 +1,6 @@
-using System.IO;
-using SixLabors.ImageSharp;
-using SixLabors.ImageSharp.Formats.Png;
-using SixLabors.ImageSharp.PixelFormats;
-using SixLabors.ImageSharp.Processing;
+using ImageMagick;
+using ImageMagick.Formats;
 using SwarmUI.Media;
-using ISImage = SixLabors.ImageSharp.Image;
 using Image = SwarmUI.Utils.Image;
 using EngineFluxPipeline = HartsyInference.Diffusion.Pipelines.FluxPipeline;
 
@@ -26,12 +22,11 @@ public static class RgbToImage
                 nameof(rgbData));
         }
 
-        // ImageSharp's Image<Rgb24>.LoadPixelData expects the same HWC layout.
-        using var image = ISImage.LoadPixelData<Rgb24>(rgbData, width, height);
-        return new Image(image);
+        using MagickImage image = HwcRgbToMagick(rgbData, width, height);
+        return new Image(image.ToByteArray(MagickFormat.Png), MediaType.ImagePng);
     }
 
-    /// <summary>Wraps HWC RGB bytes plus a straight 8-bit alpha plane (255 = opaque) as an explicit RGBA PNG (colour type 6). A cutout needs its alpha to survive the encode, so ImageSharp's default colour type is not relied on.</summary>
+    /// <summary>Wraps HWC RGB bytes plus a straight 8-bit alpha plane (255 = opaque) as an explicit RGBA PNG (colour type 6). A cutout needs its alpha to survive the encode, so the encoder's default colour type is not relied on.</summary>
     public static Image FromHwcRgba(byte[] rgbData, byte[] alpha, int width, int height)
     {
         if (rgbData is null || rgbData.Length != width * height * 3)
@@ -54,13 +49,13 @@ public static class RgbToImage
             rgba[d + 2] = rgbData[s + 2];
             rgba[d + 3] = alpha[p];
         }
-        using var image = ISImage.LoadPixelData<Rgba32>(rgba, width, height);
-        using var stream = new MemoryStream();
-        image.SaveAsPng(stream, new PngEncoder { ColorType = PngColorType.RgbWithAlpha, CompressionLevel = PngCompressionLevel.Level1 });
-        return new Image(stream.ToArray(), MediaType.ImagePng);
+        using MagickImage image = new();
+        image.ReadPixels(rgba, new PixelReadSettings((uint)width, (uint)height, StorageType.Char, PixelMapping.RGBA));
+        image.Settings.SetDefines(new PngWriteDefines() { ColorType = ColorType.TrueColorAlpha, CompressionLevel = 1 });
+        return new Image(image.ToByteArray(MagickFormat.Png), MediaType.ImagePng);
     }
 
-    /// <summary>Plain resample of HWC RGB bytes to a new size (ImageSharp's default bicubic), used for a Refiner Upscale below 1, where there is nothing to super-resolve.</summary>
+    /// <summary>Plain resample of HWC RGB bytes to a new size (bicubic Catmull-Rom), used for a Refiner Upscale below 1, where there is nothing to super-resolve.</summary>
     public static byte[] ResizeHwcRgb(byte[] rgbData, int width, int height, int newWidth, int newHeight)
     {
         if (rgbData is null || rgbData.Length != width * height * 3)
@@ -73,30 +68,27 @@ public static class RgbToImage
         {
             return rgbData;
         }
-        using var image = ISImage.LoadPixelData<Rgb24>(rgbData, width, height);
-        image.Mutate(x => x.Resize(newWidth, newHeight));
-        byte[] rgb = new byte[newWidth * newHeight * 3];
-        image.CopyPixelDataTo(rgb);
-        return rgb;
+        using MagickImage image = HwcRgbToMagick(rgbData, width, height);
+        image.FilterType = FilterType.Catrom;
+        image.Resize(new MagickGeometry((uint)newWidth, (uint)newHeight) { IgnoreAspectRatio = true });
+        using IPixelCollection<ushort> pixels = image.GetPixels();
+        return pixels.ToByteArray(PixelMapping.RGB);
     }
 
     /// <summary>Reads only the image header for pixel dimensions, e.g. to size a video target from an init image's aspect.</summary>
     public static (int width, int height) GetDimensions(Image image)
     {
         if (image is null) throw new ArgumentNullException(nameof(image));
-        var info = ISImage.Identify(image.RawData);
-        return (info.Width, info.Height);
+        MagickImageInfo info = new(image.RawData);
+        return ((int)info.Width, (int)info.Height);
     }
 
     /// <summary>Like <see cref="ToHwcRgb"/> but resampled to an exact size first, to fit an init image to a video model's latent grid before VAE encoding.</summary>
     public static byte[] ToHwcRgbResized(Image image, int width, int height)
     {
         if (image is null) throw new ArgumentNullException(nameof(image));
-        using var frame = ISImage.Load<Rgb24>(image.RawData);
-        frame.Mutate(x => x.Resize(width, height));
-        byte[] rgb = new byte[width * height * 3];
-        frame.CopyPixelDataTo(rgb);
-        return rgb;
+        (byte[] rgb, int w, int h) = ToHwcRgb(image);
+        return ResizeHwcRgb(rgb, w, h, width, height);
     }
 
     /// <summary>Inverse of <see cref="FromHwcRgb"/>: extracts HWC-interleaved RGB bytes from a SwarmUI Image.</summary>
@@ -105,14 +97,21 @@ public static class RgbToImage
     {
         if (image is null) throw new ArgumentNullException(nameof(image));
 
-        // Decode whatever the image is encoded as (PNG, JPEG, etc.) to an Rgb24 frame.
-        using var frame = SixLabors.ImageSharp.Image.Load<Rgb24>(image.RawData);
-        int w = frame.Width;
-        int h = frame.Height;
-        byte[] rgb = new byte[w * h * 3];
-        // CopyPixelDataTo writes contiguous HWC bytes, the layout HartsyInference's
+        // Decode whatever the image is encoded as (PNG, JPEG, etc.) to 8-bit RGB, first frame only.
+        using MagickImage frame = new(image.RawData);
+        int w = (int)frame.Width;
+        int h = (int)frame.Height;
+        // ToByteArray writes contiguous HWC bytes, the layout HartsyInference's
         // ImagePostProcessor.RgbBytesToTensor expects.
-        frame.CopyPixelDataTo(rgb);
-        return (rgb, w, h);
+        using IPixelCollection<ushort> pixels = frame.GetPixels();
+        return (pixels.ToByteArray(PixelMapping.RGB), w, h);
+    }
+
+    /// <summary>Builds a Magick image from HWC-interleaved RGB bytes, for the encoders and resamplers that take Magick images.</summary>
+    public static MagickImage HwcRgbToMagick(byte[] rgbData, int width, int height)
+    {
+        MagickImage image = new();
+        image.ReadPixels(rgbData, new PixelReadSettings((uint)width, (uint)height, StorageType.Char, PixelMapping.RGB));
+        return image;
     }
 }

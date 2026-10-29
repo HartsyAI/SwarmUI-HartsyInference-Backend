@@ -1,10 +1,7 @@
-using SixLabors.ImageSharp.PixelFormats;
-using SixLabors.ImageSharp.Processing;
+using ImageMagick;
 using SwarmUI.Utils;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Utilities;
-using ISImage = SixLabors.ImageSharp.Image;
-using ISSize = SixLabors.ImageSharp.Size;
 using EngineControlNet = HartsyInference.Diffusion.Adapters.ControlNet;
 
 namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
@@ -43,21 +40,24 @@ public static unsafe class CannyPreprocessor
         return EdgesToRgbTensor(edges, targetW, targetH);
     }
 
-    /// <summary>Decode a Swarm <see cref="Image"/> as L8 (luminance), resize bicubic to the target dims, and return the row-major byte buffer.</summary>
+    /// <summary>Decode a Swarm <see cref="Image"/> as luminance (Rec. 709), resize bicubic to the target dims, and return the row-major byte buffer.</summary>
     private static byte[] LoadResizedGrayscale(Image inputImage, int w, int h)
     {
-        using var frame = ISImage.Load<L8>(inputImage.RawData);
+        using MagickImage frame = new(inputImage.RawData);
+        frame.Grayscale(PixelIntensityMethod.Rec709Luma);
         if (frame.Width != w || frame.Height != h)
         {
-            frame.Mutate(ctx => ctx.Resize(new ResizeOptions
-            {
-                Size = new ISSize(w, h),
-                Mode = ResizeMode.Stretch,
-                Sampler = KnownResamplers.Bicubic,
-            }));
+            frame.FilterType = FilterType.Catrom;
+            frame.Resize(new MagickGeometry((uint)w, (uint)h) { IgnoreAspectRatio = true });
         }
+        // Grayscale leaves R = G = B, so the red channel is the luminance.
+        using IPixelCollection<ushort> pixels = frame.GetPixels();
+        byte[] rgb = pixels.ToByteArray(PixelMapping.RGB);
         byte[] bytes = new byte[w * h];
-        frame.CopyPixelDataTo(bytes);
+        for (int i = 0; i < bytes.Length; i++)
+        {
+            bytes[i] = rgb[i * 3];
+        }
         return bytes;
     }
 
