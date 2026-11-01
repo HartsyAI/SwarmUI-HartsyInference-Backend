@@ -94,7 +94,7 @@
     </ItemGroup>
 
     <!-- Don't ship duplicates of packages the SwarmUI host already loads. SwarmUI.deps.props makes
-         the extension COMPILE against the same SixLabors / Newtonsoft / LiteDB / LLamaSharp / etc.
+         the extension COMPILE against the same Magick.NET / Newtonsoft / LiteDB / LLamaSharp / etc.
          the host provides at runtime; ExcludeAssets="runtime" keeps the compile references but stops
          their DLLs from being copied into our output. Without this, CopyLocalLockFileAssemblies above
          would duplicate them and trigger Swarm's "ships X.dll but host already has it" warning (and a
@@ -107,7 +107,6 @@
         <PackageReference Update="LLamaSharp.Backend.Cpu" ExcludeAssets="runtime" />
         <PackageReference Update="LLamaSharp.Backend.Cuda12" ExcludeAssets="runtime" />
         <PackageReference Update="Newtonsoft.Json" ExcludeAssets="runtime" />
-        <PackageReference Update="SixLabors.ImageSharp" ExcludeAssets="runtime" />
-        <PackageReference Update="SixLabors.ImageSharp.Drawing" ExcludeAssets="runtime" />
+        <PackageReference Update="Magick.NET-Q16-AnyCPU" ExcludeAssets="runtime" />
     </ItemGroup>
 </Project>
