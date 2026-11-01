@@ -43,7 +43,7 @@ public static unsafe class CannyPreprocessor
     /// <summary>Decode a Swarm <see cref="Image"/> as luminance (Rec. 709), resize bicubic to the target dims, and return the row-major byte buffer.</summary>
     private static byte[] LoadResizedGrayscale(Image inputImage, int w, int h)
     {
-        using MagickImage frame = new(inputImage.RawData);
+        using MagickImage frame = RgbToImage.DecodeSrgb(inputImage.RawData);
         frame.Grayscale(PixelIntensityMethod.Rec709Luma);
         if (frame.Width != w || frame.Height != h)
         {

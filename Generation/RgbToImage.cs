@@ -98,13 +98,21 @@ public static class RgbToImage
         if (image is null) throw new ArgumentNullException(nameof(image));
 
         // Decode whatever the image is encoded as (PNG, JPEG, etc.) to 8-bit RGB, first frame only.
-        using MagickImage frame = new(image.RawData);
+        using MagickImage frame = DecodeSrgb(image.RawData);
         int w = (int)frame.Width;
         int h = (int)frame.Height;
         // ToByteArray writes contiguous HWC bytes, the layout HartsyInference's
         // ImagePostProcessor.RgbBytesToTensor expects.
         using IPixelCollection<ushort> pixels = frame.GetPixels();
         return (pixels.ToByteArray(PixelMapping.RGB), w, h);
+    }
+
+    /// <summary>Decodes encoded image bytes to an sRGB Magick image, so CMYK sources export as RGB pixels.</summary>
+    public static MagickImage DecodeSrgb(byte[] encoded)
+    {
+        MagickImage frame = new(encoded);
+        frame.ColorSpace = ColorSpace.sRGB;
+        return frame;
     }
 
     /// <summary>Builds a Magick image from HWC-interleaved RGB bytes, for the encoders and resamplers that take Magick images.</summary>
