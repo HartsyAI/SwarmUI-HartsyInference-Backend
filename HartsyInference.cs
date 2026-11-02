@@ -100,6 +100,7 @@ public class HartsyInference : Extension
 
     public static T2IParamGroup VideoRestoreParamGroup;
     public static T2IRegisteredParam<string> RestoreModelParam;
+    public static T2IRegisteredParam<string> SeedVrGpuParam;
     public static T2IRegisteredParam<int> RestoreWidthParam;
     public static T2IRegisteredParam<int> RestoreHeightParam;
     public static T2IRegisteredParam<int> RestoreClipFramesParam;
@@ -655,6 +656,18 @@ public class HartsyInference : Extension
             // so free text would only produce typos that fail at generate time.
             GetValues: _ => [.. ModelCatalog.ForModality(Modality.Restore)
                 .Select(entry => $"{entry.Id}///{entry.DisplayName}")]));
+
+        // Which GPU the SeedVR pass runs on, so the main model and SeedVR can each have a card. Core's SeedVR group when it is there,
+        // else our Restore group. Only shown once a SeedVR model is picked: the choice means nothing until SeedVR runs.
+        SeedVrGpuParam = T2IParamTypes.Register<string>(new(
+            "SeedVR GPU",
+            "Which GPU the SeedVR restore runs on. 'Same as main GPU' keeps it on this backend's GPU.\nPick another GPU to run the main model and SeedVR side by side, each on its own card. The SeedVR weights load on the chosen GPU.",
+            "main",
+            Group: SwarmUI.Builtin_ComfyUIBackend.ComfyUIBackendExtension.GroupSeedVR ?? VideoRestoreParamGroup,
+            FeatureFlag: "hartsyinference",
+            OrderPriority: -9.8,
+            GetValues: _ => [.. GpuChoices.RestoreDeviceChoices().Select(choice => $"{choice.Value}///{choice.Name}")],
+            DependNonDefault: SwarmUI.Builtin_ComfyUIBackend.ComfyUIBackendExtension.SeedVRModel?.Type.ID ?? RestoreModelParam.Type.ID));
 
         RestoreWidthParam = T2IParamTypes.Register<int>(new(
             "Restore Target Width",

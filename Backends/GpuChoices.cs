@@ -60,6 +60,10 @@ public static class GpuChoices
         public override string[] Names => [.. ForCompute("auto").Choices.Select(c => c.Name)];
     }
 
+    /// <summary>The SeedVR GPU choices: the backend's own GPU first, then each CUDA GPU the engine passes, by its restore-device selector.</summary>
+    public static IReadOnlyList<Choice> RestoreDeviceChoices() =>
+        [new Choice("main", "Same as main GPU"), .. _cuda.Value.Select(c => new Choice($"cuda:{c.Value}", c.Name))];
+
     /// <summary>The second-GPU dropdowns: None, then each CUDA GPU, since the backend places these parts with CUDA selectors only.</summary>
     public class SecondGpuOptions : SettingsOptionsAttribute.AbstractImpl
     {
