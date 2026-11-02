@@ -54,6 +54,18 @@ public class HartsyInference : Extension
     public static T2IRegisteredParam<Image> AnimateBackgroundVideoParam;
     public static T2IRegisteredParam<Image> AnimateMaskVideoParam;
 
+    // Anima reference adapter tuning. Model-gated: hartsy_anima_ref is granted only for Anima checkpoints. Each param is sent only when toggled on.
+    public static T2IParamGroup AnimaReferenceParamGroup;
+    public static T2IRegisteredParam<string> AnimaReferenceAdapterParam;
+    public static T2IRegisteredParam<double> AnimaReferenceStrengthParam;
+    public static T2IRegisteredParam<double> AnimaReferenceGuidanceParam;
+    public static T2IRegisteredParam<string> AnimaReferenceCorrectionParam;
+    public static T2IRegisteredParam<double> AnimaReferenceRescalePhiParam;
+    public static T2IRegisteredParam<double> AnimaReferenceStartParam;
+    public static T2IRegisteredParam<double> AnimaReferenceEndParam;
+    public static T2IRegisteredParam<string> AnimaReferenceOutsideParam;
+    public static T2IRegisteredParam<int> AnimaReferenceMaxPixelsParam;
+
     // MiniMax-H3 long-form chaining: each segment holds the previous segment's tail fixed. Model-gated like WanAnimateParamGroup.
     public static T2IParamGroup MiniMaxH3ParamGroup;
     public static T2IRegisteredParam<int> H3ChainTotalFramesParam;
@@ -225,6 +237,10 @@ public class HartsyInference : Extension
             Description: "MiniMax-H3 long-form generation: output longer than one pass, produced as successive "
                 + "segments that each hold the previous segment's tail fixed while denoising only their own new "
                 + "frames.");
+
+        AnimaReferenceParamGroup = new("Anima Reference", Toggles: true, Open: false,
+            Description: "Anima reference adapter tuning. A reference image attached to the prompt box is what turns it on; "
+                + "these settings change how it is applied. Leave them off for the recommended defaults.");
 
         AnimateReferenceImageParam = T2IParamTypes.Register<Image>(new(
             "Animate Reference Image",
@@ -398,6 +414,87 @@ public class HartsyInference : Extension
             FeatureFlag: "hartsyinference,hartsy_refedit_choice",
             GetValues: _ => new List<string> { "auto", "denoise", "reference" },
             DependNonDefault: T2IParamTypes.InitImage.Type.ID));
+
+        // Anima reference adapter tuning. A reference image in the prompt box turns the path on; these only change how it is applied.
+        // The defaults are the released adapter's recommended settings and match the engine's own, so an untouched group is the plain path.
+        AnimaReferenceAdapterParam = T2IParamTypes.Register<string>(new(
+            "Reference Adapter",
+            "The Anima reference adapter: a LoRA file name in your LoRA folder.\nLeave empty for the released Anima reference adapter, which downloads on first use when side-model autofetch is on.",
+            "",
+            Toggleable: true,
+            Group: AnimaReferenceParamGroup,
+            FeatureFlag: "hartsyinference,hartsy_anima_ref"));
+
+        AnimaReferenceStrengthParam = T2IParamTypes.Register<double>(new(
+            "Reference Strength",
+            "How strongly the reference adapter's LoRA is applied on the reference pass.\n1 is the released default. Lower values weaken the likeness to the reference; 0 gives flat or noisy output.",
+            "1", Min: 0, Max: 4, Step: 0.05,
+            Toggleable: true,
+            Group: AnimaReferenceParamGroup,
+            FeatureFlag: "hartsyinference,hartsy_anima_ref",
+            ViewType: ParamViewType.SLIDER));
+
+        AnimaReferenceGuidanceParam = T2IParamTypes.Register<double>(new(
+            "Reference Guidance",
+            "Guidance for the reference branch, which pulls the image toward the reference.\n4.5 is recommended. Values near 20 give banded or noisy output.",
+            "4.5", Min: 0, Max: 20, Step: 0.5,
+            Toggleable: true,
+            Group: AnimaReferenceParamGroup,
+            FeatureFlag: "hartsyinference,hartsy_anima_ref",
+            ViewType: ParamViewType.SLIDER));
+
+        AnimaReferenceCorrectionParam = T2IParamTypes.Register<string>(new(
+            "Reference Correction",
+            "How the reference guidance is corrected on each step.\napg is the released default. rescale applies a standard std-rescale. none applies no correction.",
+            "apg",
+            Toggleable: true,
+            Group: AnimaReferenceParamGroup,
+            FeatureFlag: "hartsyinference,hartsy_anima_ref",
+            GetValues: _ => new List<string> { "apg", "rescale", "none" }));
+
+        AnimaReferenceRescalePhiParam = T2IParamTypes.Register<double>(new(
+            "Reference Rescale Phi",
+            "Blend for the rescale correction: 1 is fully rescaled, 0 is not rescaled. Only used when Reference Correction is rescale.",
+            "0.5", Min: 0, Max: 1, Step: 0.05,
+            Toggleable: true,
+            Group: AnimaReferenceParamGroup,
+            FeatureFlag: "hartsyinference,hartsy_anima_ref",
+            ViewType: ParamViewType.SLIDER));
+
+        AnimaReferenceStartParam = T2IParamTypes.Register<double>(new(
+            "Reference Start",
+            "Fraction of the sampling schedule where the reference starts. 0 is the first step.",
+            "0", Min: 0, Max: 1, Step: 0.01,
+            Toggleable: true,
+            Group: AnimaReferenceParamGroup,
+            FeatureFlag: "hartsyinference,hartsy_anima_ref",
+            ViewType: ParamViewType.SLIDER));
+
+        AnimaReferenceEndParam = T2IParamTypes.Register<double>(new(
+            "Reference End",
+            "Fraction of the sampling schedule where the reference stops. 1 is the last step.",
+            "1", Min: 0, Max: 1, Step: 0.01,
+            Toggleable: true,
+            Group: AnimaReferenceParamGroup,
+            FeatureFlag: "hartsyinference,hartsy_anima_ref",
+            ViewType: ParamViewType.SLIDER));
+
+        AnimaReferenceOutsideParam = T2IParamTypes.Register<string>(new(
+            "Reference Outside Window",
+            "What the reference does outside Reference Start to Reference End.\nkeep runs the reference on every step, the recommended default. drop runs plain guidance with no reference outside the window.",
+            "keep",
+            Toggleable: true,
+            Group: AnimaReferenceParamGroup,
+            FeatureFlag: "hartsyinference,hartsy_anima_ref",
+            GetValues: _ => new List<string> { "keep", "drop" }));
+
+        AnimaReferenceMaxPixelsParam = T2IParamTypes.Register<int>(new(
+            "Reference Max Pixels",
+            "Area the reference image is resized to, in pixels. 1048576 (one megapixel) is the released default. The engine accepts 262144 to 2097152.",
+            "1048576", Min: 262144, Max: 2097152, Step: 65536,
+            Toggleable: true,
+            Group: AnimaReferenceParamGroup,
+            FeatureFlag: "hartsyinference,hartsy_anima_ref"));
 
         // FaceID-PlusV2 shortcut strength. Sits in the Image Prompting group with Comfy's IP-Adapter params, so it shows
         // whenever an IP-Adapter is selected. Only faceid-plusv2 checkpoints read it; 1.0 matches IPAdapterFaceIDPlus's s_scale.
