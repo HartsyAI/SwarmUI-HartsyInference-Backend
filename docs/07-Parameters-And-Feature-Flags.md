@@ -387,7 +387,8 @@ params carry the ComfyUI flag, which this backend advertises and reads by ID (`H
 | `SeedVR Color Correction Behavior` | `lab` and `adain` are the engine's colour transfers (`SeedVr2ColorTransfer`); `wavelet` is the engine's `Strength` lerp at 0; `none` is neither. |
 | `SeedVR Split Latent`, `SeedVR Temporal Video Overlap` | On: chunks of `Restore Clip Frames`, with core's overlap (latent frames) times four as pixel frames. Off: the whole clip in one chunk, as core does. |
 | Seed | The SeedVR section's seed (base seed + 9 unless set), as core seeds it. |
-| `SeedVR GPU` (this backend's own param) | Runs the restore on another CUDA GPU (`RestoreRequest.Device`), so the main model and SeedVR each get a card. `Same as main GPU` keeps it on this backend's GPU. |
+| `SeedVR GPU` (in core's SeedVR group) | Runs core's SeedVR pass on another CUDA GPU (`RestoreRequest.Device`), so the main model and SeedVR each get a card. `Same as main GPU` keeps it on this backend's GPU. |
+| `Restore GPU` (in the Restore / Upscale group) | The same picker for the Restore / Upscale pass, so that pass works without core's group. |
 
 VRAM: the DiT streams its blocks under the backend's Low VRAM mode, and packs to Q8_0 under Maximum (the engine's `QuantizedCompute` lever). Auto keeps fp16 and streams it when it does not fit.
 

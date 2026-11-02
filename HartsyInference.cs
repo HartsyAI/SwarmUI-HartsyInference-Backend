@@ -100,7 +100,7 @@ public class HartsyInference : Extension
 
     public static T2IParamGroup VideoRestoreParamGroup;
     public static T2IRegisteredParam<string> RestoreModelParam;
-    public static T2IRegisteredParam<string> SeedVrGpuParam;
+    public static T2IRegisteredParam<string> SeedVrGpuParam, RestoreGpuParam;
     public static T2IRegisteredParam<int> RestoreWidthParam;
     public static T2IRegisteredParam<int> RestoreHeightParam;
     public static T2IRegisteredParam<int> RestoreClipFramesParam;
@@ -668,6 +668,17 @@ public class HartsyInference : Extension
             OrderPriority: -9.8,
             GetValues: _ => [.. GpuChoices.RestoreDeviceChoices().Select(choice => $"{choice.Value}///{choice.Name}")],
             DependNonDefault: SwarmUI.Builtin_ComfyUIBackend.ComfyUIBackendExtension.SeedVRModel?.Type.ID ?? RestoreModelParam.Type.ID));
+
+        // The Restore / Upscale pass's own GPU picker, shown with that group so it works without core's SeedVR group.
+        RestoreGpuParam = T2IParamTypes.Register<string>(new(
+            "Restore GPU",
+            "Which GPU the Restore / Upscale SeedVR pass runs on. 'Same as main GPU' keeps it on this backend's GPU.\nPick another GPU to run the main model and the restore side by side.",
+            "main",
+            Group: VideoRestoreParamGroup,
+            FeatureFlag: "hartsyinference",
+            OrderPriority: 9,
+            GetValues: _ => [.. GpuChoices.RestoreDeviceChoices().Select(choice => $"{choice.Value}///{choice.Name}")],
+            DependNonDefault: RestoreModelParam.Type.ID));
 
         RestoreWidthParam = T2IParamTypes.Register<int>(new(
             "Restore Target Width",
