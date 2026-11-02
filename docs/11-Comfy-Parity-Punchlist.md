@@ -154,7 +154,7 @@ upstream (waiting on HartsyInference.Core).
   deferred as a minor variant.
 - [x] **Upscaling**, `HartsyInference.Vision/Upscale` (Real-ESRGAN, image)
   and SeedVR2 restoration (`engine.Restore`, video+image, wired into this
-  extension's Restore / Upscale group) both ship, and since 2026-09-09 the
+  extension's Restore / Upscale group, and core's SeedVR group when that is on) both ship, and since 2026-09-09 the
   image-side "Refiner Upscale" / "Refiner Upscale Method" pair drives them
   without a refiner model (see P2). The latent methods remain P2.
 - [x] **Remove Background** (core `removebackground`, "internally uses RemBG").
