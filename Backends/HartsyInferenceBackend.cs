@@ -953,12 +953,14 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             {
                 string model = ResolveUpscaleModel(method, scale);
                 ModelSpec upscaleSpec = await ResolveAuxModel(model, Modality.Vision, cancel);
+                // Every frame is read at the source size; the upscaled size is only known after the first result.
+                int sourceWidth = width, sourceHeight = height;
                 List<byte[]> upscaled = [];
                 foreach (byte[] frame in frames)
                 {
                     VisionResult result = await RunVision(upscaleSpec, new VisionRequest
                     {
-                        Image = new EngineImage { Rgb = frame, Width = width, Height = height },
+                        Image = new EngineImage { Rgb = frame, Width = sourceWidth, Height = sourceHeight },
                         Mode = VisionMode.Upscale,
                         TargetWidth = targetWidth,
                         TargetHeight = targetHeight,
