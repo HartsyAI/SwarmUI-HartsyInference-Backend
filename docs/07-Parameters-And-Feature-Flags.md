@@ -209,8 +209,8 @@ Variation Seed, inpainting — on families whose recipe doesn't declare the matc
 `ImageFeatures`, using the per-architecture map that `HartsyInferenceGetSupportedArchs` now
 returns. That half only applies when no ComfyUI backend is loaded, since Comfy can service
 those on families our engine can't. The audio half (hiding Width/Height/Init Image on ACE-Step,
-YuE and MusicGen checkpoints) applies regardless, because those controls are meaningless on a
-music model whichever backend runs it.
+MiniMax Music 3 and YuE2 checkpoints, the `audioArchs` list) applies regardless, because those
+controls are meaningless on a music model whichever backend runs it.
 
 ⚠️ Three extensions now rewrite `param.feature_flag` on the same core params (ours, AudioLab's
 and API-Backends'), each with its own save/restore key. Never capture a value starting with
