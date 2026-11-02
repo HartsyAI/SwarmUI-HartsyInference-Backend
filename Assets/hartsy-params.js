@@ -26,6 +26,8 @@ const HartsyParamConfig = {
         // by ModelSupport.MiniMaxH3TaskFeatures for either fl2va or ref2va, so a plain compat-class match is
         // enough: no filename test needed.
         'minimax-h3': 'hartsy_h3_chain',
+        // Every Anima variant (base, preview, Turbo) declares RefEdit, so one exact class covers the whole reference tuning group.
+        'anima': 'hartsy_anima_ref',
     },
 
     /**

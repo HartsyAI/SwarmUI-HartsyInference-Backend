@@ -194,7 +194,8 @@ any group left with no visible params, so selecting MusicGen collapses the whole
 model half is a `featureSetChangers` entry (core's hook, also used by SwarmUI-AudioLab and
 SwarmUI-API-Backends) that grants/removes a small set of `hartsy_*` flags from the selected
 model's compat class: `hartsy_ideogram4`, `hartsy_acestep`, `hartsy_yue`, `hartsy_wan_animate`,
-`hartsy_audio_ref`, `hartsy_refedit_choice`. Params then require `"hartsyinference,<flag>"` —
+`hartsy_audio_ref`, `hartsy_refedit_choice`, `hartsy_anima_ref` (the Anima Reference group).
+Params then require `"hartsyinference,<flag>"` —
 comma is **AND**. Every such flag must also be in `HartsyInferenceBackend.DeclaredFeatures`, or
 the generation is refused with a message naming no param; `WarnOnUndeclaredFeatureFlags` checks
 this at startup for every registered param carrying a `hartsy`-prefixed flag.

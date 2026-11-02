@@ -265,6 +265,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         "hartsy_audio_ref",
         "hartsy_h3_chain",
         "hartsy_refedit_choice",
+        "hartsy_anima_ref",
     ];
 
     public override IEnumerable<string> SupportedFeatures => DeclaredFeatures;
@@ -1567,7 +1568,60 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 extra[EngineExtras.FluxToolsControlImage] = annotated;
             }
         }
+        AddAnimaReferenceExtras(input, family, initImage, extra);
         return extra;
+    }
+
+    /// <summary>Forwards the Anima reference options the user toggled on. Sent only where the reference path runs (a prompt image, or the
+    /// init image used as the reference): the engine turns that path on for any reference option, even with no image to read.</summary>
+    private static void AddAnimaReferenceExtras(T2IParamInput input, ModelSupport.Family family, Image initImage, Dictionary<string, object> extra)
+    {
+        if (family?.Id != "anima")
+        {
+            return;
+        }
+        bool hasPromptImages = input.TryGet(T2IParamTypes.PromptImages, out List<Image> promptImages) && promptImages is { Count: > 0 };
+        bool initAsReference = initImage is not null && input.Get(HartsyInference.InitImageModeParam, "auto") == "reference";
+        if (!hasPromptImages && !initAsReference)
+        {
+            return;
+        }
+        if (input.TryGet(HartsyInference.AnimaReferenceAdapterParam, out string adapter))
+        {
+            extra[EngineExtras.ReferenceAdapter] = adapter;
+        }
+        if (input.TryGet(HartsyInference.AnimaReferenceStrengthParam, out double strength))
+        {
+            extra[EngineExtras.ReferenceStrength] = strength;
+        }
+        if (input.TryGet(HartsyInference.AnimaReferenceGuidanceParam, out double guidance))
+        {
+            extra[EngineExtras.ReferenceGuidance] = guidance;
+        }
+        if (input.TryGet(HartsyInference.AnimaReferenceCorrectionParam, out string correction))
+        {
+            extra[EngineExtras.ReferenceCorrection] = correction;
+        }
+        if (input.TryGet(HartsyInference.AnimaReferenceRescalePhiParam, out double rescalePhi))
+        {
+            extra[EngineExtras.ReferenceRescalePhi] = rescalePhi;
+        }
+        if (input.TryGet(HartsyInference.AnimaReferenceStartParam, out double start))
+        {
+            extra[EngineExtras.ReferenceStart] = start;
+        }
+        if (input.TryGet(HartsyInference.AnimaReferenceEndParam, out double end))
+        {
+            extra[EngineExtras.ReferenceEnd] = end;
+        }
+        if (input.TryGet(HartsyInference.AnimaReferenceOutsideParam, out string outside))
+        {
+            extra[EngineExtras.ReferenceOutside] = outside;
+        }
+        if (input.TryGet(HartsyInference.AnimaReferenceMaxPixelsParam, out int maxPixels))
+        {
+            extra[EngineExtras.ReferenceMaxPixels] = (double)maxPixels;
+        }
     }
 
     /// <summary>Reads the video end image, by name as the Swarm field name varies across versions.</summary>
