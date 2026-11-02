@@ -459,7 +459,8 @@ public class HartsyInference : Extension
             Toggleable: true,
             Group: AnimaReferenceParamGroup,
             FeatureFlag: "hartsyinference,hartsy_anima_ref",
-            ViewType: ParamViewType.SLIDER));
+            ViewType: ParamViewType.SLIDER,
+            IsAdvanced: true));
 
         AnimaReferenceStartParam = T2IParamTypes.Register<double>(new(
             "Reference Start",
@@ -468,7 +469,8 @@ public class HartsyInference : Extension
             Toggleable: true,
             Group: AnimaReferenceParamGroup,
             FeatureFlag: "hartsyinference,hartsy_anima_ref",
-            ViewType: ParamViewType.SLIDER));
+            ViewType: ParamViewType.SLIDER,
+            IsAdvanced: true));
 
         AnimaReferenceEndParam = T2IParamTypes.Register<double>(new(
             "Reference End",
@@ -477,7 +479,8 @@ public class HartsyInference : Extension
             Toggleable: true,
             Group: AnimaReferenceParamGroup,
             FeatureFlag: "hartsyinference,hartsy_anima_ref",
-            ViewType: ParamViewType.SLIDER));
+            ViewType: ParamViewType.SLIDER,
+            IsAdvanced: true));
 
         AnimaReferenceOutsideParam = T2IParamTypes.Register<string>(new(
             "Reference Outside Window",
@@ -486,7 +489,8 @@ public class HartsyInference : Extension
             Toggleable: true,
             Group: AnimaReferenceParamGroup,
             FeatureFlag: "hartsyinference,hartsy_anima_ref",
-            GetValues: _ => new List<string> { "keep", "drop" }));
+            GetValues: _ => new List<string> { "keep", "drop" },
+            IsAdvanced: true));
 
         AnimaReferenceMaxPixelsParam = T2IParamTypes.Register<int>(new(
             "Reference Max Pixels",
@@ -494,7 +498,8 @@ public class HartsyInference : Extension
             "1048576", Min: 262144, Max: 2097152, Step: 65536,
             Toggleable: true,
             Group: AnimaReferenceParamGroup,
-            FeatureFlag: "hartsyinference,hartsy_anima_ref"));
+            FeatureFlag: "hartsyinference,hartsy_anima_ref",
+            IsAdvanced: true));
 
         // FaceID-PlusV2 shortcut strength. Sits in the Image Prompting group with Comfy's IP-Adapter params, so it shows
         // whenever an IP-Adapter is selected. Only faceid-plusv2 checkpoints read it; 1.0 matches IPAdapterFaceIDPlus's s_scale.
