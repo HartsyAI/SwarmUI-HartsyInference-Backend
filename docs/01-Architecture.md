@@ -207,7 +207,9 @@ in `08-Web-API-Routes.md`.
 7. Optional SeedVR2 restore pass: if the request set a Restore Model, the still or
    video path routes the decoded pixels/frames through `_engine.Restore.RestoreAsync`
    before returning. The video path calls `_engine.FreeMemory()` first — the resident
-   video DiT and SeedVR2's VAE peak can't both fit in VRAM at once.
+   video DiT and SeedVR2's VAE peak can't both fit in VRAM at once. When core's SeedVR
+   group is on (`SeedVR Model` set), `RunSeedVr` runs instead, after the refiner's
+   upscale, and this Restore Model pass is skipped (see `docs/07`).
 8. The Engine's result metadata (`result.Meta` — things like the checkpoint-sniffed
    architecture that Swarm has no way to derive itself) is copied onto
    `input.ExtraMeta["hartsy_*"]`, plus `hartsy_engine_seed`. Raw RGB/frame/audio bytes are

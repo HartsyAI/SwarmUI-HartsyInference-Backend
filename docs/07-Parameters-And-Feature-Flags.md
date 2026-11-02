@@ -372,3 +372,21 @@ The engine's performance profile (fused attention, fp8 GEMM, resident weights, e
 default-on inside the engine itself — the extension configures none of it. See the engine's
 [`docs/PERFORMANCE.md`](https://github.com/HartsyAI/HartsyInference/blob/main/docs/PERFORMANCE.md),
 which is the single source of truth for this.
+
+## Core's SeedVR group
+
+Core's `SeedVR` group (`SeedVR Model` and its siblings) is honored here, so a request set up in core restores the same way. Core's
+params carry the ComfyUI flag, which this backend advertises and reads by ID (`HonoredComfyParams`). `SeedVrPass` reads them, and
+`RunSeedVr` runs the pass, in core's order: pre-downscale, the upscale, then the SeedVR2 restore. Core's mapping:
+
+| Core param | Here |
+|---|---|
+| `SeedVR Model` | Picks the engine variant from the file's `txt_in.weight` width: 3072 is `seedvr2-7b`, anything else `seedvr2-3b`. The engine fetches its own weights on first use, since a bare SeedVR2 file cannot load without the catalog's VAE and frozen embeddings. |
+| `SeedVR Pre-Downscale`, `SeedVR Upscale` | Resize before the restore, to the same size core makes (the upscaled size snapped down to a multiple of 16). |
+| `SeedVR Upscale Method` | `pixel-*`: the engine's own area resize, which is the SeedVR2 contract. `model-*` / `real-esrgan-*`: Real-ESRGAN per frame first. `latent-*` and `pidmodel-*` are refused, since the engine has no path for them. |
+| `SeedVR Color Correction Behavior` | `lab` and `adain` are the engine's colour transfers (`SeedVr2ColorTransfer`); `wavelet` is the engine's `Strength` lerp at 0; `none` is neither. |
+| `SeedVR Split Latent`, `SeedVR Temporal Video Overlap` | On: chunks of `Restore Clip Frames`, with core's overlap (latent frames) times four as pixel frames. Off: the whole clip in one chunk, as core does. |
+| Seed | The SeedVR section's seed (base seed + 9 unless set), as core seeds it. |
+
+Not mapped: core's SeedVR section steps, CFG and sampler (the engine's restore is one step), and the refiner-as-SeedVR path
+(a SeedVR model picked as the Refiner Model). When both groups are on, core's group wins and the Restore / Upscale pass is skipped.

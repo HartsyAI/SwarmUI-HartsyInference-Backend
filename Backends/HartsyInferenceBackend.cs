@@ -811,7 +811,9 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         int width = result.Width, height = result.Height;
         // Passes below run on the engine's output, even when Init Image Creativity 0 returns the init image untouched.
         // Optional SeedVR2 restore pass. No FreeMemory here: RestoreService frees on pipeline load, and evicting cached models every generation would defeat the cache.
-        if (input.TryGet(HartsyInference.RestoreModelParam, out string restoreModel)
+        // Core's SeedVR group, when on, owns the restore and runs after the refiner's upscale below. Its pass replaces this one.
+        if (!SeedVrPass.IsActive(input)
+            && input.TryGet(HartsyInference.RestoreModelParam, out string restoreModel)
             && !string.IsNullOrWhiteSpace(restoreModel))
         {
             (rgb, width, height) = await RestoreStill(restoreModel, rgb, width, height, BuildRestoreKnobs(input), progress, cancel);
@@ -823,6 +825,13 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             && input.TryGet(T2IParamTypes.RefinerUpscale, out double upscaleFactor) && Math.Abs(upscaleFactor - 1.0) > 1e-6)
         {
             (rgb, width, height) = await UpscaleStill(input, upscaleFactor, rgb, width, height, progress, cancel);
+        }
+        if (SeedVrPass.IsActive(input))
+        {
+            List<byte[]> seedVrFrames;
+            (seedVrFrames, width, height) = await RunSeedVr(SeedVrPass.Read(input, SeedVrPass.VariantFor), [rgb], width, height,
+                still: true, input, progress, cancel);
+            rgb = seedVrFrames[0];
         }
         // Engine-side metadata (resolved arch/seed/steps) folds into Swarm's saved-image metadata; "arch" in
         // particular is checkpoint-sniffed by the engine and not derivable Swarm-side.
@@ -914,6 +923,102 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             throw new SwarmReadableErrorException($"HartsyInference: the SeedVR2 restore pass ({restoreModel}) failed: {ex.Message}");
         }
         return (rgb, width, height);
+    }
+
+    /// <summary>Runs core's SeedVR group over one still or a clip, in core's order: pre-downscale, the upscale, then the SeedVR2 restore.</summary>
+    /// <remarks>Core's Upscale Method picks the pre-upscale. <c>pixel-*</c> leaves the resize to the engine's area resize, which is the SeedVR2
+    /// contract. <c>model-*</c> and <c>real-esrgan-*</c> run Real-ESRGAN over each frame first. Core's latent and PiD methods have no engine path.
+    /// Split Latent off restores the whole clip in one chunk, as core does; on, chunks use the Restore Clip Frames setting and core's overlap in
+    /// latent frames becomes four pixel frames each.</remarks>
+    private async Task<(List<byte[]> Frames, int Width, int Height)> RunSeedVr(SeedVrSettings settings, List<byte[]> frames, int width, int height,
+        bool still, T2IParamInput input, IProgress<StepPreview> progress, CancellationToken cancel)
+    {
+        if (settings.Downscale < 1.0)
+        {
+            int downWidth = Math.Max(1, (int)Math.Round(width * settings.Downscale));
+            int downHeight = Math.Max(1, (int)Math.Round(height * settings.Downscale));
+            frames = [.. frames.Select(f => RgbToImage.ResizeHwcRgb(f, width, height, downWidth, downHeight))];
+            width = downWidth;
+            height = downHeight;
+        }
+        double scale = settings.Upscale / settings.Downscale;
+        int targetWidth = width, targetHeight = height;
+        if (Math.Abs(scale - 1.0) > 1e-6)
+        {
+            // Core snaps the upscaled size down to a multiple of 16 (SeedVR2's patch contract); the engine's area target follows it.
+            targetWidth = Math.Max(16, (int)Math.Round(width * scale) / 16 * 16);
+            targetHeight = Math.Max(16, (int)Math.Round(height * scale) / 16 * 16);
+            string method = settings.UpscaleMethod.Trim().ToLowerInvariant();
+            if (method.StartsWith("model-", StringComparison.Ordinal) || method.StartsWith("real-esrgan", StringComparison.Ordinal))
+            {
+                string model = ResolveUpscaleModel(method, scale);
+                ModelSpec upscaleSpec = await ResolveAuxModel(model, Modality.Vision, cancel);
+                List<byte[]> upscaled = [];
+                foreach (byte[] frame in frames)
+                {
+                    VisionResult result = await RunVision(upscaleSpec, new VisionRequest
+                    {
+                        Image = new EngineImage { Rgb = frame, Width = width, Height = height },
+                        Mode = VisionMode.Upscale,
+                        TargetWidth = targetWidth,
+                        TargetHeight = targetHeight,
+                    }, "SeedVR upscale", cancel);
+                    EngineImage up = result.Image
+                        ?? throw new SwarmReadableErrorException("HartsyInference: the SeedVR pre-upscale pass returned no image.");
+                    upscaled.Add(up.Rgb);
+                    width = up.Width;
+                    height = up.Height;
+                }
+                frames = upscaled;
+            }
+            else if (!method.StartsWith("pixel-", StringComparison.Ordinal))
+            {
+                throw new SwarmReadableErrorException(
+                    $"HartsyInference: SeedVR upscale method '{settings.UpscaleMethod}' has no engine path. Use a Pixel or Model method.");
+            }
+        }
+
+        ModelSpec restoreSpec = await ResolveAuxModel(settings.RestoreModelId, Modality.Restore, cancel);
+        int chunkFrames = input.TryGet(HartsyInference.RestoreClipFramesParam, out int rcf) ? rcf : 5;
+        RestoreRequest knobs = new()
+        {
+            TargetWidth = targetWidth,
+            TargetHeight = targetHeight,
+            Strength = settings.Strength,
+            ColorTransfer = settings.ColorTransfer,
+            Seed = settings.Seed,
+        };
+        if (!still)
+        {
+            knobs = knobs with
+            {
+                ClipFrames = settings.SplitLatent ? chunkFrames : frames.Count,
+                Overlap = settings.SplitLatent ? settings.TemporalOverlap * 4 : 0,
+            };
+        }
+        try
+        {
+            List<byte[]> restored = [];
+            if (still)
+            {
+                knobs = knobs with { Image = new EngineImage { Rgb = frames[0], Width = width, Height = height } };
+            }
+            else
+            {
+                knobs = knobs with { Frames = [.. frames.Select(f => new ImageData { Rgb = f, Width = width, Height = height })] };
+            }
+            await foreach (VideoFrame restoredFrame in _engine.Restore.RestoreAsync(restoreSpec, knobs, progress, cancel))
+            {
+                restored.Add(restoredFrame.Rgb);
+                width = restoredFrame.Width;
+                height = restoredFrame.Height;
+            }
+            return (restored, width, height);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException and not OutOfVramException and not SwarmReadableErrorException)
+        {
+            throw new SwarmReadableErrorException($"HartsyInference: the SeedVR2 pass ({settings.RestoreModelId}) failed: {ex.Message}");
+        }
     }
 
     /// <summary>Refiner Upscale with no refiner model: enlarges the finished still by <paramref name="factor"/> in pixel space.</summary>
@@ -1027,7 +1132,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         // Families that cannot stream throw NotSupportedException, and those requests fall back to buffering.
         bool wantsBoomerang = input.Get(T2IParamTypes.VideoBoomerang, false);
         bool wantsTrim = input.Get(T2IParamTypes.TrimVideoStartFrames, 0) > 0 || input.Get(T2IParamTypes.TrimVideoEndFrames, 0) > 0;
-        bool wantsRestore = input.TryGet(HartsyInference.RestoreModelParam, out string restoreModelCheck) && !string.IsNullOrWhiteSpace(restoreModelCheck);
+        bool wantsRestore = SeedVrPass.IsActive(input)
+            || (input.TryGet(HartsyInference.RestoreModelParam, out string restoreModelCheck) && !string.IsNullOrWhiteSpace(restoreModelCheck));
         bool wantsAudio = input.Get(T2IParamTypes.VideoAudioInput) is not null;
         // No generated soundtrack either: streaming has no AudioTrack, so one would be dropped. Core's HasJointAVLatents names those families.
         bool generatesAudio = input.Get(T2IParamTypes.Model)?.ModelClass?.CompatClass?.HasJointAVLatents == true;
@@ -1060,7 +1166,14 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         }
         // Boomerang is applied by the engine (VideoRecipeUtils.ToVideoFrames, via VideoRequest.VideoBoomerang), so it is not applied again here.
         // Optional SeedVR2 restore pass: frames go straight to the restore service, with no container round-trip.
-        if (input.TryGet(HartsyInference.RestoreModelParam, out string restoreModel)
+        if (SeedVrPass.IsActive(input))
+        {
+            // The resident T2V DiT and SeedVR2's VAE peak cannot share 24 GB.
+            _engine.FreeMemory();
+            (frames, width, height) = await RunSeedVr(SeedVrPass.Read(input, SeedVrPass.VariantFor), frames, width, height,
+                still: false, input, progress, cancel);
+        }
+        else if (input.TryGet(HartsyInference.RestoreModelParam, out string restoreModel)
             && !string.IsNullOrWhiteSpace(restoreModel))
         {
             // The resident T2V DiT and SeedVR2's VAE peak cannot share 24 GB.
@@ -2201,6 +2314,9 @@ public class HartsyInferenceBackend : AbstractT2IBackend
          "usetcfg",
          // Refiner Upscale Method: picks the pixel-space engine when there is no refiner model; see ResolveUpscaleModel.
          "refinerupscalemethod",
+         // Core's SeedVR group, run on the engine's SeedVR2 restore; see SeedVrPass and RunSeedVr.
+         "seedvrmodel", "seedvrpredownscale", "seedvrupscale", "seedvrupscalemethod", "seedvrcolorcorrectionbehavior",
+         "seedvrsplitlatent", "seedvrtemporalvideooverlap",
          // Style-model (FLUX.1 Redux) strengths, mapped onto the engine's redux.* Extra keys.
          "stylemodelmergestrength", "stylemodelmultiplystrength", "stylemodelapplystart",
          // IP-Adapter scheduling knobs, mapped onto the engine's ipadapter.* Extra keys.
