@@ -2338,6 +2338,12 @@ public class HartsyInferenceBackend : AbstractT2IBackend
 
     public override bool IsValidForThisBackend(T2IParamInput input)
     {
+        // Core's SeedVR pass runs after the base generation, so a method this backend cannot run is refused here, before the
+        // generation spends its time. Otherwise the job would finish and then fail, and the output would be lost.
+        if (!ValidateSeedVrMethod(input))
+        {
+            return false;
+        }
         T2IModel model = input.Get(T2IParamTypes.Model);
         if (model is null)
         {
@@ -2539,6 +2545,30 @@ public class HartsyInferenceBackend : AbstractT2IBackend
 
     /// <summary>Checks each composition object against the features the family's Engine recipe declares, and refuses by name.</summary>
     /// <remarks>Driven by <see cref="IArchitectureRecipe.Supports"/>, so it never claims more than the Engine applies.</remarks>
+    /// <summary>Refuses core's SeedVR upscale methods this backend has no pass for: the latent and PiD ones. Only checked when the
+    /// pass runs at a size change, since a method only applies then.</summary>
+    private static bool ValidateSeedVrMethod(T2IParamInput input)
+    {
+        if (!SeedVrPass.IsActive(input))
+        {
+            return true;
+        }
+        double scale = input.Get(ComfyUIBackendExtension.SeedVRUpscale, 1) / input.Get(ComfyUIBackendExtension.SeedVRPreDownscale, 1);
+        if (Math.Abs(scale - 1.0) <= 1e-6)
+        {
+            return true;
+        }
+        string method = input.Get(ComfyUIBackendExtension.SeedVRUpscaleMethod, "pixel-lanczos").Trim();
+        if (method.StartsWith("latent", StringComparison.OrdinalIgnoreCase) || method.StartsWith("pidmodel", StringComparison.OrdinalIgnoreCase))
+        {
+            input.RefusalReasons.Add(
+                $"HartsyInference: the SeedVR upscale method '{method}' needs a latent or PiD pass this engine does not run. "
+                + "Pick a Pixel or Model method.");
+            return false;
+        }
+        return true;
+    }
+
     private static bool ValidateImageFeatures(T2IParamInput input, string compat, ModelSupport.Family family)
     {
         if (!ValidateSamplingChoice(input, family))
