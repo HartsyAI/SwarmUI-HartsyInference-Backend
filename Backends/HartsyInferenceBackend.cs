@@ -266,6 +266,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         "hartsy_h3_chain",
         "hartsy_refedit_choice",
         "hartsy_anima_ref",
+        "hartsy_reference_size",
     ];
 
     public override IEnumerable<string> SupportedFeatures => DeclaredFeatures;
@@ -1692,21 +1693,31 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 extra[EngineExtras.FluxToolsControlImage] = annotated;
             }
         }
-        AddAnimaReferenceExtras(input, family, initImage, extra);
+        AddReferenceExtras(input, family, initImage, extra);
         return extra;
     }
 
-    /// <summary>Forwards the Anima reference options the user toggled on. Sent only where the reference path runs (a prompt image, or the
-    /// init image used as the reference): the engine turns that path on for any reference option, even with no image to read.</summary>
-    private static void AddAnimaReferenceExtras(T2IParamInput input, ModelSupport.Family family, Image initImage, Dictionary<string, object> extra)
+    /// <summary>Forwards the reference options the user toggled on, for the families that read them. Sent only where the reference path
+    /// runs (a prompt image, or the init image used as the reference): the engine turns that path on for any reference option, even with no image to read.</summary>
+    private static void AddReferenceExtras(T2IParamInput input, ModelSupport.Family family, Image initImage, Dictionary<string, object> extra)
     {
-        if (family?.Id != "anima")
+        bool anima = family?.Id == "anima";
+        bool moss = family?.Id == "moss-image";
+        if (!anima && !moss)
         {
             return;
         }
         bool hasPromptImages = input.TryGet(T2IParamTypes.PromptImages, out List<Image> promptImages) && promptImages is { Count: > 0 };
         bool initAsReference = initImage is not null && input.Get(HartsyInference.InitImageModeParam, "auto") == "reference";
         if (!hasPromptImages && !initAsReference)
+        {
+            return;
+        }
+        if (input.TryGet(HartsyInference.ReferenceMaxPixelsParam, out int maxPixels))
+        {
+            extra[EngineExtras.ReferenceMaxPixels] = (double)maxPixels;
+        }
+        if (!anima)
         {
             return;
         }
@@ -1741,10 +1752,6 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         if (input.TryGet(HartsyInference.AnimaReferenceOutsideParam, out string outside))
         {
             extra[EngineExtras.ReferenceOutside] = outside;
-        }
-        if (input.TryGet(HartsyInference.AnimaReferenceMaxPixelsParam, out int maxPixels))
-        {
-            extra[EngineExtras.ReferenceMaxPixels] = (double)maxPixels;
         }
     }
 

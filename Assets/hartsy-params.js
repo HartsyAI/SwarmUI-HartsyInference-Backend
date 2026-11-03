@@ -58,6 +58,11 @@ const HartsyParamConfig = {
             // byte-identical key sets, so ModelSupport.MiniMaxH3TaskFeatures also has to go by name.
             test: (compat, model) => compat === 'minimax-h3' && !model.includes('fl2va'),
         },
+        {
+            flag: 'hartsy_reference_size',
+            // Reference Max Pixels is read by two families, so one flag covers both: the exact-class map grants one flag per class.
+            test: (compat) => compat === 'anima' || compat === 'moss-image',
+        },
     ],
 
     /** Every flag this file controls. Anything not granted this pass is removed. */
@@ -282,10 +287,10 @@ const HartsyCoreGating = {
     /**
      * Our music compat classes. Core does not act on the compat class's IsAudioModel flag in JS at all — only
      * AudioLab's own hide-list does, and that is keyed on ITS virtual model classes (acestep_music, yue_music),
-     * not on a checkpoint file's compat class. So picking an ACE-Step/MiniMax-Music-3 checkpoint still shows
+     * not on a checkpoint file's compat class. So picking an ACE-Step/MiniMax-Music-3/YuE2 checkpoint still shows
      * Width, Height, Init Image, ControlNet and the rest of the image-only surface.
      */
-    audioArchs: ['ace-step-1_5', 'minimax-music-3'],
+    audioArchs: ['ace-step-1_5', 'minimax-music-3', 'yue-2'],
 
     /**
      * Image-only core params to hide for those. Deliberately shorter than AudioLab's equivalent list:

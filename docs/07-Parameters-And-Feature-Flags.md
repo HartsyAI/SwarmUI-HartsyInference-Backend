@@ -194,7 +194,8 @@ any group left with no visible params, so selecting MusicGen collapses the whole
 model half is a `featureSetChangers` entry (core's hook, also used by SwarmUI-AudioLab and
 SwarmUI-API-Backends) that grants/removes a small set of `hartsy_*` flags from the selected
 model's compat class: `hartsy_ideogram4`, `hartsy_acestep`, `hartsy_yue`, `hartsy_wan_animate`,
-`hartsy_audio_ref`, `hartsy_refedit_choice`, `hartsy_anima_ref` (the Anima Reference group).
+`hartsy_audio_ref`, `hartsy_refedit_choice`, `hartsy_anima_ref` (the Anima Reference group), and
+`hartsy_reference_size` (Reference Max Pixels, granted to both Anima and MOSS-Image).
 Params then require `"hartsyinference,<flag>"` —
 comma is **AND**. Every such flag must also be in `HartsyInferenceBackend.DeclaredFeatures`, or
 the generation is refused with a message naming no param; `WarnOnUndeclaredFeatureFlags` checks
@@ -209,8 +210,8 @@ Variation Seed, inpainting — on families whose recipe doesn't declare the matc
 `ImageFeatures`, using the per-architecture map that `HartsyInferenceGetSupportedArchs` now
 returns. That half only applies when no ComfyUI backend is loaded, since Comfy can service
 those on families our engine can't. The audio half (hiding Width/Height/Init Image on ACE-Step,
-YuE and MusicGen checkpoints) applies regardless, because those controls are meaningless on a
-music model whichever backend runs it.
+MiniMax Music 3 and YuE2 checkpoints, the `audioArchs` list) applies regardless, because those
+controls are meaningless on a music model whichever backend runs it.
 
 ⚠️ Three extensions now rewrite `param.feature_flag` on the same core params (ours, AudioLab's
 and API-Backends'), each with its own save/restore key. Never capture a value starting with
