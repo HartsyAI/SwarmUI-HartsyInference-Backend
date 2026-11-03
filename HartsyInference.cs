@@ -677,8 +677,7 @@ public class HartsyInference : Extension
             Group: VideoRestoreParamGroup,
             FeatureFlag: "hartsyinference",
             OrderPriority: 9,
-            GetValues: _ => [.. GpuChoices.RestoreDeviceChoices().Select(choice => $"{choice.Value}///{choice.Name}")],
-            DependNonDefault: RestoreModelParam.Type.ID));
+            GetValues: _ => [.. GpuChoices.RestoreDeviceChoices().Select(choice => $"{choice.Value}///{choice.Name}")]));
 
         RestoreWidthParam = T2IParamTypes.Register<int>(new(
             "Restore Target Width",
@@ -687,8 +686,7 @@ public class HartsyInference : Extension
             Min: 256, Max: 4096, Step: 16,
             Toggleable: true,
             Group: VideoRestoreParamGroup,
-            FeatureFlag: "hartsyinference",
-            DependNonDefault: RestoreModelParam.Type.ID));
+            FeatureFlag: "hartsyinference"));
 
         RestoreHeightParam = T2IParamTypes.Register<int>(new(
             "Restore Target Height",
@@ -697,8 +695,7 @@ public class HartsyInference : Extension
             Min: 256, Max: 4096, Step: 16,
             Toggleable: true,
             Group: VideoRestoreParamGroup,
-            FeatureFlag: "hartsyinference",
-            DependNonDefault: RestoreModelParam.Type.ID));
+            FeatureFlag: "hartsyinference"));
 
         RestoreClipFramesParam = T2IParamTypes.Register<int>(new(
             "Restore Clip Frames",
@@ -707,8 +704,7 @@ public class HartsyInference : Extension
             Min: 1, Max: 121, Step: 4,
             Toggleable: true,
             Group: VideoRestoreParamGroup,
-            FeatureFlag: "hartsyinference",
-            DependNonDefault: RestoreModelParam.Type.ID));
+            FeatureFlag: "hartsyinference"));
 
         RestoreOverlapParam = T2IParamTypes.Register<int>(new(
             "Restore Frame Overlap",
@@ -717,8 +713,7 @@ public class HartsyInference : Extension
             Min: 0, Max: 16, Step: 1,
             Toggleable: true,
             Group: VideoRestoreParamGroup,
-            FeatureFlag: "hartsyinference",
-            DependNonDefault: RestoreModelParam.Type.ID));
+            FeatureFlag: "hartsyinference"));
 
         RestoreStrengthParam = T2IParamTypes.Register<double>(new(
             "Restore Strength",
@@ -727,8 +722,7 @@ public class HartsyInference : Extension
             Min: 0, Max: 1, Step: 0.05,
             Toggleable: true,
             Group: VideoRestoreParamGroup,
-            FeatureFlag: "hartsyinference",
-            DependNonDefault: RestoreModelParam.Type.ID));
+            FeatureFlag: "hartsyinference"));
 
         // One group per music family, nested via T2IParamGroup.Parent. Each is model-gated by its params' flags, so a model
         // that honours none of them collapses the whole tree (hideUnsupportableParams hides groups with no visible params).
