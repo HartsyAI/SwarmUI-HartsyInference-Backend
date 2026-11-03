@@ -105,7 +105,7 @@ These are refused or left undone in code today, not hypothetical:
 |---|---|
 | No two-stage "generate an image, then animate it with a separate video model" flow (Comfy's `ImageToVideoGenInfo` / Video Model param) | `IsValidForThisBackend` refuses any non-video model with a `VideoModel` param set — no engine equivalent |
 | Comfy prompt-syntax tags `<object:…>`, `<clear:…>`, `<embed:…>`, `<break>` | `IsValidForThisBackend`'s `UnsupportedPromptSyntax` regex refuses these outright rather than feeding the raw tag into a text encoder |
-| No LoRA on music models | `ValidateMusic` refuses any LoRA selection for `acestep`/`musicgen`/`yue` |
+| No LoRA on music models | `ValidateMusic` refuses any LoRA selection for every music family (`acestep`, `minimaxmusic3`, `yue2`) |
 | HunyuanVideo image-to-video conditioning | `Generation/ModelSupport.cs`: the `hunyuan-video` family maps only the text-to-video recipe; I2V conditioning is a recipe TODO, not a mapping gap |
 | MiniMax-H3 fl2va vs ref2va task detection is filename-based | `ModelSupport.MiniMaxH3TaskFeatures` — the two checkpoint variants are byte-identical in key set and tensor shape, so there's no header sniff; an unrecognized filename keeps the full feature union rather than guessing |
 

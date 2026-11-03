@@ -95,9 +95,11 @@ public static class ModelSupport
         [T2IModelClassSorter.CompatMiniMaxH3.ID] = new("minimax-h3", Kind.Video),
 
         // ── Music (Engine MusicCatalog descriptor ids) ──
-        // SwarmUI-native music only: core registers ace-step-1_5 and minimax-music-3. Other families (YuE, MusicGen, …) belong to AudioLab, which maps them through its own model classes.
+        // SwarmUI-native music only: core registers ace-step-1_5, minimax-music-3 and yue-2. Other families (YuE v1, MusicGen, …) belong to AudioLab, which maps them through its own model classes.
         ["ace-step-1_5"] = new("acestep", Kind.Music),
         [T2IModelClassSorter.CompatMiniMaxMusic3.ID] = new("minimaxmusic3", Kind.Music),
+        // YuE2 (CC-BY-NC-4.0) shares no architecture with YuE v1. Core classifies the Comfy-Org single-file repack, which is the file the Engine's yue2 descriptor loads; the prompt carries the lyrics and Text2Audio Style the style tags, as for ACE-Step.
+        [T2IModelClassSorter.CompatYue2.ID] = new("yue2", Kind.Music),
     };
 
     /// <summary>The Engine family for <paramref name="compatClass"/>, or null when it has no mapping.</summary>
