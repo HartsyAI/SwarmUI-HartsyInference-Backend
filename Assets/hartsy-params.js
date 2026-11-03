@@ -58,6 +58,11 @@ const HartsyParamConfig = {
             // byte-identical key sets, so ModelSupport.MiniMaxH3TaskFeatures also has to go by name.
             test: (compat, model) => compat === 'minimax-h3' && !model.includes('fl2va'),
         },
+        {
+            flag: 'hartsy_reference_size',
+            // Reference Max Pixels is read by two families, so one flag covers both: the exact-class map grants one flag per class.
+            test: (compat) => compat === 'anima' || compat === 'moss-image',
+        },
     ],
 
     /** Every flag this file controls. Anything not granted this pass is removed. */

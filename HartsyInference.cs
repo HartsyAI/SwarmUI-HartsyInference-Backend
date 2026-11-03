@@ -64,7 +64,7 @@ public class HartsyInference : Extension
     public static T2IRegisteredParam<double> AnimaReferenceStartParam;
     public static T2IRegisteredParam<double> AnimaReferenceEndParam;
     public static T2IRegisteredParam<string> AnimaReferenceOutsideParam;
-    public static T2IRegisteredParam<int> AnimaReferenceMaxPixelsParam;
+    public static T2IRegisteredParam<int> ReferenceMaxPixelsParam;
 
     // MiniMax-H3 long-form chaining: each segment holds the previous segment's tail fixed. Model-gated like WanAnimateParamGroup.
     public static T2IParamGroup MiniMaxH3ParamGroup;
@@ -492,13 +492,15 @@ public class HartsyInference : Extension
             GetValues: _ => new List<string> { "keep", "drop" },
             IsAdvanced: true));
 
-        AnimaReferenceMaxPixelsParam = T2IParamTypes.Register<int>(new(
+        // Shared by the reference families that read reference.max_pixels: Anima and MOSS-Image. The range is MOSS's, the wider one;
+        // Anima's engine refuses anything above 2097152 by name.
+        ReferenceMaxPixelsParam = T2IParamTypes.Register<int>(new(
             "Reference Max Pixels",
-            "Area the reference image is resized to, in pixels. 1048576 (one megapixel) is the released default. The engine accepts 262144 to 2097152.",
-            "1048576", Min: 262144, Max: 2097152, Step: 65536,
+            "Area the reference image is resized to, in pixels. 1048576 (one megapixel) is the default. Anima accepts 262144 to 2097152; MOSS-Image accepts up to 16777216.",
+            "1048576", Min: 262144, Max: 16777216, Step: 65536,
             Toggleable: true,
-            Group: AnimaReferenceParamGroup,
-            FeatureFlag: "hartsyinference,hartsy_anima_ref",
+            Group: T2IParamTypes.GroupImagePrompting,
+            FeatureFlag: "hartsyinference,hartsy_reference_size",
             IsAdvanced: true));
 
         // FaceID-PlusV2 shortcut strength. Sits in the Image Prompting group with Comfy's IP-Adapter params, so it shows
