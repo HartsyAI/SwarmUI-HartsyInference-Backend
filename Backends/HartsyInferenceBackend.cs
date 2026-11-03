@@ -990,6 +990,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             Strength = settings.Strength,
             ColorTransfer = settings.ColorTransfer,
             Seed = settings.Seed,
+            Device = RestoreDevice(input, HartsyInference.SeedVrGpuParam),
+            Vram = MapVramOverrides(input),
         };
         if (!still)
         {
@@ -1123,7 +1125,14 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         TargetHeight = input.TryGet(HartsyInference.RestoreHeightParam, out int rh) ? rh : null,
         Strength = input.TryGet(HartsyInference.RestoreStrengthParam, out double rst) ? (float)rst : null,
         Seed = input.Get(T2IParamTypes.Seed, -1L) is long seed and >= 0 ? (int)(seed & 0x7FFFFFFF) : null,
+        Device = RestoreDevice(input, HartsyInference.RestoreGpuParam),
+        // The generation's VRAM Mode reaches the restore too, so a low-VRAM choice streams the restore's weights as well.
+        Vram = MapVramOverrides(input),
     };
+
+    /// <summary>The device a SeedVR pass runs on, from the picker of the path that runs it; null for this backend's own GPU.</summary>
+    private static string RestoreDevice(T2IParamInput input, T2IRegisteredParam<string> picker) =>
+        input.TryGet(picker, out string gpu) && !string.IsNullOrWhiteSpace(gpu) && gpu != "main" ? gpu : null;
 
     /// <summary>Runs a video generation, collecting the streamed frames and muxing them into a container.</summary>
     private async Task<Image> GenerateVideo(ModelSpec spec, T2IParamInput input, IProgress<StepPreview> progress, CancellationToken cancel)
