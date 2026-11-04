@@ -1,3 +1,5 @@
+using System;
+using System.Linq;
 using SwarmUI.Accounts;
 using SwarmUI.Core;
 using SwarmUI.Media;
@@ -240,8 +242,10 @@ public class HartsyInference : Extension
                 + "frames.");
 
         AnimaReferenceParamGroup = new("Anima Reference", Toggles: true, Open: false,
-            Description: "Anima reference adapter tuning. A reference image attached to the prompt box is what turns it on; "
-                + "these settings change how it is applied. Leave them off for the recommended defaults.");
+            Description: "Makes Anima match a character in a reference image. Attach the reference image to the prompt box to use it; "
+                + "these settings only change how strongly and where the reference is applied. Leave them off for the recommended defaults. "
+                + "The reference adapter is a LoRA by <a target=\"_blank\" href=\"https://huggingface.co/ElectronGirl/anima-ref-adapter\">ElectronGirl</a>. "
+                + $"<a target=\"_blank\" href=\"{Utilities.RepoDocsRoot}/Model%20Support.md#anima\">See the Anima docs here.</a>");
 
         AnimateReferenceImageParam = T2IParamTypes.Register<Image>(new(
             "Animate Reference Image",
@@ -420,15 +424,19 @@ public class HartsyInference : Extension
         // The defaults are the released adapter's recommended settings and match the engine's own, so an untouched group is the plain path.
         AnimaReferenceAdapterParam = T2IParamTypes.Register<string>(new(
             "Reference Adapter",
-            "The Anima reference adapter: a LoRA file name in your LoRA folder.\nLeave empty for the released Anima reference adapter, which downloads on first use when side-model autofetch is on.",
-            "",
+            "The LoRA that lets Anima read the reference image. Only used when a reference image is attached to the prompt box.\nLeave on Released adapter to use the official one, which downloads automatically the first time you use it (if automatic side-model downloads are turned off in the engine, it errors instead).\nPick another Anima LoRA only if it is the reference adapter file. Other Anima LoRAs fail with an error.",
+            "(Released Adapter)", IgnoreIf: "(Released Adapter)",
             Toggleable: true,
             Group: AnimaReferenceParamGroup,
-            FeatureFlag: "hartsyinference,hartsy_anima_ref"));
+            FeatureFlag: "hartsyinference,hartsy_anima_ref",
+            GetValues: s => ["(Released Adapter)///Released adapter (downloads on first use)", .. T2IParamTypes.CleanModelList(Program.T2IModelSets["LoRA"].ListModelsFor(s)
+                .Where(m => (m.ModelClass is not null && m.ModelClass.CompatClass == T2IModelClassSorter.CompatAnima && m.ModelClass.IsLora)
+                    || m.Name.Contains("ref_adapter", StringComparison.OrdinalIgnoreCase))
+                .Select(m => m.Name))]));
 
         AnimaReferenceStrengthParam = T2IParamTypes.Register<double>(new(
             "Reference Strength",
-            "How strongly the reference adapter's LoRA is applied on the reference pass.\n1 is the released default. Lower values weaken the likeness to the reference; 0 gives flat or noisy output.",
+            "How strongly the reference adapter is applied, which sets how closely the result matches the reference image.\n1 is recommended. Lower values (0.25 to 0.5) keep the composition with a weaker match. 0 gives flat or noisy output. Values above 1 push the match harder than recommended.",
             "1", Min: 0, Max: 4, Step: 0.05,
             Toggleable: true,
             Group: AnimaReferenceParamGroup,
@@ -437,7 +445,7 @@ public class HartsyInference : Extension
 
         AnimaReferenceGuidanceParam = T2IParamTypes.Register<double>(new(
             "Reference Guidance",
-            "Guidance for the reference branch, which pulls the image toward the reference.\n4.5 is recommended. Values near 20 give banded or noisy output.",
+            "How hard each step is pulled toward the reference image, like CFG but for the reference.\n4.5 is recommended. Higher values (8 to 12) pull harder and stay clean. Around 20 gives banded or noisy output.",
             "4.5", Min: 0, Max: 20, Step: 0.5,
             Toggleable: true,
             Group: AnimaReferenceParamGroup,
@@ -446,7 +454,7 @@ public class HartsyInference : Extension
 
         AnimaReferenceCorrectionParam = T2IParamTypes.Register<string>(new(
             "Reference Correction",
-            "How the reference guidance is corrected on each step.\napg is the released default. rescale applies a standard std-rescale. none applies no correction.",
+            "How the reference guidance is corrected after each step is combined.\napg (recommended) uses adaptive projected guidance. rescale applies a standard std-rescale, blended by Reference Rescale Phi. none applies no correction.",
             "apg",
             Toggleable: true,
             Group: AnimaReferenceParamGroup,
@@ -455,7 +463,7 @@ public class HartsyInference : Extension
 
         AnimaReferenceRescalePhiParam = T2IParamTypes.Register<double>(new(
             "Reference Rescale Phi",
-            "Blend for the rescale correction: 1 is fully rescaled, 0 is not rescaled. Only used when Reference Correction is rescale.",
+            "Only used when Reference Correction is rescale: how much of the rescale is applied. 1 is fully rescaled, 0 is not rescaled. 0.5 is the default.",
             "0.5", Min: 0, Max: 1, Step: 0.05,
             Toggleable: true,
             Group: AnimaReferenceParamGroup,
@@ -465,7 +473,7 @@ public class HartsyInference : Extension
 
         AnimaReferenceStartParam = T2IParamTypes.Register<double>(new(
             "Reference Start",
-            "Fraction of the sampling schedule where the reference starts. 0 is the first step.",
+            "Where the extra reference guidance starts, as a fraction of the steps. 0 is the first step (default). Steps before it follow Reference Outside Window.",
             "0", Min: 0, Max: 1, Step: 0.01,
             Toggleable: true,
             Group: AnimaReferenceParamGroup,
@@ -475,7 +483,7 @@ public class HartsyInference : Extension
 
         AnimaReferenceEndParam = T2IParamTypes.Register<double>(new(
             "Reference End",
-            "Fraction of the sampling schedule where the reference stops. 1 is the last step.",
+            "Where the extra reference guidance stops, as a fraction of the steps. 1 is the last step (default). Steps after it follow Reference Outside Window.",
             "1", Min: 0, Max: 1, Step: 0.01,
             Toggleable: true,
             Group: AnimaReferenceParamGroup,
@@ -485,7 +493,7 @@ public class HartsyInference : Extension
 
         AnimaReferenceOutsideParam = T2IParamTypes.Register<string>(new(
             "Reference Outside Window",
-            "What the reference does outside Reference Start to Reference End.\nkeep runs the reference on every step, the recommended default. drop runs plain guidance with no reference outside the window.",
+            "What happens on steps outside Reference Start to Reference End.\nkeep (recommended) leaves the reference on those steps, just without the extra guidance. drop turns the reference off there, so those steps run as plain guidance. At the defaults the window covers every step, so this has no effect.",
             "keep",
             Toggleable: true,
             Group: AnimaReferenceParamGroup,
