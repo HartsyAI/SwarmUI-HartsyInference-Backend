@@ -1424,6 +1424,22 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         return any ? overrides : null;
     }
 
+    /// <summary>Turns the Reference Adapter pick into the file the Engine loads. Blank stays blank, which is the released adapter the Engine fetches itself.</summary>
+    private static string ResolveAnimaReferenceAdapter(string name)
+    {
+        if (string.IsNullOrWhiteSpace(name) || name == "(Released Adapter)")
+        {
+            return "";
+        }
+        Program.T2IModelSets.TryGetValue("LoRA", out T2IModelHandler loraHandler);
+        string path = loraHandler?.GetModel(name)?.RawFilePath;
+        if (path is null)
+        {
+            throw new SwarmUserErrorException($"HartsyInference: Reference Adapter '{name}' was not found in the LoRA model folder.");
+        }
+        return path;
+    }
+
     /// <summary>Maps the Loras, LoraWeights, LoraTencWeights and LoraSectionConfinement lists onto the Engine's <see cref="LoraStack"/>.</summary>
     private static LoraStack BuildLoras(T2IParamInput input)
     {
@@ -1723,7 +1739,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         }
         if (input.TryGet(HartsyInference.AnimaReferenceAdapterParam, out string adapter))
         {
-            extra[EngineExtras.ReferenceAdapter] = adapter;
+            extra[EngineExtras.ReferenceAdapter] = ResolveAnimaReferenceAdapter(adapter);
         }
         if (input.TryGet(HartsyInference.AnimaReferenceStrengthParam, out double strength))
         {
