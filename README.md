@@ -56,6 +56,18 @@ Editing and restoration tools appear when the selected model supports them:
 - **Seamless tiling:** make images that repeat cleanly for textures and backgrounds.
 - **Guidance:** ControlNet, IP-Adapter, and LoRA, each with its own strength, when the model supports them.
 
+## Anima reference images
+
+Anima can match a character to a reference image. Attach the reference image to the prompt box, and the **Anima Reference** group applies. Leave the group off for the recommended defaults.
+
+- **Reference Adapter:** the LoRA that lets Anima read the reference image. Leave it on **Released adapter** to use the official one, which downloads the first time you use it. Pick another Anima LoRA only if it is the reference adapter file. Other Anima LoRAs fail with an error.
+- **Reference Strength:** how closely the result matches the reference. `1` is recommended. Lower values keep the composition with a weaker match, and `0` gives flat or noisy output.
+- **Reference Guidance:** how hard each step is pulled toward the reference. `4.5` is recommended. Values around `20` give banded or noisy output.
+- **Reference Correction:** how the guidance is corrected after each step. `apg` is recommended.
+- **Reference Start, Reference End, and Reference Outside Window:** where the extra reference guidance applies in the run. At the defaults it covers every step.
+
+Each setting's `?` explains it in the app. The released adapter comes from [ElectronGirl/anima-ref-adapter](https://huggingface.co/ElectronGirl/anima-ref-adapter). For Anima's own setup, see the [Anima section of the model docs](https://github.com/mcmonkeyprojects/SwarmUI/blob/master/docs/Model%20Support.md#anima).
+
 ## Benchmarks
 
 These numbers come from the engine's [image scoreboard](https://github.com/HartsyAI/HartsyInference/blob/main/benchmarks/scoreboards/IMAGE.md). Each row is measured on an RTX 4090, with the same request sent through the SwarmUI API to HartsyInference and to ComfyUI. Each value is the warm median of three runs after one cold run. The faster time is in bold.
