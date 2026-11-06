@@ -2,11 +2,8 @@
 using System;
 using Newtonsoft.Json.Linq;
 using HartsyInference.Engine.Services;
-using SixLabors.ImageSharp;
-using SixLabors.ImageSharp.PixelFormats;
-using SixLabors.ImageSharp.Formats.Jpeg;
-using SixLabors.ImageSharp.Formats.Webp;
-using ISImage = SixLabors.ImageSharp.Image;
+using ImageMagick;
+using ImageMagick.Formats;
 
 namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
@@ -65,13 +62,12 @@ public sealed class PreviewEncoder
         };
     }
 
-    /// <summary>Encodes raw HWC RGB bytes to JPEG via ImageSharp. Quality 70 is plenty for a preview and keeps frames typically under 30 KB.</summary>
+    /// <summary>Encodes raw HWC RGB bytes to JPEG via ImageMagick. Quality 70 is plenty for a preview and keeps frames typically under 30 KB.</summary>
     private static byte[] EncodeJpeg(byte[] rgb, int width, int height)
     {
-        using SixLabors.ImageSharp.Image<Rgb24> img = ISImage.LoadPixelData<Rgb24>(rgb, width, height);
-        using System.IO.MemoryStream ms = new();
-        img.Save(ms, new JpegEncoder { Quality = 70 });
-        return ms.ToArray();
+        using MagickImage img = RgbToImage.HwcRgbToMagick(rgb, width, height);
+        img.Quality = 70;
+        return img.ToByteArray(MagickFormat.Jpeg);
     }
 
     /// <summary>Returns true when every frame is a complete RGB24 image of the declared dimensions.</summary>
@@ -91,22 +87,18 @@ public sealed class PreviewEncoder
     /// <summary>Packages temporal latent previews as a looping animated WebP at six frames per second, matching Swarm's Comfy sampler cadence. Lossy quality 60 and the fastest method keep repeated WebSocket updates cheap.</summary>
     private static byte[] EncodeAnimatedWebp(byte[][] frames, int width, int height)
     {
-        using SixLabors.ImageSharp.Image<Rgb24> animation = ISImage.LoadPixelData<Rgb24>(frames[0], width, height);
-        animation.Frames.RootFrame.Metadata.GetWebpMetadata().FrameDelay = 167U;
-        for (int i = 1; i < frames.Length; i++)
+        using MagickImageCollection animation = new();
+        foreach (byte[] frameRgb in frames)
         {
-            using SixLabors.ImageSharp.Image<Rgb24> frame = ISImage.LoadPixelData<Rgb24>(frames[i], width, height);
-            frame.Frames.RootFrame.Metadata.GetWebpMetadata().FrameDelay = 167U;
-            animation.Frames.AddFrame(frame.Frames.RootFrame);
+            MagickImage frame = RgbToImage.HwcRgbToMagick(frameRgb, width, height);
+            frame.AnimationTicksPerSecond = 1000;
+            frame.AnimationDelay = 167;
+            frame.AnimationIterations = 0;
+            frame.Quality = 60;
+            animation.Add(frame);
         }
-        animation.Metadata.GetWebpMetadata().RepeatCount = 0;
-        using System.IO.MemoryStream stream = new();
-        animation.Save(stream, new WebpEncoder
-        {
-            FileFormat = WebpFileFormatType.Lossy,
-            Quality = 60,
-            Method = WebpEncodingMethod.Fastest,
-        });
-        return stream.ToArray();
+        // The WebP writer reads its defines from the first frame; Method 0 is the fastest encode.
+        animation[0].Settings.SetDefines(new WebPWriteDefines() { Lossless = false, Method = 0 });
+        return animation.ToByteArray(MagickFormat.WebP);
     }
 }

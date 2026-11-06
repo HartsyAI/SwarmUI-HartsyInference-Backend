@@ -1,13 +1,11 @@
 using System.IO;
 using System.Runtime.CompilerServices;
-using SixLabors.ImageSharp.PixelFormats;
 using SwarmUI.Core;
 using SwarmUI.Text2Image;
 using SwarmUI.Utils;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Vision.Detection;
-using ISImage = SixLabors.ImageSharp.Image;
 
 namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 
@@ -36,11 +34,9 @@ public static class OpenPoseControlPreprocessor
                 log($"Loading YOLO11n-pose for OpenPose ControlNet preprocessing: {path}");
                 entry.Preprocessor = new OpenPosePreprocessor(backend, path);
             }
-            using var src = ISImage.Load<Rgb24>(input.RawData);
-            byte[] rgb = new byte[src.Width * src.Height * 3];
-            src.CopyPixelDataTo(rgb);
-            Tensor result = entry.Preprocessor.Process(rgb, src.Width, src.Height, targetWidth, targetHeight);
-            log($"OpenPose skeleton rendered at {targetWidth}x{targetHeight} (source {src.Width}x{src.Height}).");
+            (byte[] rgb, int srcW, int srcH) = RgbToImage.ToHwcRgb(input);
+            Tensor result = entry.Preprocessor.Process(rgb, srcW, srcH, targetWidth, targetHeight);
+            log($"OpenPose skeleton rendered at {targetWidth}x{targetHeight} (source {srcW}x{srcH}).");
             return result;
         }
     }
