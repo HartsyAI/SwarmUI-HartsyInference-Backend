@@ -48,6 +48,7 @@ public static class SeedVrPass
         long seed = input.Get(T2IParamTypes.Seed, input.Get(T2IParamTypes.Seed) + 9, sectionId: T2IParamInput.SectionID_SeedVR, includeBase: false);
         return new SeedVrSettings(
             RestoreModelId: variantPick(model),
+            RestoreModelPath: model.RawFilePath,
             Downscale: downscale,
             Upscale: upscale,
             UpscaleMethod: method,
@@ -109,7 +110,8 @@ public static class SeedVrPass
 }
 
 /// <summary>The settings of one core-SeedVR pass, as the engine runs them.</summary>
-/// <param name="RestoreModelId">The engine catalog id for the variant.</param>
+/// <param name="RestoreModelId">The engine catalog id. It supplies the VAE and embedding every variant shares, and runs its own DiT when no file is picked.</param>
+/// <param name="RestoreModelPath">The checkpoint file core picked: the DiT the engine runs. Empty runs the catalog variant's own file.</param>
 /// <param name="Downscale">Core's pre-downscale: the image is resized by this factor before the upscale.</param>
 /// <param name="Upscale">Core's upscale factor, applied after the pre-downscale is undone.</param>
 /// <param name="UpscaleMethod">Core's upscale method. <c>pixel-*</c> leaves the resize to the engine's own area resize, which is the model's contract.</param>
@@ -118,6 +120,6 @@ public static class SeedVrPass
 /// <param name="SplitLatent">Core's split-latent switch. Off restores the whole clip in one chunk.</param>
 /// <param name="TemporalOverlap">Core's overlap, in latent frames. Four pixel frames make one latent frame.</param>
 /// <param name="Seed">The SeedVR section's seed.</param>
-public sealed record SeedVrSettings(string RestoreModelId, double Downscale, double Upscale, string UpscaleMethod,
+public sealed record SeedVrSettings(string RestoreModelId, string RestoreModelPath, double Downscale, double Upscale, string UpscaleMethod,
     SeedVr2ColorTransfer ColorTransfer, float Strength, bool SplitLatent,
     int TemporalOverlap, int Seed);
