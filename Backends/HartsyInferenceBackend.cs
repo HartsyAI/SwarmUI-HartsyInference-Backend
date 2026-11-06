@@ -871,12 +871,37 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 $"HartsyInference: '{id}' is neither a catalog model id nor a checkpoint path on this machine.");
         }
         IReadOnlyList<ModelAsset> missing = ModelDownloader.MissingAssets(spec.Catalog);
+        await FetchMissingAssets(spec.Catalog.DisplayName, missing, id, cancel);
+        return ModelResolver.Resolve(id, null, modality);
+    }
+
+    /// <summary>The SeedVR2 spec for a checkpoint picked in core's SeedVR Model list. The picked file is the DiT the engine
+    /// runs. The catalog id supplies only the VAE and embedding every variant shares, so the id's own DiT never downloads.</summary>
+    private static async Task<ModelSpec> ResolveSeedVrSpec(SeedVrSettings settings, CancellationToken cancel)
+    {
+        if (string.IsNullOrEmpty(settings.RestoreModelPath))
+        {
+            return await ResolveAuxModel(settings.RestoreModelId, Modality.Restore, cancel);
+        }
+        ModelSpec spec = ModelResolver.Resolve(settings.RestoreModelId, null, Modality.Restore);
+        if (spec.Catalog is null)
+        {
+            throw new SwarmReadableErrorException($"HartsyInference: '{settings.RestoreModelId}' is not a SeedVR2 catalog id.");
+        }
+        List<ModelAsset> sideAssets = ModelDownloader.MissingAssets(spec.Catalog).Where(asset => asset.Role != "transformer").ToList();
+        await FetchMissingAssets(spec.Catalog.DisplayName, sideAssets, settings.RestoreModelId, cancel);
+        return spec with { LocalPath = settings.RestoreModelPath };
+    }
+
+    /// <summary>Downloads the given assets of a catalog entry on first use, with the same logging and error text for every caller.</summary>
+    private static async Task FetchMissingAssets(string displayName, IReadOnlyList<ModelAsset> missing, string id, CancellationToken cancel)
+    {
         if (missing.Count == 0)
         {
-            return spec;
+            return;
         }
         string files = string.Join(", ", missing.Select(a => $"{a.Repo}/{a.RepoPath}"));
-        HartsyLogs.Info($"{spec.Catalog.DisplayName}: fetching {missing.Count} file(s) on first use ({files}).");
+        HartsyLogs.Info($"{displayName}: fetching {missing.Count} file(s) on first use ({files}).");
         try
         {
             Dictionary<string, int> lastBucket = new();
@@ -889,16 +914,15 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                     HartsyLogs.Debug($"Downloading '{asset.FileName}': {fraction * 100:0}%");
                 }
             }, cancel);
-            HartsyLogs.Info($"{spec.Catalog.DisplayName}: finished fetching {missing.Count} file(s).");
+            HartsyLogs.Info($"{displayName}: finished fetching {missing.Count} file(s).");
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             throw new SwarmReadableErrorException(
-                $"HartsyInference: could not fetch {spec.Catalog.DisplayName} ({files}): {ex.Message}\n\n"
+                $"HartsyInference: could not fetch {displayName} ({files}): {ex.Message}\n\n"
                 + $"Place the file(s) under '{Path.Combine(RepoPaths.ModelsRoot(), missing[0].TargetSubdir)}' by hand, "
                 + "or set HF_TOKEN in SwarmUI's environment if the repo is gated or private.");
         }
-        return ModelResolver.Resolve(id, null, modality);
     }
 
     /// <summary>SeedVR2 over one still, with the engine's failure text kept readable (the HTTP API otherwise shows "Something went wrong").</summary>
@@ -981,7 +1005,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             }
         }
 
-        ModelSpec restoreSpec = await ResolveAuxModel(settings.RestoreModelId, Modality.Restore, cancel);
+        ModelSpec restoreSpec = await ResolveSeedVrSpec(settings, cancel);
         int chunkFrames = input.TryGet(HartsyInference.RestoreClipFramesParam, out int rcf) ? rcf : 5;
         RestoreRequest knobs = new()
         {
