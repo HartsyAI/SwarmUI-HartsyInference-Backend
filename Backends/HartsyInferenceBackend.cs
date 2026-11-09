@@ -18,7 +18,7 @@ using Hartsy.Extensions.HartsyInferenceBackend.Services;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Exceptions;
-using HartsyInference.Core.MemoryManagement;
+using HartsyInference.Core.Memory.Vram;
 using SiLogs = HartsyInference.Core.Logging.Logs;
 using HartsyInference.Cuda;
 using HartsyInference.Engine;
