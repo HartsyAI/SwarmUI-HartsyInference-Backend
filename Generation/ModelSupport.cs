@@ -49,6 +49,8 @@ public static class ModelSupport
         ["flux-2"] = new("flux2", Kind.Image),
         ["flux-2-klein-4b"] = new("flux2", Kind.Image),
         ["flux-2-klein-9b"] = new("flux2", Kind.Image),
+        // Iris-Z (extension-registered class; FLUX non-commercial licence) is two variants of the Engine's flux2 recipe, told apart by the weights.
+        [ModelClassRegistrations.IrisZCompatClassId] = new("flux2", Kind.Image),
         // Core owns the FLUX.3 Klein and MOSS-Image classes: mapped here, never re-registered.
         [T2IModelClassSorter.CompatFlux3ImageKlein.ID] = new("flux3", Kind.Image),
         [T2IModelClassSorter.CompatMossImage.ID] = new("moss-image", Kind.Image),
