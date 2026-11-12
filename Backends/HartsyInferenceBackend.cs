@@ -1751,7 +1751,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         {
             extra["hartsy.ideogram4_magic_prompt_model"] = magicModel;
         }
-        // Iris-Z task params ride the engine's irisz.* Extra keys (HartsyInference.Engine.Features.RequestExtras, engine alpha.424+).
+        // Iris-Z task params ride the engine's irisz.* Extra keys (HartsyInference.Engine.Features.RequestExtras, engine alpha.425+).
         // Literal keys: the engine ignores them for every other model, and an older engine simply never reads them.
         if (input.TryGet(HartsyInference.IrisZTaskParam, out string irisTask) && irisTask != "auto")
         {

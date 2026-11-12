@@ -15,7 +15,7 @@ not here — they move too fast for a hand-maintained table to stay honest.
   check (see TODO below) would eliminate most retries.
 - **F16 VAE produces black output on Flux Schnell** — pipeline runs without error but
   values come out NaN/saturated. F32 VAE works fine.
-- **Iris-Z has not run on real weights.** The engine side (engine PR #801, `alpha.424`) is tested on
+- **Iris-Z has not run on real weights.** The engine side (engine PR #801, `alpha.425`) is tested on
   tiny random weights only, and nothing has gone through Swarm. Needs that engine version: on an
   older one the checkpoint loads as FLUX.2 Klein 9B or Dev and generates noise. Core's FLUX.2
   classes claim the shard that carries their marker tensor, so the "Iris-Z" group is also shown
