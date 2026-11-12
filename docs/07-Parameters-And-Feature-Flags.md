@@ -175,6 +175,10 @@ Into model-family groups:
   pose/face driving-video overrides.
 - **`Ideogram4ParamGroup`** ("Ideogram 4") — the magic-prompt toggle and its optional LLM-model
   override (`Generation.Ideogram4MagicPrompt`).
+- **`IrisZParamGroup`** ("Iris-Z") — the task (`image`, `rgbd`, `depth`, `paint`), how a depth map
+  is drawn or read, the working size and the depth seed count. They map onto the engine's
+  `irisz.*` Extra keys. `rgbd` returns two images: the image, then its depth map, which is a
+  second engine request (the `depth` task on the finished image).
 - **`VideoRestoreParamGroup`** ("Restore / Upscale") — SeedVR2 knobs (model, target
   width/height, clip frames, frame overlap, strength). Not named "Video": it runs over a still
   image just as well. This one keeps the plain `"hartsyinference"` flag, because the pass really
@@ -193,7 +197,7 @@ any group left with no visible params, so selecting MusicGen collapses the whole
 `"hartsyinference"` answers "is our backend running", never "can this model use this". The
 model half is a `featureSetChangers` entry (core's hook, also used by SwarmUI-AudioLab and
 SwarmUI-API-Backends) that grants/removes a small set of `hartsy_*` flags from the selected
-model's compat class: `hartsy_ideogram4`, `hartsy_acestep`, `hartsy_yue`, `hartsy_wan_animate`,
+model's compat class: `hartsy_ideogram4`, `hartsy_irisz`, `hartsy_acestep`, `hartsy_yue`, `hartsy_wan_animate`,
 `hartsy_audio_ref`, `hartsy_refedit_choice`, `hartsy_anima_ref` (the Anima Reference group), and
 `hartsy_reference_size` (Reference Max Pixels, granted to both Anima and MOSS-Image).
 Params then require `"hartsyinference,<flag>"` —

@@ -20,6 +20,7 @@ const HartsyParamConfig = {
     /** compat class (exact) -> flag granted for models of that class. */
     exactCompatFlags: {
         'ideogram-4': 'hartsy_ideogram4',
+        'iris-z': 'hartsy_irisz',
         'ace-step-1_5': 'hartsy_acestep',
         'minimax-music-3': 'hartsy_minimaxmusic',
         // Long-form chaining (VideoFeatures.LongFormChain). Unlike hartsy_audio_ref below, this is NOT stripped
@@ -43,6 +44,12 @@ const HartsyParamConfig = {
             test: (compat, model, features) => features
                 ? features.includes('img2img') && features.includes('refedit')
                 : compat === 'qwen-image',
+        },
+        {
+            flag: 'hartsy_irisz',
+            // Core's FLUX.2 classes claim the Iris-Z shard that carries their marker tensor (and any single-file
+            // merge), so the release's folder and file names also grant the flag.
+            test: (compat, model) => compat === 'iris-z' || /iris[-_ ]?z/i.test(model),
         },
         {
             flag: 'hartsy_wan_animate',

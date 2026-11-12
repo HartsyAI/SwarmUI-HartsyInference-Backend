@@ -259,6 +259,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         "video",          // Wan (T2V/I2V + VACE / Animate / S2V) + LTX-Video + LTX-2 + Lance Video + MiniMax-H3
         // Model-scoped UI flags, granted per selected model by Assets/hartsy-params.js. T2IEngine needs them declared here.
         "hartsy_ideogram4",
+        "hartsy_irisz",
         "hartsy_acestep",
         "hartsy_minimaxmusic",
         "hartsy_wan_animate",
@@ -733,6 +734,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             {
                 ModelSupport.Kind.Video => [await GenerateVideo(spec, input, progress, cancel)],
                 ModelSupport.Kind.Music => [await GenerateMusic(spec, input, progress, cancel)],
+                _ when IsIrisZRgbd(input) => await GenerateIrisZRgbd(spec, input, family, progress, cancel),
                 _ => [await GenerateImage(spec, input, family, progress, cancel)],
             };
 
@@ -800,6 +802,42 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             _genLock.Release(); // hand the GPU to the next queued generation, if any
             // No Status change: the backend stays RUNNING even when this generation failed, since only this request is at fault.
         }
+    }
+
+    /// <summary>The engine's Extra key naming the Iris-Z task.</summary>
+    private const string IrisZTaskKey = "irisz.task";
+
+    /// <summary>True when the request asks Iris-Z for an image together with its depth map.</summary>
+    private static bool IsIrisZRgbd(T2IParamInput input) =>
+        input.TryGet(HartsyInference.IrisZTaskParam, out string task) && task == "rgbd";
+
+    /// <summary>Iris-Z image + depth: the image and its depth are generated jointly, then the depth is estimated again from the finished image, which is what the reference returns by default. The depth map is the second output.</summary>
+    /// <remarks>Two engine requests, so this builds against any engine version: the first returns the jointly generated image, the second runs the <c>depth</c> task on it with the same seed. The restore, upscale and cutout passes are not applied to either output.</remarks>
+    private async Task<Image[]> GenerateIrisZRgbd(ModelSpec spec, T2IParamInput input, ModelSupport.Family family,
+        IProgress<StepPreview> progress, CancellationToken cancel)
+    {
+        ImageRequest request = BuildImageRequest(input, family);
+        // The joint depth is discarded here; asking for it skips the engine's own re-estimation, which the second request does.
+        Dictionary<string, object> jointExtra = new(request.Extra, StringComparer.Ordinal) { ["irisz.joint_depth"] = true };
+        ImageResult image = await _engine.Images.GenerateAsync(spec, request with { Extra = jointExtra }, progress, cancel);
+        Dictionary<string, object> depthExtra = new(request.Extra, StringComparer.Ordinal) { [IrisZTaskKey] = "depth" };
+        ImageRequest depthRequest = request with
+        {
+            Seed = image.Seed,
+            Extra = depthExtra,
+            Img2Img = new Img2Img { InitImage = new ImageData { Rgb = image.Rgb, Width = image.Width, Height = image.Height } },
+        };
+        ImageResult depth = await _engine.Images.GenerateAsync(spec, depthRequest, progress, cancel);
+        foreach (KeyValuePair<string, string> meta in image.Meta)
+        {
+            input.ExtraMeta[$"hartsy_{meta.Key}"] = meta.Value;
+        }
+        input.ExtraMeta["hartsy_engine_seed"] = image.Seed;
+        return
+        [
+            RgbToImage.FromHwcRgb(image.Rgb, image.Width, image.Height),
+            RgbToImage.FromHwcRgb(depth.Rgb, depth.Width, depth.Height),
+        ];
     }
 
     /// <summary>Runs a still-image generation and marshals the Engine's RGB result into a SwarmUI image.</summary>
@@ -1712,6 +1750,28 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         if (input.TryGet(HartsyInference.Ideogram4MagicPromptModelParam, out string magicModel) && !string.IsNullOrWhiteSpace(magicModel))
         {
             extra["hartsy.ideogram4_magic_prompt_model"] = magicModel;
+        }
+        // Iris-Z task params ride the engine's irisz.* Extra keys (HartsyInference.Engine.Features.RequestExtras, engine alpha.425+).
+        // Literal keys: the engine ignores them for every other model, and an older engine simply never reads them.
+        if (input.TryGet(HartsyInference.IrisZTaskParam, out string irisTask) && irisTask != "auto")
+        {
+            extra[IrisZTaskKey] = irisTask;
+        }
+        if (input.TryGet(HartsyInference.IrisZDepthFormatParam, out string irisDepthFormat))
+        {
+            extra["irisz.depth_format"] = irisDepthFormat;
+        }
+        if (input.TryGet(HartsyInference.IrisZInputDepthFormatParam, out string irisInputFormat))
+        {
+            extra["irisz.input_depth_format"] = irisInputFormat;
+        }
+        if (input.TryGet(HartsyInference.IrisZResolutionParam, out string irisResolution) && int.TryParse(irisResolution, out int irisSide))
+        {
+            extra["irisz.resolution"] = irisSide;
+        }
+        if (input.TryGet(HartsyInference.IrisZDepthSeedsParam, out int irisSeeds))
+        {
+            extra["irisz.depth_seeds"] = irisSeeds;
         }
         // FLUX.1 Canny/Depth are plain Flux.1 checkpoints with a wider x_embedder, so there is no ControlNet slot to key preprocessing off.
         // The engine only learns the variant after loading weights, so a filename heuristic on the main model stands in, as in

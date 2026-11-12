@@ -82,6 +82,14 @@ public class HartsyInference : Extension
     // IP-Adapter FaceID-PlusV2 shortcut strength (read by Generation.IpAdapterResolver).
     public static T2IRegisteredParam<double> FaceIdV2WeightParam;
 
+    // Iris-Z task params (image, image + depth, image to depth, depth to image), mapped onto the engine's irisz.* Extra keys.
+    public static T2IParamGroup IrisZParamGroup;
+    public static T2IRegisteredParam<string> IrisZTaskParam;
+    public static T2IRegisteredParam<string> IrisZDepthFormatParam;
+    public static T2IRegisteredParam<string> IrisZInputDepthFormatParam;
+    public static T2IRegisteredParam<string> IrisZResolutionParam;
+    public static T2IRegisteredParam<int> IrisZDepthSeedsParam;
+
     // Ideogram 4 magic-prompt params (see Generation.Ideogram4MagicPrompt).
     public static T2IParamGroup Ideogram4ParamGroup;
     public static T2IRegisteredParam<bool> Ideogram4MagicPromptParam;
@@ -548,6 +556,61 @@ public class HartsyInference : Extension
             Group: Ideogram4ParamGroup,
             FeatureFlag: "hartsyinference,hartsy_ideogram4",
             DependNonDefault: Ideogram4MagicPromptParam.Type.ID));
+
+        // Iris-Z: one model, four tasks. Every param is Toggleable for the same flag reason as Ideogram 4.
+        IrisZParamGroup = new("Iris-Z", Toggles: false, Open: true, IsAdvanced: false);
+
+        IrisZTaskParam = T2IParamTypes.Register<string>(new(
+            "Iris-Z Task",
+            "What Iris-Z does with this request.\n'image' = prompt to image.\n'rgbd' = prompt to image plus its depth map, returned as a second image.\n'depth' = estimate the depth of the Init Image (the prompt, steps and CFG are not used).\n'paint' = generate an image from an Init Image that is a depth map.\n'auto' = 'depth' when an Init Image is set, 'image' otherwise.",
+            "auto",
+            Toggleable: true,
+            IgnoreIf: "auto",
+            Group: IrisZParamGroup,
+            FeatureFlag: "hartsyinference,hartsy_irisz",
+            GetValues: _ => new List<string> { "auto", "image", "rgbd", "depth", "paint" }));
+
+        IrisZDepthFormatParam = T2IParamTypes.Register<string>(new(
+            "Iris-Z Depth Output",
+            "How a depth map is drawn.\n'colours' = near is red, far is blue, sky is black.\n'depth' = grey, bright is far.\n'disparity' = grey, bright is near.",
+            "colours",
+            Toggleable: true,
+            IgnoreIf: "colours",
+            Group: IrisZParamGroup,
+            FeatureFlag: "hartsyinference,hartsy_irisz",
+            GetValues: _ => new List<string> { "colours", "depth", "disparity" }));
+
+        IrisZInputDepthFormatParam = T2IParamTypes.Register<string>(new(
+            "Iris-Z Depth Input",
+            "For the 'paint' task: how the Init Image encodes depth.\n'depth' = bright is far.\n'disparity' = bright is near (MiDaS and Depth Anything output).",
+            "depth",
+            Toggleable: true,
+            IgnoreIf: "depth",
+            Group: IrisZParamGroup,
+            FeatureFlag: "hartsyinference,hartsy_irisz",
+            GetValues: _ => new List<string> { "depth", "disparity" }));
+
+        IrisZResolutionParam = T2IParamTypes.Register<string>(new(
+            "Iris-Z Working Size",
+            "For the 'depth' and 'paint' tasks: the size Iris-Z works at, about 512x512 or 1024x1024 pixels in the Init Image's shape.\n'auto' = 1024 for 'paint'; for 'depth', 512 below half a megapixel and 1024 above. A depth map is returned at the Init Image's own size.",
+            "auto",
+            Toggleable: true,
+            IgnoreIf: "auto",
+            Group: IrisZParamGroup,
+            IsAdvanced: true,
+            FeatureFlag: "hartsyinference,hartsy_irisz",
+            GetValues: _ => new List<string> { "auto", "512", "1024" }));
+
+        IrisZDepthSeedsParam = T2IParamTypes.Register<int>(new(
+            "Iris-Z Depth Seeds",
+            "For the 'depth' task: how many seeds to estimate with and combine (per-pixel median). 1 is the default; the published benchmarks use 10. Each seed costs one more 4-step pass.",
+            "1",
+            Min: 1, Max: 16,
+            Toggleable: true,
+            IgnoreIf: "1",
+            Group: IrisZParamGroup,
+            IsAdvanced: true,
+            FeatureFlag: "hartsyinference,hartsy_irisz"));
 
         // Restore (SeedVR2): one-step restoration/upscale over the generated frames before muxing. The target is an area,
         // not a scale factor. Enabled by toggling the model param on; params are Toggleable for the same flag reason as Ideogram 4.

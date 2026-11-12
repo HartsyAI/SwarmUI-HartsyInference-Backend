@@ -29,6 +29,15 @@ public static class ModelClassRegistrations
     /// <summary>F-Lite compat + model class ID.</summary>
     public const string FLiteCompatClassId = "f-lite";
 
+    /// <summary>Iris-Z compat class ID (Sperid Labs' FLUX.2 fine-tunes that generate images and depth).</summary>
+    public const string IrisZCompatClassId = "iris-z";
+
+    /// <summary>Iris-Z-small model class ID (FLUX.2 Klein base 9B fine-tune).</summary>
+    public const string IrisZSmallClassId = "iris-z-small";
+
+    /// <summary>Iris-Z-big model class ID (FLUX.2 Dev fine-tune).</summary>
+    public const string IrisZBigClassId = "iris-z-big";
+
     /// <summary>Registers every extension-owned model class. Call once, at pre-init, and only for classes core does not define: <c>T2IModelClassSorter.Register</c> and <c>RegisterCompat</c> use <c>Dictionary.Add</c>, so re-registering an ID throws.</summary>
     public static void RegisterAll()
     {
@@ -36,6 +45,7 @@ public static class ModelClassRegistrations
         RegisterLance();
         // MusicGen and YuE belong to AudioLab, not SwarmUI-native music classes. Core owns ace-step-1_5 and minimax-music-3.
         RegisterFLite();
+        RegisterIrisZ();
         // Core registers Qwen-Image 2.1 (compat, model and VAE classes) and Mage-Flow (compat and model classes), so nothing is added here.
     }
 
@@ -95,6 +105,60 @@ public static class ModelClassRegistrations
             IsThisModelOfClass = (model, header) =>
                 header is not null && header.ContainsKey("blocks.0.cross_attn.context_kv.weight"),
         });
+    }
+
+    /// <summary>Iris-Z (speridlabs/iris-z, FLUX non-commercial licence): FLUX.2 weights plus a modality embedding. The release is a folder of transformer shards beside a <c>config.json</c>, so a shard is recognized by that file; a single-file merge is recognized by the <c>modality_in.weight</c> tensor. Core's FLUX.2 classes are registered first and win any shard that carries their marker tensor; the Engine still runs those as Iris-Z, because it reads the whole shard set.</summary>
+    private static void RegisterIrisZ()
+    {
+        T2IModelCompatClass compat = T2IModelClassSorter.RegisterCompat(new() { ID = IrisZCompatClassId, ShortCode = "IrisZ", LorasTargetTextEnc = false, VaeFamily = T2IModelClassSorter.VaeFlux2 });
+        T2IModelClassSorter.Register(new T2IModelClass
+        {
+            ID = IrisZSmallClassId,
+            CompatClass = compat,
+            Name = "Iris-Z-small",
+            StandardWidth = 1024,
+            StandardHeight = 1024,
+            IsThisModelOfClass = (model, header) => IsIrisZ(model, header, "small", 4096),
+        });
+        T2IModelClassSorter.Register(new T2IModelClass
+        {
+            ID = IrisZBigClassId,
+            CompatClass = compat,
+            Name = "Iris-Z-big",
+            StandardWidth = 1024,
+            StandardHeight = 1024,
+            IsThisModelOfClass = (model, header) => IsIrisZ(model, header, "big", 6144),
+        });
+    }
+
+    /// <summary>True for an Iris-Z checkpoint of the given build: its header carries the modality embedding at that hidden size, or the file sits in a release folder whose <c>config.json</c> names the variant.</summary>
+    private static bool IsIrisZ(T2IModel model, JObject header, string variant, long hiddenSize)
+    {
+        if (header is not null && header.TryGetValue("modality_in.weight", out JToken modality))
+        {
+            return modality["shape"] is JArray { Count: 2 } shape && shape[1].Value<long>() == hiddenSize;
+        }
+        string rawPath = model?.RawFilePath;
+        if (string.IsNullOrWhiteSpace(rawPath) || !rawPath.EndsWith(".safetensors"))
+        {
+            return false;
+        }
+        string folder = Path.GetDirectoryName(rawPath);
+        string configPath = folder is null ? null : Path.Combine(folder, "config.json");
+        if (configPath is null || !File.Exists(configPath) || !File.Exists(Path.Combine(folder, "transformer.safetensors.index.json")))
+        {
+            return false;
+        }
+        try
+        {
+            JObject config = JObject.Parse(File.ReadAllText(configPath));
+            return config.Value<int?>("num_modalities") is > 0 && config.Value<string>("depth_encoding") is not null
+                && string.Equals(config.Value<string>("variant"), variant, StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception ex) when (ex is IOException or Newtonsoft.Json.JsonException or UnauthorizedAccessException)
+        {
+            return false;
+        }
     }
 
     /// <summary>A Lance checkpoint is a folder whose <c>llm_config.json</c> declares the Qwen2.5-VL backbone, with <c>language_model.*</c> keys in its first-shard header.</summary>

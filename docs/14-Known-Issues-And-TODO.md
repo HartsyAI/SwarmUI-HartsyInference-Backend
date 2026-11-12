@@ -15,6 +15,12 @@ not here — they move too fast for a hand-maintained table to stay honest.
   check (see TODO below) would eliminate most retries.
 - **F16 VAE produces black output on Flux Schnell** — pipeline runs without error but
   values come out NaN/saturated. F32 VAE works fine.
+- **Iris-Z has not run on real weights.** The engine side (engine PR #801, `alpha.425`) is tested on
+  tiny random weights only, and nothing has gone through Swarm. Needs that engine version: on an
+  older one the checkpoint loads as FLUX.2 Klein 9B or Dev and generates noise. Core's FLUX.2
+  classes claim the shard that carries their marker tensor, so the "Iris-Z" group is also shown
+  for any model whose path contains `iris-z`. The `rgbd` task skips the restore, upscale and
+  cutout passes, and estimates depth at the task's working size, not always the image's own.
 - **Single-batch only.** Batch > 1 not validated; several pipelines are explicitly
   sized for B=1 in their activation buffers.
 - **SeedVR2 restore on a fresh install** (found 2026-09-09 on swarm.hartsy.ai, where the
