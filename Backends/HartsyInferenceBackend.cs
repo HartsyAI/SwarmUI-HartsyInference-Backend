@@ -1551,8 +1551,9 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             return null;
         }
         List<ControlNetConditioning> layers = [];
-        foreach (T2IParamTypes.ControlNetParamHolder holder in holders)
+        for (int slot = 0; slot < holders.Length; slot++)
         {
+            T2IParamTypes.ControlNetParamHolder holder = holders[slot];
             if (holder?.Model is null)
             {
                 continue;
@@ -1568,12 +1569,32 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 throw new SwarmUserErrorException(
                     $"HartsyInference: ControlNet '{cnModel.Name}' has no control image. Set the ControlNet Image (or an Init Image).");
             }
-            EngineControlNetMode mode = ControlNetPreprocessing.DetectMode(cnModel.RawFilePath);
-            AddLoadStatus($"ControlNet '{cnModel.Name}' → {mode} preprocessing.");
-            EngineImage annotated = ControlNetPreprocessing.Preprocess(
-                mode, hint,
-                input.Get(T2IParamTypes.Width, DefaultImageSize), input.Get(T2IParamTypes.Height, DefaultImageSize),
-                PreprocessBackend, msg => AddLoadStatus(msg));
+            // SwarmUI's own choices come first, as in its ComfyUI backend: the slot's Union Type (other than auto) and Preprocessor. The file name is
+            // only the fallback, so a union checkpoint whose name has no type in it is no longer always depth. Preprocessor None means the image
+            // already is a control map (a depth render, say) and is passed through as it is.
+            string preprocessor = SlotParam(input, ComfyUIBackendExtension.ControlNetPreprocessorParams, slot);
+            string unionType = SlotParam(input, ComfyUIBackendExtension.ControlNetUnionTypeParams, slot);
+            bool rawMap = preprocessor is not null && preprocessor.Equals("none", StringComparison.OrdinalIgnoreCase);
+            EngineControlNetMode? chosen = unionType is not null && !unionType.Equals("auto", StringComparison.OrdinalIgnoreCase) ? ControlNetPreprocessing.ModeFromWords(unionType) : null;
+            if (chosen is null && preprocessor is not null && !rawMap)
+            {
+                chosen = ControlNetPreprocessing.ModeFromWords(preprocessor);
+            }
+            EngineControlNetMode mode = chosen ?? ControlNetPreprocessing.DetectMode(cnModel.RawFilePath);
+            EngineImage annotated;
+            if (rawMap)
+            {
+                AddLoadStatus($"ControlNet '{cnModel.Name}' → {mode}, control image used as it is (preprocessor None).");
+                annotated = ControlNetPreprocessing.PassThrough(hint);
+            }
+            else
+            {
+                AddLoadStatus($"ControlNet '{cnModel.Name}' → {mode} preprocessing.");
+                annotated = ControlNetPreprocessing.Preprocess(
+                    mode, hint,
+                    input.Get(T2IParamTypes.Width, DefaultImageSize), input.Get(T2IParamTypes.Height, DefaultImageSize),
+                    PreprocessBackend, msg => AddLoadStatus(msg));
+            }
             // Keyed by the EMITTED slot index (the engine indexes request.ControlNets positionally); a skipped
             // holder must not shift the pairing. Only union checkpoints consult it engine-side.
             unionTypes.Add((layers.Count, UnionTypeString(mode)));
@@ -1587,6 +1608,16 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             });
         }
         return layers.Count == 0 ? null : layers;
+    }
+
+    /// <summary>The value the request sets for one ControlNet slot's ComfyUI-registered parameter (Preprocessor or Union Type), or null when it is not set.</summary>
+    private static string SlotParam(T2IParamInput input, T2IRegisteredParam<string>[] parameters, int slot)
+    {
+        if (parameters is null || slot >= parameters.Length || parameters[slot] is null)
+        {
+            return null;
+        }
+        return input.TryGet(parameters[slot], out string value) && !string.IsNullOrWhiteSpace(value) ? value : null;
     }
 
     /// <summary>The engine's union-control token for a detected preprocessing mode. Each must be one that <c>ControlNetResolver.ResolveUnionType</c> recognizes.</summary>

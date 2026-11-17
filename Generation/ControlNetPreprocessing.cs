@@ -14,18 +14,31 @@ public static class ControlNetPreprocessing
     /// <summary>Infers the control type from the checkpoint file name. Mirrors the engine's private <c>ControlNetLoader.DetectMode</c>; keep the two in sync.</summary>
     public static ControlNetMode DetectMode(string filePath)
     {
-        string lowered = Path.GetFileNameWithoutExtension(filePath ?? "").ToLowerInvariant();
-        if (lowered.Contains("canny")) return ControlNetMode.Canny;
-        if (lowered.Contains("depth") || lowered.Contains("zoedepth") || lowered.Contains("midas")) return ControlNetMode.Depth;
+        return ModeFromWords(Path.GetFileNameWithoutExtension(filePath ?? "")) ?? ControlNetMode.Depth;
+    }
+
+    /// <summary>The control type a name implies (a checkpoint file name, a SwarmUI preprocessor name or a union type), or null when it names none.</summary>
+    public static ControlNetMode? ModeFromWords(string text)
+    {
+        string lowered = (text ?? "").ToLowerInvariant();
+        if (lowered.Contains("canny") || lowered.Contains("mlsd")) return ControlNetMode.Canny;
+        if (lowered.Contains("depth") || lowered.Contains("zoedepth") || lowered.Contains("midas") || lowered.Contains("leres")) return ControlNetMode.Depth;
         if (lowered.Contains("openpose") || lowered.Contains("pose")) return ControlNetMode.OpenPose;
         if (lowered.Contains("scribble")) return ControlNetMode.Scribble;
         if (lowered.Contains("tile")) return ControlNetMode.Tile;
         if (lowered.Contains("normal")) return ControlNetMode.Normal;
         if (lowered.Contains("seg")) return ControlNetMode.Segmentation;
-        if (lowered.Contains("inpaint")) return ControlNetMode.Inpaint;
+        if (lowered.Contains("inpaint") || lowered.Contains("repaint")) return ControlNetMode.Inpaint;
         if (lowered.Contains("lineart") || lowered.Contains("line_art")) return ControlNetMode.LineArt;
-        if (lowered.Contains("softedge") || lowered.Contains("hed") || lowered.Contains("pidi")) return ControlNetMode.SoftEdge;
-        return ControlNetMode.Depth;
+        if (lowered.Contains("softedge") || lowered.Contains("hed") || lowered.Contains("pidi") || lowered.Contains("ted")) return ControlNetMode.SoftEdge;
+        return null;
+    }
+
+    /// <summary>The hint as it is, as RGB pixels: for an image that already is a control map (SwarmUI's Preprocessor set to None), and for the modes that condition on the image itself.</summary>
+    public static ImageData PassThrough(SwarmUI.Utils.Image image)
+    {
+        (byte[] rgb, int width, int height) = RgbToImage.ToHwcRgb(image);
+        return new ImageData { Rgb = rgb, Width = width, Height = height };
     }
 
     /// <summary>Runs the annotator for <paramref name="mode"/> and returns the hint as RGB pixels. The backend is requested only by model-driven annotators, so pure Canny never touches a device. Tile and Inpaint pass the source image through.</summary>
@@ -36,8 +49,7 @@ public static class ControlNetPreprocessing
         {
             // These modes condition on the image itself; there is no annotator to run.
             log($"[ControlNet] mode={mode}: passing the source image through unannotated (by design).");
-            (byte[] passthrough, int passW, int passH) = RgbToImage.ToHwcRgb(image);
-            return new ImageData { Rgb = passthrough, Width = passW, Height = passH };
+            return PassThrough(image);
         }
         using Tensor hint = mode switch
         {
