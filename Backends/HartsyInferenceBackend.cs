@@ -2660,19 +2660,23 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         {
             return false;
         }
-        // Base LongCat-Video: its DiT folder must hold the config and the shard index the engine reads.
+        // Base LongCat-Video: its DiT folder must hold the config and the shard index. The engine can derive the geometry without config.json;
+        // this extension requires it, because a missing file means an incomplete download, so the request is refused here, not run and left to time out.
         if (LongCatVideoResolver.IsDitFile(input.Get(T2IParamTypes.Model)?.RawFilePath))
         {
             string videoMissing = LongCatVideoResolver.RefusalFor(LongCatVideoResolver.Resolve(input.Get(T2IParamTypes.Model).RawFilePath, File.Exists));
             if (videoMissing is not null)
             {
                 input.RefusalReasons.Add("HartsyInference: " + videoMissing);
+                return false;
             }
         }
         // LongCat-Video-Avatar: the Init Image is the identity, the Video Audio Reference is the driving speech, and the checkpoint must be complete.
+        // Every avatar reason is collected, then the request is refused once.
         T2IModel longCatModel = input.Get(T2IParamTypes.Model);
         if (IsLongCatAvatar(input))
         {
+            int avatarReasonsBefore = input.RefusalReasons.Count;
             if (input.Get(T2IParamTypes.InitImage) is null)
             {
                 input.RefusalReasons.Add("HartsyInference: LongCat-Video-Avatar needs an Init Image, the person to animate. It has no text-to-video mode.");
@@ -2692,6 +2696,10 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             catch (InvalidOperationException ex)
             {
                 input.RefusalReasons.Add("HartsyInference: " + ex.Message);
+            }
+            if (input.RefusalReasons.Count > avatarReasonsBefore)
+            {
+                return false;
             }
         }
         // Init and end-frame conditioning are per family. Without this check the Engine would silently generate text-to-video.

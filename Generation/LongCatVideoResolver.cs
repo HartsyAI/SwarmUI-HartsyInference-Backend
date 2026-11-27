@@ -11,7 +11,9 @@ namespace Hartsy.Extensions.HartsyInferenceBackend.Generation;
 /// </summary>
 /// <remarks>
 /// No SwarmUI or engine types: <c>tests/SwarmUI-HartsyInference.Tests</c> compiles this file alone. The engine reads the DiT folder as
-/// its checkpoint directory (<c>LongCatRecipeSupport.CheckpointDirectory</c>) and needs <c>config.json</c> and the shard index in it.
+/// its checkpoint directory (<c>LongCatRecipeSupport.CheckpointDirectory</c>). The engine can derive the geometry when <c>config.json</c> is absent;
+/// this extension requires it and the shard index anyway, because a missing file means an incomplete download, and refuses the request before any
+/// weight is read.
 /// </remarks>
 public static class LongCatVideoResolver
 {
@@ -86,6 +88,7 @@ public static class LongCatVideoResolver
         {
             return null;
         }
-        return $"LongCat-Video needs these files, which are missing: {string.Join(", ", resolution.MissingFiles)}.";
+        return $"LongCat-Video's DiT folder is incomplete; these files are missing: {string.Join(", ", resolution.MissingFiles)}. "
+            + "The download did not finish: fetch them again into that folder.";
     }
 }
