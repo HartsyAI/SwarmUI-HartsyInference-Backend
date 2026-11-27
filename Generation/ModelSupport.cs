@@ -95,6 +95,7 @@ public static class ModelSupport
         ["kandinsky5-vidlite"] = new("kandinsky5-video", Kind.Video),
         ["kandinsky5-vidpro"] = new("kandinsky5-video", Kind.Video),
         [ModelClassRegistrations.LanceVideoCompatClassId] = new("lance-video", Kind.Video),
+        [ModelClassRegistrations.FastFramesVideoCompatClassId] = new("fastframes", Kind.Video),
         // Core owns the minimax-h3 compat class. Map it, do not re-register it; keying off core's constant means a rename cannot silently match nothing.
         [T2IModelClassSorter.CompatMiniMaxH3.ID] = new("minimax-h3", Kind.Video),
 
