@@ -97,6 +97,7 @@ public static class ModelSupport
         [ModelClassRegistrations.LanceVideoCompatClassId] = new("lance-video", Kind.Video),
         // LongCat-Video-Avatar: the family is 1.5 or 1.6 by folder (BuildSpec resolves it); this entry is the compat class.
         [ModelClassRegistrations.LongCatAvatarCompatClassId] = new("longcat-avatar", Kind.Video),
+        [ModelClassRegistrations.LongCatVideoCompatClassId] = new("longcat-video", Kind.Video),
         [ModelClassRegistrations.FastFramesVideoCompatClassId] = new("fastframes", Kind.Video),
         // Core owns the minimax-h3 compat class. Map it, do not re-register it; keying off core's constant means a rename cannot silently match nothing.
         [T2IModelClassSorter.CompatMiniMaxH3.ID] = new("minimax-h3", Kind.Video),
@@ -127,6 +128,10 @@ public static class ModelSupport
         if (model?.RawFilePath is not null && LongCatAvatarResolver.IsAvatarDitFile(model.RawFilePath))
         {
             return ModelClassRegistrations.LongCatAvatarCompatClassId;
+        }
+        if (model?.RawFilePath is not null && LongCatVideoResolver.IsDitFile(model.RawFilePath))
+        {
+            return ModelClassRegistrations.LongCatVideoCompatClassId;
         }
         if (model?.RawFilePath is not null && FastFramesGenerator.IsFastFramesFile(model.RawFilePath))
         {
@@ -692,6 +697,11 @@ public static class ModelSupport
             familyId = MiniMaxMusicFamily(model, input);
         }
         string localPath = model.RawFilePath;
+        if (familyId == LongCatVideoResolver.FamilyId && LongCatVideoResolver.IsDitFile(model.RawFilePath))
+        {
+            // The engine takes the DiT folder as the checkpoint directory (its config and index are there).
+            localPath = LongCatVideoResolver.Resolve(model.RawFilePath, File.Exists).DitFolder;
+        }
         if (familyId == LongCatAvatarResolver.Family15 && LongCatAvatarResolver.IsAvatarDitFile(model.RawFilePath))
         {
             // The engine takes the DiT folder, and the INT8 folder with loraA/loraB selects 1.6. A layout the resolver refuses stays 1.5 here,

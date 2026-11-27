@@ -2649,6 +2649,15 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         {
             return false;
         }
+        // Base LongCat-Video: its DiT folder must hold the config and the shard index the engine reads.
+        if (LongCatVideoResolver.IsDitFile(input.Get(T2IParamTypes.Model)?.RawFilePath))
+        {
+            string videoMissing = LongCatVideoResolver.RefusalFor(LongCatVideoResolver.Resolve(input.Get(T2IParamTypes.Model).RawFilePath, File.Exists));
+            if (videoMissing is not null)
+            {
+                input.RefusalReasons.Add("HartsyInference: " + videoMissing);
+            }
+        }
         // LongCat-Video-Avatar: the Init Image is the identity, the Video Audio Reference is the driving speech, and the checkpoint must be complete.
         T2IModel longCatModel = input.Get(T2IParamTypes.Model);
         if (IsLongCatAvatar(input))
