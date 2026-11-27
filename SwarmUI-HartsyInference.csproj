@@ -76,7 +76,6 @@
         <Reference Include="HartsyInference.Vision"><HintPath>$(HartsyLocalBin)/HartsyInference.Vision.dll</HintPath><Private>true</Private></Reference>
         <Reference Include="HartsyInference.World"><HintPath>$(HartsyLocalBin)/HartsyInference.World.dll</HintPath><Private>true</Private></Reference>
         <Reference Include="HartsyInference.ThreeD"><HintPath>$(HartsyLocalBin)/HartsyInference.ThreeD.dll</HintPath><Private>true</Private></Reference>
-        <Reference Include="HartsyInference.Cpu"><HintPath>$(HartsyLocalBin)/HartsyInference.Cpu.dll</HintPath><Private>true</Private></Reference>
         <Reference Include="HartsyInference.Cuda"><HintPath>$(HartsyLocalBin)/HartsyInference.Cuda.dll</HintPath><Private>true</Private></Reference>
         <Reference Include="HartsyInference.Vulkan"><HintPath>$(HartsyLocalBin)/HartsyInference.Vulkan.dll</HintPath><Private>true</Private></Reference>
         <!-- Engine's private managed deps (normally pulled by the meta-package). -->

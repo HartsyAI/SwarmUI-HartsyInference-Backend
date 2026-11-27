@@ -20,6 +20,8 @@ public static class ModelClassRegistrations
     /// <summary>Lance video compat class ID.</summary>
     public const string LanceVideoCompatClassId = "lance-video";
 
+    /// <summary>LongCat-Video-Avatar 1.5 and 1.6 compat class (speech and image to video). Matched by path, see <see cref="LongCatAvatarResolver"/>.</summary>
+    public const string LongCatAvatarCompatClassId = LongCatAvatarResolver.CompatClassId;
     /// <summary>FastFrames (Apple, frame-wise causal Wan) text-to-video compat class ID.</summary>
     public const string FastFramesVideoCompatClassId = "fastframes-video";
 
@@ -46,6 +48,7 @@ public static class ModelClassRegistrations
     {
         RegisterAceStepV1();
         RegisterLance();
+        RegisterLongCatAvatar();
         RegisterFastFrames();
         // MusicGen and YuE belong to AudioLab, not SwarmUI-native music classes. Core owns ace-step-1_5 and minimax-music-3.
         RegisterFLite();
@@ -117,6 +120,22 @@ public static class ModelClassRegistrations
     {
         // Only the model file's own folder counts, not an ancestor. The predicate is shared with the routing in ModelSupport.CompatIdOf.
         return FastFramesGenerator.IsFastFramesFile(path);
+    }
+
+    /// <summary>LongCat-Video-Avatar 1.5 and 1.6. Core may class these DiT shards as Wan, so the match is by folder: a shard in a
+    /// <c>base_model</c> or <c>base_model_int8</c> folder inside an "avatar" folder. Routing is in <see cref="ModelSupport.CompatIdOf"/>.</summary>
+    private static void RegisterLongCatAvatar()
+    {
+        T2IModelCompatClass compat = T2IModelClassSorter.RegisterCompat(new() { ID = LongCatAvatarCompatClassId, ShortCode = "LCAvatar", LorasTargetTextEnc = false, IsText2Video = false });
+        T2IModelClassSorter.Register(new T2IModelClass
+        {
+            ID = LongCatAvatarCompatClassId,
+            CompatClass = compat,
+            Name = "LongCat-Video-Avatar (speech and image to video)",
+            StandardWidth = 832,
+            StandardHeight = 480,
+            IsThisModelOfClass = (model, header) => LongCatAvatarResolver.IsAvatarDitFile(model?.RawFilePath),
+        });
     }
 
     /// <summary>F-Lite (Freepik 10B): detected by its cross-attention context projection.</summary>
