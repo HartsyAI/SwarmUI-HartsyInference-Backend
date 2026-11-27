@@ -95,6 +95,8 @@ public static class ModelSupport
         ["kandinsky5-vidlite"] = new("kandinsky5-video", Kind.Video),
         ["kandinsky5-vidpro"] = new("kandinsky5-video", Kind.Video),
         [ModelClassRegistrations.LanceVideoCompatClassId] = new("lance-video", Kind.Video),
+        // LongCat-Video-Avatar: the family is 1.5 or 1.6 by folder (BuildSpec resolves it); this entry is the compat class.
+        [ModelClassRegistrations.LongCatAvatarCompatClassId] = new("longcat-avatar", Kind.Video),
         // Core owns the minimax-h3 compat class. Map it, do not re-register it; keying off core's constant means a rename cannot silently match nothing.
         [T2IModelClassSorter.CompatMiniMaxH3.ID] = new("minimax-h3", Kind.Video),
 
@@ -114,6 +116,17 @@ public static class ModelSupport
             return null;
         }
         return _families.TryGetValue(compatClass, out Family family) ? family : null;
+    }
+
+    /// <summary>The compat class ID that routes <paramref name="model"/>. A LongCat avatar DiT shard routes to the LongCat family
+    /// whatever class core assigned, because core may class it as Wan. Every other model keeps its class.</summary>
+    public static string CompatIdOf(T2IModel model)
+    {
+        if (model?.RawFilePath is not null && LongCatAvatarResolver.IsAvatarDitFile(model.RawFilePath))
+        {
+            return ModelClassRegistrations.LongCatAvatarCompatClassId;
+        }
+        return model?.ModelClass?.CompatClass?.ID;
     }
 
     /// <summary>True when the Engine can drive <paramref name="compatClass"/>: it is mapped to a family with a registered recipe (music descriptors are always registered).</summary>
@@ -147,7 +160,7 @@ public static class ModelSupport
     /// <summary>The composition features the Engine applies to <paramref name="model"/>'s resolved variant, narrowed from <see cref="SupportedFeatures(string)"/> (a base Qwen-Image has no reference editing; its Edit builds do). <see cref="ImageFeatures.None"/> for non-image models.</summary>
     public static ImageFeatures SupportedFeatures(SwarmUI.Text2Image.T2IModel model)
     {
-        Family family = Resolve(model?.ModelClass?.CompatClass?.ID);
+        Family family = Resolve(CompatIdOf(model));
         return family is null || family.Kind != Kind.Image
             ? ImageFeatures.None
             : (Describe(model, family) as ImageModelDescriptor)?.Features ?? ImageFeatures.None;
@@ -165,7 +178,7 @@ public static class ModelSupport
     /// <summary>The conditioning the Engine applies to <paramref name="model"/>'s resolved variant. Wan's VACE, Animate and S2V builds share the family compat classes and are told apart engine-side, so a driving video is accepted on an Animate checkpoint under <c>wan-21-14b</c>. <see cref="VideoFeatures.None"/> for non-video models.</summary>
     public static VideoFeatures SupportedVideoFeatures(SwarmUI.Text2Image.T2IModel model)
     {
-        Family family = Resolve(model?.ModelClass?.CompatClass?.ID);
+        Family family = Resolve(CompatIdOf(model));
         if (family is null || family.Kind != Kind.Video)
         {
             return VideoFeatures.None;
@@ -673,6 +686,20 @@ public static class ModelSupport
             familyId = MiniMaxMusicFamily(model, input);
         }
         string localPath = model.RawFilePath;
+        if (familyId == LongCatAvatarResolver.Family15 && LongCatAvatarResolver.IsAvatarDitFile(model.RawFilePath))
+        {
+            // The engine takes the DiT folder, and the INT8 folder with loraA/loraB selects 1.6. A layout the resolver refuses stays 1.5 here,
+            // so ValidateVideo can refuse it with the message.
+            try
+            {
+                LongCatAvatarResolver.Resolution resolution = LongCatAvatarResolver.Resolve(model.RawFilePath, File.Exists);
+                familyId = resolution.FamilyId;
+                localPath = resolution.DitFolder;
+            }
+            catch (InvalidOperationException)
+            {
+            }
+        }
         if (!stageBundles && IsLtx25(model))
         {
             localPath = TryResolveLtx25Bundle(model, out string bundle, out _) && bundle is not null ? bundle : null;

@@ -132,7 +132,7 @@ public static class HartsyInferenceWebAPI
             }
             resolvedName = model.Name;
             modelClass = model.ModelClass?.ID;
-            compat = model.ModelClass?.CompatClass?.ID;
+            compat = ModelSupport.CompatIdOf(model);
             inputs = ImageInputs.Describe(model);
         }
         else if (!string.IsNullOrWhiteSpace(arch_id))
@@ -234,7 +234,7 @@ public static class HartsyInferenceWebAPI
         {
             return error;
         }
-        ModelSupport.Family family = ModelSupport.Resolve(model.ModelClass?.CompatClass?.ID);
+        ModelSupport.Family family = ModelSupport.Resolve(ModelSupport.CompatIdOf(model));
         RecipeIdentity recipe = family is null ? null : ModelSupport.Describe(model, family)?.Recipe;
         return new JObject
         {
@@ -264,7 +264,7 @@ public static class HartsyInferenceWebAPI
         {
             return error;
         }
-        string compat = model.ModelClass?.CompatClass?.ID;
+        string compat = ModelSupport.CompatIdOf(model);
         ModelSupport.Family family = ModelSupport.Resolve(compat);
         ModelDescriptor descriptor = family is null ? null : ModelSupport.Describe(model, family);
         if (descriptor is null)
@@ -319,7 +319,7 @@ public static class HartsyInferenceWebAPI
         {
             return error;
         }
-        string compat = model.ModelClass?.CompatClass?.ID;
+        string compat = ModelSupport.CompatIdOf(model);
         bool supported = ModelSupport.IsArchitectureSupported(compat);
         bool pending = !supported && compat is not null && ModelSupport.PendingArchitectures.ContainsKey(compat);
         string state = supported ? "supported" : pending ? "pending" : "unsupported";

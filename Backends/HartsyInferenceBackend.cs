@@ -22,6 +22,7 @@ using HartsyInference.Core.Memory.Vram;
 using SiLogs = HartsyInference.Core.Logging.Logs;
 using HartsyInference.Cuda;
 using HartsyInference.Engine;
+using HartsyInference.Engine.Audio;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Planning;
 using HartsyInference.Engine.Planning.Memory;
@@ -665,7 +666,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         {
             return false;
         }
-        string compat = model.ModelClass?.CompatClass?.ID;
+        string compat = ModelSupport.CompatIdOf(model);
         if (!ModelSupport.IsArchitectureSupported(compat))
         {
             HartsyLogs.Debug($"LoadModel: architecture '{compat}' is not supported here. Returning false so another backend can handle it.");
@@ -710,7 +711,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         {
             T2IModel model = input.Get(T2IParamTypes.Model)
                 ?? throw new InvalidOperationException("No model selected.");
-            string compat = model.ModelClass?.CompatClass?.ID;
+            string compat = ModelSupport.CompatIdOf(model);
             ModelSupport.Family family = ModelSupport.Resolve(compat);
             if (family is null || !ModelSupport.IsArchitectureSupported(compat))
             {
@@ -1208,7 +1209,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         bool wantsTrim = input.Get(T2IParamTypes.TrimVideoStartFrames, 0) > 0 || input.Get(T2IParamTypes.TrimVideoEndFrames, 0) > 0;
         bool wantsRestore = SeedVrPass.IsActive(input)
             || (input.TryGet(HartsyInference.RestoreModelParam, out string restoreModelCheck) && !string.IsNullOrWhiteSpace(restoreModelCheck));
-        bool wantsAudio = input.Get(T2IParamTypes.VideoAudioInput) is not null;
+        bool wantsAudio = input.Get(T2IParamTypes.VideoAudioInput) is not null || IsLongCatAvatar(input);
         // No generated soundtrack either: streaming has no AudioTrack, so one would be dropped. Core's HasJointAVLatents names those families.
         bool generatesAudio = input.Get(T2IParamTypes.Model)?.ModelClass?.CompatClass?.HasJointAVLatents == true;
         if (!wantsBoomerang && !wantsTrim && !wantsRestore && !wantsAudio && !generatesAudio)
@@ -1233,7 +1234,10 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             width = frame.Width;
             height = frame.Height;
         }
-        VideoOutputEncoder.AudioTrack audio = ToAudioTrack(generated.Audio);
+        // The engine returns frames only for LongCat, so the driving speech is the soundtrack, cut to the clip.
+        VideoOutputEncoder.AudioTrack audio = generated.Audio is null && IsLongCatAvatar(input)
+            ? LongCatDrivingAudioTrack(input, frames.Count, generated.Fps ?? LongCatAvatarResolver.OutputFps)
+            : ToAudioTrack(generated.Audio);
         if (frames.Count == 0)
         {
             throw new InvalidOperationException("HartsyInference: the video pipeline produced no frames.");
@@ -1309,6 +1313,27 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         {
             await remaining.DisposeAsync();
         }
+    }
+
+    /// <summary>True when the request's model is a LongCat-Video-Avatar DiT shard (1.5 or 1.6).</summary>
+    private static bool IsLongCatAvatar(T2IParamInput input) =>
+        LongCatAvatarResolver.IsAvatarDitFile(input.Get(T2IParamTypes.Model)?.RawFilePath);
+
+    /// <summary>The driving speech, decoded and cut to the clip's length, as the mux track of a LongCat avatar video.</summary>
+    private static VideoOutputEncoder.AudioTrack LongCatDrivingAudioTrack(T2IParamInput input, int frameCount, int fps)
+    {
+        VideoOutputEncoder.AudioTrack full = ToAudioTrack(AudioClipCodec.DecodeNative(ToAudioClip(input.Get(HartsyInference.VideoAudioReferenceParam))));
+        if (full is null || fps <= 0)
+        {
+            return full;
+        }
+        int samples = (int)Math.Min(full.Left.Length, (long)frameCount * full.SampleRate / fps);
+        return new VideoOutputEncoder.AudioTrack
+        {
+            Left = full.Left[..samples],
+            Right = full.Right is null ? null : full.Right[..samples],
+            SampleRate = full.SampleRate,
+        };
     }
 
     /// <summary>Adapts the Engine's planar <see cref="AudioBuffer"/> onto the encoder's stereo mux track.</summary>
@@ -1976,7 +2001,8 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             VideoSwapPercent = input.TryGet(T2IParamTypes.VideoSwapPercent, out double swapPercent) && swapPercent != 0.5
                 ? swapPercent : null,
             VideoResolution = input.Get(T2IParamTypes.VideoResolution, null),
-            Fps = NullableInt(input, T2IParamTypes.VideoFPS),
+            // LongCat-Video-Avatar renders at the engine's fixed 25 fps; the request's FPS does not apply to it.
+            Fps = IsLongCatAvatar(input) ? LongCatAvatarResolver.OutputFps : NullableInt(input, T2IParamTypes.VideoFPS),
             VideoFormat = input.Get(T2IParamTypes.VideoFormat, null),
             // Boomerang is applied to the decoded frames on the way out (see GenerateVideo) so the Engine
             // doesn't waste a second pass; the flag is still carried for pipelines that want it.
@@ -2076,7 +2102,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     private static bool IsWanAnimate(T2IParamInput input)
     {
         T2IModel model = input.Get(T2IParamTypes.Model);
-        string compat = model?.ModelClass?.CompatClass?.ID;
+        string compat = ModelSupport.CompatIdOf(model);
         return compat is not null && compat.StartsWith("wan-2", StringComparison.Ordinal)
             && (ModelSupport.SupportedVideoFeatures(model) & VideoFeatures.DrivingVideo) != 0;
     }
@@ -2490,7 +2516,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         {
             return true; // let other validators speak
         }
-        string compat = model.ModelClass?.CompatClass?.ID;
+        string compat = ModelSupport.CompatIdOf(model);
         if (!ModelSupport.IsArchitectureSupported(compat))
         {
             input.RefusalReasons.Add($"HartsyInference: {ModelSupport.WhyNotSupported(compat)}");
@@ -2623,6 +2649,31 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         {
             return false;
         }
+        // LongCat-Video-Avatar: the Init Image is the identity, the Video Audio Reference is the driving speech, and the checkpoint must be complete.
+        T2IModel longCatModel = input.Get(T2IParamTypes.Model);
+        if (IsLongCatAvatar(input))
+        {
+            if (input.Get(T2IParamTypes.InitImage) is null)
+            {
+                input.RefusalReasons.Add("HartsyInference: LongCat-Video-Avatar needs an Init Image, the person to animate. It has no text-to-video mode.");
+            }
+            if (input.Get(HartsyInference.VideoAudioReferenceParam) is null)
+            {
+                input.RefusalReasons.Add("HartsyInference: LongCat-Video-Avatar needs Driving Audio: set Video Audio Reference to the speech clip it lip-syncs to.");
+            }
+            try
+            {
+                string missingWhy = LongCatAvatarResolver.RefusalFor(LongCatAvatarResolver.Resolve(longCatModel.RawFilePath, File.Exists));
+                if (missingWhy is not null)
+                {
+                    input.RefusalReasons.Add("HartsyInference: " + missingWhy);
+                }
+            }
+            catch (InvalidOperationException ex)
+            {
+                input.RefusalReasons.Add("HartsyInference: " + ex.Message);
+            }
+        }
         // Init and end-frame conditioning are per family. Without this check the Engine would silently generate text-to-video.
         // Checkpoint-aware: Wan's Animate, VACE and S2V variants share compat classes, so the engine's header sniff decides.
         VideoFeatures videoSupported = ModelSupport.SupportedVideoFeatures(input.Get(T2IParamTypes.Model));
@@ -2641,7 +2692,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             (VideoFeatures.ReferenceImages, "reference images (attached to the prompt)", hasRefImages && !animateCheckpoint),
             (VideoFeatures.ReferenceVideos, "reference videos (attached to the prompt)", hasRefVideos),
             (VideoFeatures.ReferenceAudios, "reference audio (attached to the prompt, or Video Audio Reference)",
-                hasRefAudios || input.Get(HartsyInference.VideoAudioReferenceParam) is not null),
+                hasRefAudios || ((videoSupported & VideoFeatures.DrivingAudio) == 0 && input.Get(HartsyInference.VideoAudioReferenceParam) is not null)),
             (VideoFeatures.DrivingVideo, "Wan-Animate driving (Animate Reference Image / Pose Video / Face Video)",
                 input.Get(HartsyInference.AnimateReferenceImageParam) is not null
                 || input.Get(HartsyInference.AnimatePoseVideoParam) is not null
