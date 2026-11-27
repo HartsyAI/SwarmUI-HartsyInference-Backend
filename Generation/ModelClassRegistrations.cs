@@ -22,6 +22,8 @@ public static class ModelClassRegistrations
 
     /// <summary>LongCat-Video-Avatar 1.5 and 1.6 compat class (speech and image to video). Matched by path, see <see cref="LongCatAvatarResolver"/>.</summary>
     public const string LongCatAvatarCompatClassId = LongCatAvatarResolver.CompatClassId;
+    /// <summary>FastFrames (Apple, frame-wise causal Wan) text-to-video compat class ID.</summary>
+    public const string FastFramesVideoCompatClassId = "fastframes-video";
 
     /// <summary>Lance text-to-image model class ID.</summary>
     public const string LanceT2IClassId = "lance-t2i";
@@ -47,6 +49,7 @@ public static class ModelClassRegistrations
         RegisterAceStepV1();
         RegisterLance();
         RegisterLongCatAvatar();
+        RegisterFastFrames();
         // MusicGen and YuE belong to AudioLab, not SwarmUI-native music classes. Core owns ace-step-1_5 and minimax-music-3.
         RegisterFLite();
         RegisterIrisZ();
@@ -94,6 +97,30 @@ public static class ModelClassRegistrations
     }
 
 
+
+    /// <summary>FastFrames (Apple, S 1.3B and L 14B): a frame-wise causal Wan DiT with its own KV refiner and pixel decoder. The
+    /// generator is a torch pickle for S and a safetensors file for L, so the match is by folder: the model sits in a folder whose
+    /// name contains "fastframes" (the layout the Engine's catalog uses, FastFrames/fastframes-s and FastFrames/fastframes-l). Only the
+    /// model's own folder is tested, not any ancestor.</summary>
+    private static void RegisterFastFrames()
+    {
+        T2IModelCompatClass compat = T2IModelClassSorter.RegisterCompat(new() { ID = FastFramesVideoCompatClassId, ShortCode = "FFrames", LorasTargetTextEnc = false, IsText2Video = true });
+        T2IModelClassSorter.Register(new T2IModelClass
+        {
+            ID = FastFramesVideoCompatClassId,
+            CompatClass = compat,
+            Name = "FastFrames (video)",
+            StandardWidth = 832,
+            StandardHeight = 480,
+            IsThisModelOfClass = (model, header) => IsFastFramesFolder(model?.RawFilePath),
+        });
+    }
+
+    private static bool IsFastFramesFolder(string path)
+    {
+        // Only the model file's own folder counts, not an ancestor. The predicate is shared with the routing in ModelSupport.CompatIdOf.
+        return FastFramesGenerator.IsFastFramesFile(path);
+    }
 
     /// <summary>F-Lite (Freepik 10B): detected by its cross-attention context projection.</summary>
     /// <summary>LongCat-Video-Avatar 1.5 and 1.6. Core may class these DiT shards as Wan, so the match is by folder: a shard in a

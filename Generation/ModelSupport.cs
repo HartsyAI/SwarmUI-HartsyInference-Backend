@@ -97,6 +97,7 @@ public static class ModelSupport
         [ModelClassRegistrations.LanceVideoCompatClassId] = new("lance-video", Kind.Video),
         // LongCat-Video-Avatar: the family is 1.5 or 1.6 by folder (BuildSpec resolves it); this entry is the compat class.
         [ModelClassRegistrations.LongCatAvatarCompatClassId] = new("longcat-avatar", Kind.Video),
+        [ModelClassRegistrations.FastFramesVideoCompatClassId] = new("fastframes", Kind.Video),
         // Core owns the minimax-h3 compat class. Map it, do not re-register it; keying off core's constant means a rename cannot silently match nothing.
         [T2IModelClassSorter.CompatMiniMaxH3.ID] = new("minimax-h3", Kind.Video),
 
@@ -118,13 +119,18 @@ public static class ModelSupport
         return _families.TryGetValue(compatClass, out Family family) ? family : null;
     }
 
-    /// <summary>The compat class ID that routes <paramref name="model"/>. A LongCat avatar DiT shard routes to the LongCat family
-    /// whatever class core assigned, because core may class it as Wan. Every other model keeps its class.</summary>
+    /// <summary>The compat class ID that routes <paramref name="model"/>. A LongCat avatar DiT shard routes to the LongCat family and a
+    /// model whose own folder is a FastFrames folder to the FastFrames family, whatever class core assigned: core may class the LongCat
+    /// shards and the FastFrames L <c>dit.safetensors</c> as Wan. Every other model keeps its class.</summary>
     public static string CompatIdOf(T2IModel model)
     {
         if (model?.RawFilePath is not null && LongCatAvatarResolver.IsAvatarDitFile(model.RawFilePath))
         {
             return ModelClassRegistrations.LongCatAvatarCompatClassId;
+        }
+        if (model?.RawFilePath is not null && FastFramesGenerator.IsFastFramesFile(model.RawFilePath))
+        {
+            return ModelClassRegistrations.FastFramesVideoCompatClassId;
         }
         return model?.ModelClass?.CompatClass?.ID;
     }
@@ -700,7 +706,12 @@ public static class ModelSupport
             {
             }
         }
-        if (!stageBundles && IsLtx25(model))
+        if (stageBundles && familyId == "fastframes")
+        {
+            // A companion file (kv_refiner, pixel_decoder) is listed as a FastFrames model too; the engine needs the generator beside it.
+            localPath = FastFramesGenerator.Resolve(model.RawFilePath);
+        }
+        else if (!stageBundles && IsLtx25(model))
         {
             localPath = TryResolveLtx25Bundle(model, out string bundle, out _) && bundle is not null ? bundle : null;
         }
