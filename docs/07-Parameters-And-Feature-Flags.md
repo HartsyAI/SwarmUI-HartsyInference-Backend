@@ -250,6 +250,26 @@ is where each one is actually checked, if it's checked at all beyond just being 
 
 Qwen-Image 2.1 Turbo needs no extension code. Core classifies the file as `qwen-image-2.1` from its keys, and the engine's `QwenImage21Variants` picks Turbo from a `turbo` token in the file name. That selects the fixed 8-step sigma schedule, with steps and CFG pinned to 8 and 1. The Turbo repo ships as two diffusers shards; the engine finds the sibling shard from either one, but SwarmUI's model list shows each shard as its own entry. Use the single-file build named with `turbo` for Swarm.
 
+MovieRoll (distilled text-to-video only) is matched by folder: `MovieRoll/distilled-t2v/model.safetensors` (the engine
+catalog's layout) or `MovieRoll/distilled/t2v/model.safetensors` (the upstream repository's), under `Stable-Diffusion` or
+`diffusion_models`. Core classes the file as Hunyuan Image, so create `model.swarm.json` beside it with
+`{"modelspec.architecture": "movieroll", "modelspec.resolution": "864x480"}` and restart SwarmUI.
+
+With its default settings, SwarmUI writes a model hash into a safetensors header on first use
+(`Metadata > ImageMetadataIncludeModelHash`), which rewrites this 33 GB file and changes its sha256. Turn on
+`Metadata > EditMetadataWriteJSON` before the first use to keep the file as downloaded.
+
+The validator refuses, by name: the base and image-to-video releases, a file left on another class, a negative prompt,
+a VAE or Qwen Model pick, and (through the checks every video family shares) an init or end image, reference media,
+LoRAs, a sampler or scheduler, and a refiner. Steps and CFG Scale are not forwarded: the model runs 5 steps at CFG 1,
+and the log says when the request asked for something else. Frames are 16n+1 (default 81, at least 17) at 864x480 and
+24 fps by default. SwarmUI's gen page does not show the Text To Video group for this class, so set frames through the
+API.
+
+The F32 DiT file is 33.3 GB, about 16.6 GB as F16, and the pipeline keeps 6 GB free for activations, so a 12 GB or
+24 GB card does not hold it whole: it runs by CUDA block streaming and needs ample system RAM. A backend without weight
+streaming refuses it when the weights do not fit.
+
 A family that doesn't support a per-family flag reports `ImageFeatures.None` for it
 (`ModelSupport.SupportedFeatures`), and `IsValidForThisBackend`'s `ValidateImageFeatures`
 step refuses the request early rather than letting it fail mid-generation. The check is

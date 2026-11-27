@@ -28,6 +28,9 @@ public static class ModelClassRegistrations
     /// <summary>FastFrames (Apple, frame-wise causal Wan) text-to-video compat class ID.</summary>
     public const string FastFramesVideoCompatClassId = "fastframes-video";
 
+    /// <summary>MovieRoll (distilled text to video) compat and model class ID. Matched by path, see <see cref="MovieRollResolver"/>.</summary>
+    public const string MovieRollCompatClassId = MovieRollResolver.CompatClassId;
+
     /// <summary>Lance text-to-image model class ID.</summary>
     public const string LanceT2IClassId = "lance-t2i";
 
@@ -54,6 +57,7 @@ public static class ModelClassRegistrations
         RegisterLongCatAvatar();
         RegisterLongCatVideo();
         RegisterFastFrames();
+        RegisterMovieRoll();
         // MusicGen and YuE belong to AudioLab, not SwarmUI-native music classes. Core owns ace-step-1_5 and minimax-music-3.
         RegisterFLite();
         RegisterIrisZ();
@@ -139,6 +143,23 @@ public static class ModelClassRegistrations
             StandardWidth = 832,
             StandardHeight = 480,
             IsThisModelOfClass = (model, header) => LongCatVideoResolver.IsDitFile(model?.RawFilePath),
+        });
+    }
+
+    /// <summary>MovieRoll. Core's Hunyuan Image detector claims the DiT's keys and runs first, so a scan keeps that class: the user assigns this
+    /// one with a <c>modelspec.architecture</c> entry (see <see cref="MovieRollResolver.Refusals"/>). The detector applies only where core's does
+    /// not. Routing is in <see cref="ModelSupport.CompatIdOf"/>.</summary>
+    private static void RegisterMovieRoll()
+    {
+        T2IModelCompatClass compat = T2IModelClassSorter.RegisterCompat(new() { ID = MovieRollCompatClassId, ShortCode = "MovieR", LorasTargetTextEnc = false, IsText2Video = true });
+        T2IModelClassSorter.Register(new T2IModelClass
+        {
+            ID = MovieRollCompatClassId,
+            CompatClass = compat,
+            Name = "MovieRoll (text to video)",
+            StandardWidth = 864,
+            StandardHeight = 480,
+            IsThisModelOfClass = (model, header) => header.ContainsKey("byt5_in.fc1.bias") && MovieRollResolver.IsMovieRollFile(model?.RawFilePath),
         });
     }
 

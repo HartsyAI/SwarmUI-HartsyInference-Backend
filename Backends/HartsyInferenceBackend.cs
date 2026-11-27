@@ -23,6 +23,7 @@ using SiLogs = HartsyInference.Core.Logging.Logs;
 using HartsyInference.Cuda;
 using HartsyInference.Engine;
 using HartsyInference.Engine.Audio;
+using HartsyInference.Engine.Catalog;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Planning;
 using HartsyInference.Engine.Planning.Memory;
@@ -1212,6 +1213,10 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     private async Task<Image> GenerateVideo(ModelSpec spec, T2IParamInput input, IProgress<StepPreview> progress, CancellationToken cancel)
     {
         VideoRequest request = BuildVideoRequest(input);
+        if (IsMovieRoll(input))
+        {
+            LogMovieRollSchedule(spec, input);
+        }
         string format = input.Get(T2IParamTypes.VideoFormat, "h264-mp4");
 
         // Stream frames straight to ffmpeg when nothing needs the whole clip in memory (no boomerang, trim, restore or audio).
@@ -1329,6 +1334,35 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     /// <summary>True when the request's model is a LongCat-Video-Avatar DiT shard (1.5 or 1.6).</summary>
     private static bool IsLongCatAvatar(T2IParamInput input) =>
         LongCatAvatarResolver.IsAvatarDitFile(input.Get(T2IParamTypes.Model)?.RawFilePath);
+
+    /// <summary>True when the request's model is a MovieRoll file.</summary>
+    private static bool IsMovieRoll(T2IParamInput input) =>
+        MovieRollResolver.IsMovieRollFile(input.Get(T2IParamTypes.Model)?.RawFilePath);
+
+    /// <summary>The requested step count: the video group's, else the core one.</summary>
+    private static int? RequestedVideoSteps(T2IParamInput input) =>
+        NullableInt(input, T2IParamTypes.VideoSteps) ?? NullableInt(input, T2IParamTypes.Steps);
+
+    /// <summary>The requested CFG scale: the video group's, else the core one.</summary>
+    private static double? RequestedVideoCfg(T2IParamInput input) =>
+        input.TryGet(T2IParamTypes.VideoCFG, out double videoCfg) ? videoCfg
+            : input.TryGet(T2IParamTypes.CFGScale, out double baseCfg) ? baseCfg : null;
+
+    /// <summary>Says in the log when the request's steps or CFG are not the ones MovieRoll runs. SwarmUI sends both on a normal request, so they
+    /// are left out of the engine request instead of refused, and the engine applies its recipe defaults.</summary>
+    private static void LogMovieRollSchedule(ModelSpec spec, T2IParamInput input)
+    {
+        if (ModelSupport.DescribeSpec(spec) is not VideoModelDescriptor descriptor)
+        {
+            return;
+        }
+        string note = MovieRollResolver.FixedScheduleNote(RequestedVideoSteps(input), RequestedVideoCfg(input),
+            descriptor.Defaults.Steps, descriptor.Defaults.CfgScale);
+        if (note is not null)
+        {
+            HartsyLogs.Warning(note);
+        }
+    }
 
     /// <summary>The driving speech, decoded and cut to the clip's length, as the mux track of a LongCat avatar video.</summary>
     private static VideoOutputEncoder.AudioTrack LongCatDrivingAudioTrack(T2IParamInput input, int frameCount, int fps)
@@ -1974,15 +2008,16 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         bool animateIntent = reference is not null || poseVideo is not null || faceVideo is not null;
         bool initIsVideo = initImage?.Type?.MetaType == MediaMetaType.Video;
         bool initDrives = animateIntent && initIsVideo;
+        // MovieRoll's schedule is fixed: steps and CFG stay unset, so the engine resolves its recipe defaults.
+        bool fixedSchedule = IsMovieRoll(input);
         return new VideoRequest
         {
             Prompt = input.Get(T2IParamTypes.Prompt) ?? "",
             NegativePrompt = input.Get(T2IParamTypes.NegativePrompt),
             Width = NullableInt(input, T2IParamTypes.Width),
             Height = NullableInt(input, T2IParamTypes.Height),
-            Steps = NullableInt(input, T2IParamTypes.VideoSteps) ?? NullableInt(input, T2IParamTypes.Steps),
-            CfgScale = input.TryGet(T2IParamTypes.VideoCFG, out double videoCfg) ? (float)videoCfg
-                : input.TryGet(T2IParamTypes.CFGScale, out double baseCfg) ? (float)baseCfg : null,
+            Steps = fixedSchedule ? null : RequestedVideoSteps(input),
+            CfgScale = fixedSchedule ? null : (float?)RequestedVideoCfg(input),
             Seed = input.Get(T2IParamTypes.Seed, -1L),
             // Same two orthogonal selections as the image path. The video families that cannot honor them refuse by
             // name in the Engine; ValidateSamplingChoice catches that here first so the request can route instead.
@@ -2668,6 +2703,23 @@ public class HartsyInferenceBackend : AbstractT2IBackend
             if (videoMissing is not null)
             {
                 input.RefusalReasons.Add("HartsyInference: " + videoMissing);
+                return false;
+            }
+        }
+        // MovieRoll: only the distilled text-to-video file runs, it must carry the video class, and it takes no negative prompt or component pick.
+        // Init images, LoRAs and refiners are refused by the checks below, from the engine's descriptor; samplers by the check above.
+        if (family.Id == MovieRollResolver.FamilyId)
+        {
+            T2IModel movieRoll = input.Get(T2IParamTypes.Model);
+            IReadOnlyList<string> reasons = MovieRollResolver.Refusals(new MovieRollResolver.Request(movieRoll.RawFilePath,
+                movieRoll.ModelClass?.CompatClass?.ID, input.Get(T2IParamTypes.NegativePrompt),
+                input.Get(T2IParamTypes.VAE) is not null, input.Get(T2IParamTypes.QwenModel) is not null));
+            if (reasons.Count > 0)
+            {
+                foreach (string reason in reasons)
+                {
+                    input.RefusalReasons.Add("HartsyInference: " + reason);
+                }
                 return false;
             }
         }
