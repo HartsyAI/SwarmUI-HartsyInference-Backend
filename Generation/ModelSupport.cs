@@ -674,7 +674,12 @@ public static class ModelSupport
             familyId = MiniMaxMusicFamily(model, input);
         }
         string localPath = model.RawFilePath;
-        if (!stageBundles && IsLtx25(model))
+        if (stageBundles && familyId == "fastframes")
+        {
+            // A companion file (kv_refiner, pixel_decoder) is listed as a FastFrames model too; the engine needs the generator beside it.
+            localPath = FastFramesGenerator.Resolve(model.RawFilePath);
+        }
+        else if (!stageBundles && IsLtx25(model))
         {
             localPath = TryResolveLtx25Bundle(model, out string bundle, out _) && bundle is not null ? bundle : null;
         }
