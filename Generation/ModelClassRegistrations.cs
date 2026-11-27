@@ -97,7 +97,8 @@ public static class ModelClassRegistrations
 
     /// <summary>FastFrames (Apple, S 1.3B and L 14B): a frame-wise causal Wan DiT with its own KV refiner and pixel decoder. The
     /// generator is a torch pickle for S and a safetensors file for L, so the match is by folder: the model sits in a folder whose
-    /// name contains "fastframes" (the layout the Engine's catalog uses, FastFrames/fastframes-s and FastFrames/fastframes-l).</summary>
+    /// name contains "fastframes" (the layout the Engine's catalog uses, FastFrames/fastframes-s and FastFrames/fastframes-l). Only the
+    /// model's own folder is tested, not any ancestor.</summary>
     private static void RegisterFastFrames()
     {
         T2IModelCompatClass compat = T2IModelClassSorter.RegisterCompat(new() { ID = FastFramesVideoCompatClassId, ShortCode = "FFrames", LorasTargetTextEnc = false, IsText2Video = true });
@@ -114,12 +115,14 @@ public static class ModelClassRegistrations
 
     private static bool IsFastFramesFolder(string path)
     {
-        if (string.IsNullOrEmpty(path))
+        // Only the model file's own folder (or the checkpoint folder itself) counts, not any ancestor.
+        string folder = ResolveLanceFolder(path);
+        if (string.IsNullOrEmpty(folder))
         {
             return false;
         }
-        string normalised = path.Replace('\', '/');
-        return normalised.Split('/').Any(part => part.Contains("fastframes", StringComparison.OrdinalIgnoreCase));
+        string name = Path.GetFileName(folder.TrimEnd('/', '\\'));
+        return name.Contains("fastframes", StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>F-Lite (Freepik 10B): detected by its cross-attention context projection.</summary>
