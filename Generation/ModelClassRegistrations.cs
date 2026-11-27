@@ -122,7 +122,6 @@ public static class ModelClassRegistrations
         return FastFramesGenerator.IsFastFramesFile(path);
     }
 
-    /// <summary>F-Lite (Freepik 10B): detected by its cross-attention context projection.</summary>
     /// <summary>LongCat-Video-Avatar 1.5 and 1.6. Core may class these DiT shards as Wan, so the match is by folder: a shard in a
     /// <c>base_model</c> or <c>base_model_int8</c> folder inside an "avatar" folder. Routing is in <see cref="ModelSupport.CompatIdOf"/>.</summary>
     private static void RegisterLongCatAvatar()
@@ -139,6 +138,7 @@ public static class ModelClassRegistrations
         });
     }
 
+    /// <summary>F-Lite (Freepik 10B): detected by its cross-attention context projection.</summary>
     private static void RegisterFLite()
     {
         T2IModelCompatClass compat = T2IModelClassSorter.RegisterCompat(new() { ID = FLiteCompatClassId, ShortCode = "FLite" });
