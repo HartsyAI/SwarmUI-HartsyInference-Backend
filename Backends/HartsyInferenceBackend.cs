@@ -57,6 +57,11 @@ namespace Hartsy.Extensions.HartsyInferenceBackend.Backends;
 /// </summary>
 public class HartsyInferenceBackend : AbstractT2IBackend
 {
+    /// <summary>The engine assembly's informational version, so each job's log line names the engine it ran (the package reference floats,
+    /// so the version is the only record of which one ran). Read once.</summary>
+    private static readonly string EngineVersion = typeof(InferenceEngine).Assembly
+        .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? typeof(InferenceEngine).Assembly.GetName().Version?.ToString() ?? "unknown";
+
     /// <summary>Settings saved to Data/Backends.fds. Nested in the backend class so BackendHandler.RegisterBackendType can find it by reflection.</summary>
     /// <remarks>Saved by field name, so renaming or retyping a field breaks every saved backend. Assets/hartsy-backend-card.js groups these fields into the card's sections, in this order.</remarks>
     public class HartsyInferenceBackendSettings : AutoConfiguration
@@ -724,7 +729,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 promptPreview = promptPreview[..80] + "…";
             }
             HartsyLogs.Verbose($"Backend #{BackendData?.ID} accepted job batch='{batchId}' model='{model.Name}' "
-                + $"compat='{compat}' family='{family.Id}' ({family.Kind}) prompt=\"{promptPreview}\"");
+                + $"compat='{compat}' family='{family.Id}' ({family.Kind}) engine='{EngineVersion}' prompt=\"{promptPreview}\"");
 
             CurrentModelName = model.Name;
             CancellationToken cancel = _cancelCts.Token;
