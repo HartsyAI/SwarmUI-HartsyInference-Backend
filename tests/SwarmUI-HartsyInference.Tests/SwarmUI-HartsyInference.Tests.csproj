@@ -15,5 +15,6 @@
         <!-- Only the path resolvers are compiled here: neither has a SwarmUI or engine dependency, so the tests need no SwarmUI build. -->
         <Compile Include="..\..\Generation\FastFramesGenerator.cs" Link="FastFramesGenerator.cs" />
         <Compile Include="..\..\Generation\LongCatAvatarResolver.cs" Link="LongCatAvatarResolver.cs" />
+        <Compile Include="..\..\Generation\LongCatVideoResolver.cs" Link="LongCatVideoResolver.cs" />
     </ItemGroup>
 </Project>

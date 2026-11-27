@@ -22,6 +22,9 @@ public static class ModelClassRegistrations
 
     /// <summary>LongCat-Video-Avatar 1.5 and 1.6 compat class (speech and image to video). Matched by path, see <see cref="LongCatAvatarResolver"/>.</summary>
     public const string LongCatAvatarCompatClassId = LongCatAvatarResolver.CompatClassId;
+
+    /// <summary>Base LongCat-Video (text and image to video) compat class. Matched by path, see <see cref="LongCatVideoResolver"/>.</summary>
+    public const string LongCatVideoCompatClassId = LongCatVideoResolver.CompatClassId;
     /// <summary>FastFrames (Apple, frame-wise causal Wan) text-to-video compat class ID.</summary>
     public const string FastFramesVideoCompatClassId = "fastframes-video";
 
@@ -49,6 +52,7 @@ public static class ModelClassRegistrations
         RegisterAceStepV1();
         RegisterLance();
         RegisterLongCatAvatar();
+        RegisterLongCatVideo();
         RegisterFastFrames();
         // MusicGen and YuE belong to AudioLab, not SwarmUI-native music classes. Core owns ace-step-1_5 and minimax-music-3.
         RegisterFLite();
@@ -120,6 +124,22 @@ public static class ModelClassRegistrations
     {
         // Only the model file's own folder counts, not an ancestor. The predicate is shared with the routing in ModelSupport.CompatIdOf.
         return FastFramesGenerator.IsFastFramesFile(path);
+    }
+
+    /// <summary>Base LongCat-Video: a shard in a <c>dit</c> folder inside a "longcat-video" folder (not "avatar"). Core may class it as Wan, so the
+    /// match is by folder. Routing is in <see cref="ModelSupport.CompatIdOf"/>.</summary>
+    private static void RegisterLongCatVideo()
+    {
+        T2IModelCompatClass compat = T2IModelClassSorter.RegisterCompat(new() { ID = LongCatVideoCompatClassId, ShortCode = "LCVideo", LorasTargetTextEnc = false, IsText2Video = true });
+        T2IModelClassSorter.Register(new T2IModelClass
+        {
+            ID = LongCatVideoCompatClassId,
+            CompatClass = compat,
+            Name = "LongCat-Video (text and image to video)",
+            StandardWidth = 832,
+            StandardHeight = 480,
+            IsThisModelOfClass = (model, header) => LongCatVideoResolver.IsDitFile(model?.RawFilePath),
+        });
     }
 
     /// <summary>LongCat-Video-Avatar 1.5 and 1.6. Core may class these DiT shards as Wan, so the match is by folder: a shard in a
