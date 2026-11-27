@@ -1348,19 +1348,29 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         input.TryGet(T2IParamTypes.VideoCFG, out double videoCfg) ? videoCfg
             : input.TryGet(T2IParamTypes.CFGScale, out double baseCfg) ? baseCfg : null;
 
-    /// <summary>Says in the log when the request's steps or CFG are not the ones MovieRoll runs. SwarmUI sends both on a normal request, so they
-    /// are left out of the engine request instead of refused, and the engine applies its recipe defaults.</summary>
+    /// <summary>The request's steps and CFG parameters beside the schedule the engine's descriptor declares for MovieRoll.</summary>
+    private static MovieRollResolver.Schedule MovieRollSchedule(T2IParamInput input, VideoModelDescriptor descriptor)
+    {
+        static MovieRollResolver.ScheduleSetting Setting(T2IParamType param, bool isCfg, double? requested) =>
+            new(param.Name, isCfg, requested,
+                double.TryParse(param.Default, NumberStyles.Float, CultureInfo.InvariantCulture, out double swarm) ? swarm : null);
+        double? Cfg(T2IRegisteredParam<double> param) => input.TryGet(param, out double value) ? value : null;
+        return new(descriptor.Defaults.Steps, descriptor.Defaults.CfgScale,
+        [
+            Setting(T2IParamTypes.Steps.Type, isCfg: false, NullableInt(input, T2IParamTypes.Steps)),
+            Setting(T2IParamTypes.CFGScale.Type, isCfg: true, Cfg(T2IParamTypes.CFGScale)),
+            Setting(T2IParamTypes.VideoSteps.Type, isCfg: false, NullableInt(input, T2IParamTypes.VideoSteps)),
+            Setting(T2IParamTypes.VideoCFG.Type, isCfg: true, Cfg(T2IParamTypes.VideoCFG)),
+        ]);
+    }
+
+    /// <summary>Says in the log when the model's schedule replaces SwarmUI's default steps or CFG. The validator has refused any other value.</summary>
     private static void LogMovieRollSchedule(ModelSpec spec, T2IParamInput input)
     {
-        if (ModelSupport.DescribeSpec(spec) is not VideoModelDescriptor descriptor)
+        if (ModelSupport.DescribeSpec(spec) is VideoModelDescriptor descriptor
+            && MovieRollResolver.FixedScheduleNote(MovieRollSchedule(input, descriptor)) is string note)
         {
-            return;
-        }
-        string note = MovieRollResolver.FixedScheduleNote(RequestedVideoSteps(input), RequestedVideoCfg(input),
-            descriptor.Defaults.Steps, descriptor.Defaults.CfgScale);
-        if (note is not null)
-        {
-            HartsyLogs.Warning(note);
+            HartsyLogs.Info(note);
         }
     }
 
@@ -2008,7 +2018,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         bool animateIntent = reference is not null || poseVideo is not null || faceVideo is not null;
         bool initIsVideo = initImage?.Type?.MetaType == MediaMetaType.Video;
         bool initDrives = animateIntent && initIsVideo;
-        // MovieRoll's schedule is fixed: steps and CFG stay unset, so the engine resolves its recipe defaults.
+        // MovieRoll's schedule is fixed: steps and CFG stay unset, so the engine resolves its recipe defaults. The validator refused chosen values.
         bool fixedSchedule = IsMovieRoll(input);
         return new VideoRequest
         {
@@ -2706,14 +2716,16 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 return false;
             }
         }
-        // MovieRoll: only the distilled text-to-video file runs, it must carry the video class, and it takes no negative prompt or component pick.
-        // Init images, LoRAs and refiners are refused by the checks below, from the engine's descriptor; samplers by the check above.
+        // MovieRoll: only the distilled text-to-video file runs, it must carry the video class, and it takes no negative prompt, component pick
+        // or schedule of its own. Init images, LoRAs and refiners are refused by the checks below; samplers by the check above.
         if (family.Id == MovieRollResolver.FamilyId)
         {
             T2IModel movieRoll = input.Get(T2IParamTypes.Model);
+            VideoModelDescriptor descriptor = (VideoModelDescriptor)ModelSupport.Describe(movieRoll, family);
             IReadOnlyList<string> reasons = MovieRollResolver.Refusals(new MovieRollResolver.Request(movieRoll.RawFilePath,
                 movieRoll.ModelClass?.CompatClass?.ID, input.Get(T2IParamTypes.NegativePrompt),
-                input.Get(T2IParamTypes.VAE) is not null, input.Get(T2IParamTypes.QwenModel) is not null));
+                input.Get(T2IParamTypes.VAE) is not null, input.Get(T2IParamTypes.QwenModel) is not null,
+                MovieRollSchedule(input, descriptor)));
             if (reasons.Count > 0)
             {
                 foreach (string reason in reasons)

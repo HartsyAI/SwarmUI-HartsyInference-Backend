@@ -44,7 +44,22 @@ public static class MovieRollResolver
     /// <param name="NegativePrompt">The request's negative prompt.</param>
     /// <param name="VaeSelected">True when the request picks a VAE.</param>
     /// <param name="QwenSelected">True when the request picks a Qwen text encoder.</param>
-    public sealed record Request(string ModelFile, string AssignedCompatClass, string NegativePrompt, bool VaeSelected, bool QwenSelected);
+    /// <param name="Schedule">The request's steps and CFG beside the ones the model runs.</param>
+    public sealed record Request(string ModelFile, string AssignedCompatClass, string NegativePrompt, bool VaeSelected, bool QwenSelected,
+        Schedule Schedule);
+
+    /// <summary>The model's fixed schedule and the request's steps and CFG settings.</summary>
+    /// <param name="Steps">The step count the model runs, from the engine descriptor.</param>
+    /// <param name="Cfg">The CFG scale the model runs, from the engine descriptor.</param>
+    /// <param name="Settings">Every steps and CFG parameter the request can carry.</param>
+    public sealed record Schedule(int Steps, double Cfg, IReadOnlyList<ScheduleSetting> Settings);
+
+    /// <summary>One steps or CFG parameter of a request.</summary>
+    /// <param name="Name">The parameter's name on the gen page.</param>
+    /// <param name="IsCfg">True for a CFG scale, false for a step count.</param>
+    /// <param name="Requested">The request's value, or null when unset.</param>
+    /// <param name="SwarmDefault">SwarmUI's default for the parameter, or null when it declares no number.</param>
+    public sealed record ScheduleSetting(string Name, bool IsCfg, double? Requested, double? SwarmDefault);
 
     /// <summary>True when <paramref name="path"/> is a MovieRoll DiT by its layout: a .safetensors file at most three folders below a folder
     /// whose name contains "movieroll", whose folders name a release or whose file name is <c>model.safetensors</c>.</summary>
@@ -107,7 +122,7 @@ public static class MovieRollResolver
             // The resolution is named too: a file SwarmUI has already written its own header into carries the image resolution there.
             reasons.Add($"SwarmUI classes this MovieRoll file as '{request.AssignedCompatClass ?? "unknown"}', not as a video model. "
                 + $"Create '{sidecar}' containing {{\"modelspec.architecture\": \"{CompatClassId}\", \"modelspec.resolution\": \"864x480\"}}, "
-                + "then restart SwarmUI.");
+                + "then press Reset Model Metadata on the Utilities tab. A restart alone keeps the class SwarmUI cached.");
         }
         if (!string.IsNullOrWhiteSpace(request.NegativePrompt))
         {
@@ -121,29 +136,46 @@ public static class MovieRollResolver
         {
             reasons.Add("MovieRoll always uses its own Qwen2.5-VL text encoder. Unset Qwen Model.");
         }
+        reasons.AddRange(ScheduleRefusals(request.Schedule));
         return reasons;
     }
 
-    /// <summary>The log line for steps or CFG that differ from the model's fixed schedule, or null when both match or are unset.</summary>
-    /// <param name="requestedSteps">The request's step count.</param>
-    /// <param name="requestedCfg">The request's CFG scale.</param>
-    /// <param name="steps">The engine descriptor's step count.</param>
-    /// <param name="cfg">The engine descriptor's CFG scale.</param>
-    public static string FixedScheduleNote(int? requestedSteps, double? requestedCfg, int steps, double cfg)
+    /// <summary>One reason for each steps or CFG value the user chose that the model cannot run. A value that is unset, the model's own, or
+    /// SwarmUI's default for its parameter is not a choice.</summary>
+    private static IEnumerable<string> ScheduleRefusals(Schedule schedule)
     {
-        List<string> ignored = [];
-        if (requestedSteps is int wantedSteps && wantedSteps != steps)
+        ArgumentNullException.ThrowIfNull(schedule);
+        foreach (ScheduleSetting setting in schedule.Settings)
         {
-            ignored.Add($"Steps {wantedSteps}");
+            double model = ModelValue(schedule, setting);
+            if (setting.Requested is not double value || Same(value, model) || Same(value, setting.SwarmDefault))
+            {
+                continue;
+            }
+            string fallback = setting.SwarmDefault is double swarm ? FormattableString.Invariant($" or at SwarmUI's default {swarm}") : "";
+            yield return FormattableString.Invariant(
+                $"MovieRoll runs {schedule.Steps} steps at CFG {schedule.Cfg}, so it cannot use {setting.Name} {value}. Set {setting.Name} to {model}")
+                + $", or leave it unset{fallback}.";
         }
-        if (requestedCfg is double wantedCfg && Math.Abs(wantedCfg - cfg) > 1e-6)
-        {
-            ignored.Add(FormattableString.Invariant($"CFG Scale {wantedCfg}"));
-        }
-        return ignored.Count == 0
-            ? null
-            : FormattableString.Invariant($"MovieRoll runs its fixed {steps}-step schedule at CFG {cfg}; ignoring {string.Join(" and ", ignored)}.");
     }
+
+    /// <summary>The log line naming the SwarmUI defaults the model's schedule replaces, or null when the request's values are the model's own or
+    /// unset. Chosen values never get this far: <see cref="Refusals"/> refuses them.</summary>
+    public static string FixedScheduleNote(Schedule schedule)
+    {
+        ArgumentNullException.ThrowIfNull(schedule);
+        List<string> replaced = [.. schedule.Settings
+            .Where(setting => setting.Requested is double value && !Same(value, ModelValue(schedule, setting)) && Same(value, setting.SwarmDefault))
+            .Select(setting => FormattableString.Invariant($"{setting.Name} {setting.Requested}"))];
+        return replaced.Count == 0
+            ? null
+            : FormattableString.Invariant($"MovieRoll runs {schedule.Steps} steps at CFG {schedule.Cfg}, replacing SwarmUI's default ")
+                + string.Join(" and ", replaced) + ".";
+    }
+
+    private static double ModelValue(Schedule schedule, ScheduleSetting setting) => setting.IsCfg ? schedule.Cfg : schedule.Steps;
+
+    private static bool Same(double value, double? other) => other is double number && Math.Abs(value - number) <= 1e-6;
 
     /// <summary>The name tokens of the folders from the nearest "movieroll" folder down to the file's folder, or null when none of the file's
     /// three closest folders is a "movieroll" folder.</summary>

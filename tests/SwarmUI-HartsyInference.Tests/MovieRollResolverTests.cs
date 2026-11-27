@@ -9,7 +9,18 @@ public sealed class MovieRollResolverTests
     private const string Good = "models/Stable-Diffusion/MovieRoll/distilled-t2v/model.safetensors";
 
     private static MovieRollResolver.Request Request(string file = Good, string compat = "movieroll", string negative = "",
-        bool vae = false, bool qwen = false) => new(file, compat, negative, vae, qwen);
+        bool vae = false, bool qwen = false, MovieRollResolver.Schedule schedule = null) =>
+        new(file, compat, negative, vae, qwen, schedule ?? Schedule(20, 7));
+
+    // The model runs 5 steps at CFG 1; the parameter defaults here stand for the ones SwarmUI declares.
+    private static MovieRollResolver.Schedule Schedule(double? steps = null, double? cfg = null, double? videoSteps = null,
+        double? videoCfg = null) => new(5, 1,
+        [
+            new("Steps", false, steps, 20),
+            new("CFG Scale", true, cfg, 7),
+            new("Video Steps", false, videoSteps, 20),
+            new("Video CFG", true, videoCfg, 7),
+        ]);
 
     [Theory]
     [InlineData(Good)]
@@ -81,19 +92,63 @@ public sealed class MovieRollResolverTests
             reason => Assert.Contains("Qwen Model", reason));
     }
 
-    [Fact]
-    public void AMatchingOrUnsetScheduleSaysNothing()
+    [Theory]
+    // Unset.
+    [InlineData(null, null, null, null)]
+    // The model's own values.
+    [InlineData(5.0, 1.0, 5.0, 1.0)]
+    // SwarmUI's defaults, alone and mixed with the model's values.
+    [InlineData(20.0, 7.0, null, null)]
+    [InlineData(20.0, 7.0, 20.0, 7.0)]
+    [InlineData(5.0, 7.0, 20.0, 1.0)]
+    public void AnUnsetModelOrSwarmDefaultScheduleIsAccepted(double? steps, double? cfg, double? videoSteps, double? videoCfg)
     {
-        Assert.Null(MovieRollResolver.FixedScheduleNote(5, 1.0, 5, 1.0));
-        Assert.Null(MovieRollResolver.FixedScheduleNote(null, null, 5, 1.0));
+        Assert.Empty(MovieRollResolver.Refusals(Request(schedule: Schedule(steps, cfg, videoSteps, videoCfg))));
+    }
+
+    [Theory]
+    [InlineData(30.0, null, null, null, "Steps 30")]
+    // One step off the model's own, and a value that is another parameter's default.
+    [InlineData(6.0, null, null, null, "Steps 6")]
+    [InlineData(7.0, null, null, null, "Steps 7")]
+    [InlineData(null, 3.5, null, null, "CFG Scale 3.5")]
+    [InlineData(null, 20.0, null, null, "CFG Scale 20")]
+    [InlineData(null, null, 8.0, null, "Video Steps 8")]
+    [InlineData(null, null, null, 6.0, "Video CFG 6")]
+    // A chosen core value is refused even when the video group's value would take precedence.
+    [InlineData(40.0, null, 5.0, null, "Steps 40")]
+    public void AChosenStepsOrCfgIsRefusedByName(double? steps, double? cfg, double? videoSteps, double? videoCfg, string named)
+    {
+        string reason = Assert.Single(MovieRollResolver.Refusals(Request(schedule: Schedule(steps, cfg, videoSteps, videoCfg))));
+        Assert.StartsWith($"MovieRoll runs 5 steps at CFG 1, so it cannot use {named}.", reason);
     }
 
     [Fact]
-    public void SwarmsDefaultStepsAndCfgAreReportedAsIgnored()
+    public void TheScheduleRefusalSaysWhatToSet()
     {
-        Assert.Equal("MovieRoll runs its fixed 5-step schedule at CFG 1; ignoring Steps 20 and CFG Scale 7.",
-            MovieRollResolver.FixedScheduleNote(20, 7.0, 5, 1.0));
-        Assert.Equal("MovieRoll runs its fixed 5-step schedule at CFG 1; ignoring CFG Scale 3.5.",
-            MovieRollResolver.FixedScheduleNote(5, 3.5, 5, 1.0));
+        Assert.Equal("MovieRoll runs 5 steps at CFG 1, so it cannot use Steps 30. Set Steps to 5, or leave it unset or at SwarmUI's default 20.",
+            Assert.Single(MovieRollResolver.Refusals(Request(schedule: Schedule(30)))));
+    }
+
+    [Fact]
+    public void EveryChosenValueIsNamed()
+    {
+        Assert.Equal(2, MovieRollResolver.Refusals(Request(schedule: Schedule(30, 4))).Count);
+    }
+
+    [Fact]
+    public void AModelOrUnsetScheduleSaysNothing()
+    {
+        Assert.Null(MovieRollResolver.FixedScheduleNote(Schedule(5, 1)));
+        Assert.Null(MovieRollResolver.FixedScheduleNote(Schedule()));
+    }
+
+    [Fact]
+    public void ReplacedSwarmDefaultsAreNamedInTheNote()
+    {
+        Assert.Equal("MovieRoll runs 5 steps at CFG 1, replacing SwarmUI's default Steps 20 and CFG Scale 7.",
+            MovieRollResolver.FixedScheduleNote(Schedule(20, 7)));
+        Assert.Equal("MovieRoll runs 5 steps at CFG 1, replacing SwarmUI's default CFG Scale 7.",
+            MovieRollResolver.FixedScheduleNote(Schedule(5, 7)));
     }
 }
