@@ -775,6 +775,12 @@ public class HartsyInferenceBackend : AbstractT2IBackend
                 // text-to-image but not on a secondary path (Boogu, OmniGen 2, Flux.1), which the capability table cannot express.
                 throw new SwarmUserErrorException($"HartsyInference: {unsupported.Message}");
             }
+            catch (VideoPlanningException refused)
+            {
+                // The planner's blocking issues (a request the family cannot run, e.g. the avatar without driving speech). Both the buffered
+                // and the streaming video paths reach this; without it Swarm shows only "Something went wrong".
+                throw new SwarmUserErrorException($"HartsyInference: {refused.Message}");
+            }
 
             long totalMs = Environment.TickCount64 - startMs;
             int idx = 0;
