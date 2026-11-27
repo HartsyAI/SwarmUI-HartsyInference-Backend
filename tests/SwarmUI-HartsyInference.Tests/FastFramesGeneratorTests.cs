@@ -75,6 +75,31 @@ public sealed class FastFramesGeneratorTests : IDisposable
     }
 
     [Fact]
+    public void AnLGeneratorInAnLFolderIsAFastFramesFile()
+    {
+        // Core classes this file as Wan 2.1 14B; the routing in ModelSupport.CompatIdOf sends it to FastFrames because of its folder.
+        string dir = Folder("fastframes-l", "dit.safetensors");
+
+        Assert.True(FastFramesGenerator.IsFastFramesFile(Path.Combine(dir, "dit.safetensors")));
+    }
+
+    [Fact]
+    public void AWanFileOutsideAFastFramesFolderIsNotAFastFramesFile()
+    {
+        string dir = Folder("wan21-14b", "dit.safetensors");
+
+        Assert.False(FastFramesGenerator.IsFastFramesFile(Path.Combine(dir, "dit.safetensors")));
+    }
+
+    [Fact]
+    public void AFastFramesAncestorDoesNotCountForAFileInASubfolder()
+    {
+        string dir = Folder("fastframes-l/other", "dit.safetensors");
+
+        Assert.False(FastFramesGenerator.IsFastFramesFile(Path.Combine(dir, "dit.safetensors")));
+    }
+
+    [Fact]
     public void AnEmptySelectionRefuses()
     {
         Assert.Throws<InvalidOperationException>(() => FastFramesGenerator.Resolve(""));

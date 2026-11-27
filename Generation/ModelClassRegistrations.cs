@@ -115,14 +115,8 @@ public static class ModelClassRegistrations
 
     private static bool IsFastFramesFolder(string path)
     {
-        // Only the model file's own folder (or the checkpoint folder itself) counts, not any ancestor.
-        string folder = ResolveLanceFolder(path);
-        if (string.IsNullOrEmpty(folder))
-        {
-            return false;
-        }
-        string name = Path.GetFileName(folder.TrimEnd('/', '\\'));
-        return name.Contains("fastframes", StringComparison.OrdinalIgnoreCase);
+        // Only the model file's own folder counts, not an ancestor. The predicate is shared with the routing in ModelSupport.CompatIdOf.
+        return FastFramesGenerator.IsFastFramesFile(path);
     }
 
     /// <summary>F-Lite (Freepik 10B): detected by its cross-attention context projection.</summary>

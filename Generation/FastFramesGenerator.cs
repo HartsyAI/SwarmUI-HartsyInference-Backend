@@ -16,6 +16,22 @@ public static class FastFramesGenerator
     /// <summary>The L generator, a safetensors file.</summary>
     public const string LGenerator = "dit.safetensors";
 
+    /// <summary>True when the file sits in a folder whose own name contains "fastframes" (FastFrames/fastframes-s, fastframes-l). Only the
+    /// file's own folder counts, not an ancestor.</summary>
+    public static bool IsFastFramesFile(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return false;
+        }
+        string folder = Path.GetDirectoryName(path);
+        if (string.IsNullOrEmpty(folder))
+        {
+            return false;
+        }
+        return Path.GetFileName(folder).Contains("fastframes", StringComparison.OrdinalIgnoreCase);
+    }
+
     /// <summary>Returns the generator path for the selected FastFrames file. A selected generator is returned as it is; any other
     /// file (a companion) resolves to the S generator, then the L generator, in the same folder.</summary>
     /// <exception cref="InvalidOperationException">Neither generator is in the folder.</exception>

@@ -22,7 +22,7 @@ public static class ImageInputs
     /// <summary>The route's <c>inputs</c> object for a concrete model; null when its compat class is not drivable here.</summary>
     public static JObject Describe(T2IModel model)
     {
-        string compat = model?.ModelClass?.CompatClass?.ID;
+        string compat = ModelSupport.CompatIdOf(model);
         if (!ModelSupport.IsArchitectureSupported(compat))
         {
             return null;

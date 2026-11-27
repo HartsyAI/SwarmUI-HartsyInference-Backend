@@ -117,6 +117,18 @@ public static class ModelSupport
         return _families.TryGetValue(compatClass, out Family family) ? family : null;
     }
 
+    /// <summary>The compat class ID that routes <paramref name="model"/>. A model whose own folder is a FastFrames folder routes to the
+    /// FastFrames family whatever class core assigned: core classifies the L <c>dit.safetensors</c> as Wan 2.1 14B, and that would send it
+    /// down the Wan route. Every other model keeps its class.</summary>
+    public static string CompatIdOf(T2IModel model)
+    {
+        if (model?.RawFilePath is not null && FastFramesGenerator.IsFastFramesFile(model.RawFilePath))
+        {
+            return ModelClassRegistrations.FastFramesVideoCompatClassId;
+        }
+        return model?.ModelClass?.CompatClass?.ID;
+    }
+
     /// <summary>True when the Engine can drive <paramref name="compatClass"/>: it is mapped to a family with a registered recipe (music descriptors are always registered).</summary>
     public static bool IsArchitectureSupported(string compatClass)
     {
@@ -148,7 +160,7 @@ public static class ModelSupport
     /// <summary>The composition features the Engine applies to <paramref name="model"/>'s resolved variant, narrowed from <see cref="SupportedFeatures(string)"/> (a base Qwen-Image has no reference editing; its Edit builds do). <see cref="ImageFeatures.None"/> for non-image models.</summary>
     public static ImageFeatures SupportedFeatures(SwarmUI.Text2Image.T2IModel model)
     {
-        Family family = Resolve(model?.ModelClass?.CompatClass?.ID);
+        Family family = Resolve(CompatIdOf(model));
         return family is null || family.Kind != Kind.Image
             ? ImageFeatures.None
             : (Describe(model, family) as ImageModelDescriptor)?.Features ?? ImageFeatures.None;
@@ -166,7 +178,7 @@ public static class ModelSupport
     /// <summary>The conditioning the Engine applies to <paramref name="model"/>'s resolved variant. Wan's VACE, Animate and S2V builds share the family compat classes and are told apart engine-side, so a driving video is accepted on an Animate checkpoint under <c>wan-21-14b</c>. <see cref="VideoFeatures.None"/> for non-video models.</summary>
     public static VideoFeatures SupportedVideoFeatures(SwarmUI.Text2Image.T2IModel model)
     {
-        Family family = Resolve(model?.ModelClass?.CompatClass?.ID);
+        Family family = Resolve(CompatIdOf(model));
         if (family is null || family.Kind != Kind.Video)
         {
             return VideoFeatures.None;

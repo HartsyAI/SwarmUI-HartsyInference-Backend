@@ -665,7 +665,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         {
             return false;
         }
-        string compat = model.ModelClass?.CompatClass?.ID;
+        string compat = ModelSupport.CompatIdOf(model);
         if (!ModelSupport.IsArchitectureSupported(compat))
         {
             HartsyLogs.Debug($"LoadModel: architecture '{compat}' is not supported here. Returning false so another backend can handle it.");
@@ -710,7 +710,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         {
             T2IModel model = input.Get(T2IParamTypes.Model)
                 ?? throw new InvalidOperationException("No model selected.");
-            string compat = model.ModelClass?.CompatClass?.ID;
+            string compat = ModelSupport.CompatIdOf(model);
             ModelSupport.Family family = ModelSupport.Resolve(compat);
             if (family is null || !ModelSupport.IsArchitectureSupported(compat))
             {
@@ -2076,7 +2076,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
     private static bool IsWanAnimate(T2IParamInput input)
     {
         T2IModel model = input.Get(T2IParamTypes.Model);
-        string compat = model?.ModelClass?.CompatClass?.ID;
+        string compat = ModelSupport.CompatIdOf(model);
         return compat is not null && compat.StartsWith("wan-2", StringComparison.Ordinal)
             && (ModelSupport.SupportedVideoFeatures(model) & VideoFeatures.DrivingVideo) != 0;
     }
@@ -2490,7 +2490,7 @@ public class HartsyInferenceBackend : AbstractT2IBackend
         {
             return true; // let other validators speak
         }
-        string compat = model.ModelClass?.CompatClass?.ID;
+        string compat = ModelSupport.CompatIdOf(model);
         if (!ModelSupport.IsArchitectureSupported(compat))
         {
             input.RefusalReasons.Add($"HartsyInference: {ModelSupport.WhyNotSupported(compat)}");
