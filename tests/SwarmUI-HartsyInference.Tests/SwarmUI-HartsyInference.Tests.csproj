@@ -12,9 +12,10 @@
         <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
     </ItemGroup>
     <ItemGroup>
-        <!-- Only the path resolvers are compiled here: neither has a SwarmUI or engine dependency, so the tests need no SwarmUI build. -->
+        <!-- Only the path resolvers are compiled here: none has a SwarmUI or engine dependency, so the tests need no SwarmUI build. -->
         <Compile Include="..\..\Generation\FastFramesGenerator.cs" Link="FastFramesGenerator.cs" />
         <Compile Include="..\..\Generation\LongCatAvatarResolver.cs" Link="LongCatAvatarResolver.cs" />
         <Compile Include="..\..\Generation\LongCatVideoResolver.cs" Link="LongCatVideoResolver.cs" />
+        <Compile Include="..\..\Generation\MovieRollResolver.cs" Link="MovieRollResolver.cs" />
     </ItemGroup>
 </Project>

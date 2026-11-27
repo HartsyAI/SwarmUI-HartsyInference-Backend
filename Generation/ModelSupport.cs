@@ -99,6 +99,7 @@ public static class ModelSupport
         [ModelClassRegistrations.LongCatAvatarCompatClassId] = new("longcat-avatar", Kind.Video),
         [ModelClassRegistrations.LongCatVideoCompatClassId] = new("longcat-video", Kind.Video),
         [ModelClassRegistrations.FastFramesVideoCompatClassId] = new("fastframes", Kind.Video),
+        [ModelClassRegistrations.MovieRollCompatClassId] = new(MovieRollResolver.FamilyId, Kind.Video),
         // Core owns the minimax-h3 compat class. Map it, do not re-register it; keying off core's constant means a rename cannot silently match nothing.
         [T2IModelClassSorter.CompatMiniMaxH3.ID] = new("minimax-h3", Kind.Video),
 
@@ -120,9 +121,10 @@ public static class ModelSupport
         return _families.TryGetValue(compatClass, out Family family) ? family : null;
     }
 
-    /// <summary>The compat class ID that routes <paramref name="model"/>. A LongCat avatar DiT shard routes to the LongCat family and a
-    /// model whose own folder is a FastFrames folder to the FastFrames family, whatever class core assigned: core may class the LongCat
-    /// shards and the FastFrames L <c>dit.safetensors</c> as Wan. Every other model keeps its class.</summary>
+    /// <summary>The compat class ID that routes <paramref name="model"/>. A LongCat avatar DiT shard routes to the LongCat family, a
+    /// model whose own folder is a FastFrames folder to the FastFrames family, and a file in a MovieRoll layout to MovieRoll, whatever
+    /// class core assigned: core may class the LongCat shards and the FastFrames L <c>dit.safetensors</c> as Wan, and classes the
+    /// MovieRoll DiT as Hunyuan Image. Every other model keeps its class.</summary>
     public static string CompatIdOf(T2IModel model)
     {
         if (model?.RawFilePath is not null && LongCatAvatarResolver.IsAvatarDitFile(model.RawFilePath))
@@ -136,6 +138,10 @@ public static class ModelSupport
         if (model?.RawFilePath is not null && FastFramesGenerator.IsFastFramesFile(model.RawFilePath))
         {
             return ModelClassRegistrations.FastFramesVideoCompatClassId;
+        }
+        if (model?.RawFilePath is not null && MovieRollResolver.IsMovieRollFile(model.RawFilePath))
+        {
+            return ModelClassRegistrations.MovieRollCompatClassId;
         }
         return model?.ModelClass?.CompatClass?.ID;
     }
