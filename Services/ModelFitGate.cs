@@ -178,7 +178,7 @@ public static class ModelFitGate
             return RequestFit.NoOpinion("pinned to another backend type");
         }
         T2IModel model = input.Get(T2IParamTypes.Model);
-        string compat = model?.ModelClass?.CompatClass?.ID;
+        string compat = ModelSupport.CompatIdOf(model);
         if (model is null || !ModelSupport.IsArchitectureSupported(compat))
         {
             return RequestFit.NoOpinion("not a HartsyInference model");
